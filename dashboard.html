@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Uzum Pro</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#050a0f;font-family:system-ui,sans-serif;color:#e2eaf2;max-width:430px;margin:0 auto}
+.header{padding:16px;background:linear-gradient(180deg,rgba(0,255,163,.05),transparent);border-bottom:1px solid rgba(255,255,255,.08)}
+.logo{font-size:20px;font-weight:900;margin-bottom:10px}
+.logo span{color:#00ffa3}
+.status{display:inline-flex;align-items:center;gap:6px;background:rgba(0,255,163,.08);border:1px solid rgba(0,255,163,.2);border-radius:20px;padding:4px 12px;font-size:11px;font-weight:600;color:#00ffa3}
+.dot{width:7px;height:7px;border-radius:50%;background:#00ffa3}
+.shops{display:flex;gap:8px;overflow-x:auto;padding:10px 16px 6px;scrollbar-width:none}
+.shops::-webkit-scrollbar{display:none}
+.shop-btn{padding:6px 14px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid rgba(255,255,255,.15);background:transparent;color:#64748b;white-space:nowrap;font-family:inherit}
+.shop-btn.active{border-color:#00ffa3;background:rgba(0,255,163,.1);color:#00ffa3}
+.tabs{display:flex;gap:4px;padding:8px 16px 0}
+.tab{flex:1;padding:9px 4px;background:transparent;border:none;color:#4a6070;font-size:11px;font-weight:600;cursor:pointer;border-radius:10px;font-family:inherit}
+.tab.active{background:rgba(0,255,163,.08);color:#00ffa3}
+.content{padding:12px 16px 90px;overflow-y:auto}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.stat{background:#0d1520;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:14px;text-align:center}
+.stat-icon{font-size:22px;margin-bottom:4px}
+.stat-val{font-size:20px;font-weight:900;margin-bottom:2px}
+.stat-lbl{font-size:10px;color:#4a6070}
+.card{background:#0d1520;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:14px;margin-bottom:10px}
+.card-title{font-size:10px;color:#4a6070;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:10px}
+.product{background:#0d1520;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:14px;margin-bottom:10px}
+.product-top{display:flex;gap:10px;align-items:flex-start;margin-bottom:10px}
+.product-img{width:56px;height:56px;border-radius:10px;object-fit:cover;flex-shrink:0;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:20px}
+.product-img img{width:100%;height:100%;border-radius:10px;object-fit:cover}
+.product-info{flex:1;min-width:0}
+.product-name{font-weight:700;font-size:13px;line-height:1.3;margin-bottom:2px}
+.product-sku{font-size:10px;color:#00ffa3;font-weight:600;margin-bottom:2px}
+.product-id{font-size:9px;color:#4a6070}
+.badge{display:inline-block;padding:3px 9px;border-radius:20px;font-size:10px;font-weight:700;flex-shrink:0}
+.b-ok{background:rgba(0,255,163,.15);color:#00ffa3}
+.b-low{background:rgba(251,191,36,.15);color:#fbbf24}
+.b-out{background:rgba(248,113,113,.15);color:#f87171}
+.b-blocked{background:rgba(100,100,100,.2);color:#888}
+.pbar{background:rgba(255,255,255,.06);border-radius:4px;height:5px;overflow:hidden;margin-bottom:8px}
+.pbar-fill{height:100%;border-radius:4px;transition:width .8s}
+.p3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:8px}
+.p3-item{background:rgba(0,0,0,.3);border-radius:8px;padding:7px 8px}
+.p3-val{font-size:12px;font-weight:700}
+.p3-lbl{font-size:9px;color:#4a6070;margin-top:1px}
+.cost-box{background:rgba(0,255,163,.04);border:1px solid rgba(0,255,163,.15);border-radius:10px;padding:10px 12px;margin-bottom:8px}
+.cost-row{display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px}
+.profit-row{display:flex;justify-content:space-between;font-size:13px;font-weight:700;border-top:1px solid rgba(255,255,255,.08);padding-top:6px;margin-top:4px}
+.warn{background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.2);border-radius:10px;padding:8px 12px;font-size:11px;color:#f87171;margin-bottom:6px}
+.info{background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.2);border-radius:10px;padding:8px 12px;font-size:11px;color:#38bdf8;margin-bottom:6px}
+.add-cost{background:rgba(0,255,163,.04);border:1px dashed rgba(0,255,163,.3);border-radius:10px;padding:10px;text-align:center;cursor:pointer;margin-bottom:8px}
+.btn-edit{width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:8px;color:#64748b;font-size:11px;cursor:pointer;font-family:inherit}
+.empty{text-align:center;padding:40px 0;color:#4a6070;font-size:13px}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:flex-end;z-index:200}
+.modal{background:#0d1520;border-radius:20px 20px 0 0;padding:20px;width:100%;max-width:430px;margin:0 auto;border:1px solid rgba(255,255,255,.08);border-bottom:none;max-height:90vh;overflow-y:auto}
+.modal-title{font-weight:900;font-size:16px;margin-bottom:4px}
+.modal-sub{font-size:11px;color:#4a6070;margin-bottom:16px}
+.inp-grp{margin-bottom:12px}
+.inp-lbl{font-size:11px;color:#64748b;margin-bottom:4px}
+.inp{background:rgba(255,255,255,.04);border:1.5px solid rgba(255,255,255,.1);border-radius:10px;padding:10px 14px;color:#e2eaf2;font-size:13px;width:100%;outline:none;font-family:inherit}
+.inp:focus{border-color:#00ffa3}
+.profit-preview{background:rgba(0,0,0,.4);border-radius:12px;padding:12px;margin:12px 0}
+.btn-save{background:linear-gradient(135deg,#00ffa3,#00d4aa);border:none;border-radius:12px;padding:13px;color:#050a0f;font-weight:800;font-size:14px;cursor:pointer;width:100%;font-family:inherit}
+.ai-bar{position:fixed;bottom:0;left:0;right:0;max-width:430px;margin:0 auto;padding:10px 16px 20px;background:linear-gradient(0deg,#050a0f 70%,transparent);display:flex;gap:8px}
+.chat-inp{background:#0d1520;border:1.5px solid rgba(255,255,255,.1);border-radius:12px;padding:11px 14px;color:#e2eaf2;font-size:13px;flex:1;outline:none;font-family:inherit}
+.chat-inp:focus{border-color:#00ffa3}
+.send-btn{background:linear-gradient(135deg,#00ffa3,#00d4aa);border:none;border-radius:12px;width:44px;height:44px;cursor:pointer;font-size:18px;flex-shrink:0}
+.send-btn:disabled{opacity:.4}
+.msg-u{display:flex;justify-content:flex-end;margin-bottom:10px}
+.msg-b{display:flex;gap:8px;align-items:flex-end;margin-bottom:10px}
+.bubble-u{max-width:82%;background:linear-gradient(135deg,#00ffa3,#00d4aa);color:#050a0f;padding:11px 14px;border-radius:18px 18px 4px 18px;font-size:13px;line-height:1.6;font-weight:500;white-space:pre-wrap}
+.bubble-b{max-width:82%;background:#0d1520;border:1px solid rgba(255,255,255,.08);padding:11px 14px;border-radius:18px 18px 18px 4px;font-size:13px;line-height:1.6;white-space:pre-wrap}
+.avatar{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#00ffa3,#00d4aa);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+.quick-btns{display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;scrollbar-width:none}
+.quick-btn{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:7px 12px;color:#64748b;font-size:11px;cursor:pointer;white-space:nowrap;font-family:inherit}
+.notif-item{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:12px;margin-bottom:8px}
+.n-danger{background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.2)}
+.n-warn{background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2)}
+.n-info{background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.2)}
+.ndot{width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:5px}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="header">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="logo">Uzum <span>Pro</span> 🚀</div>
+      <div class="status"><div class="dot"></div><span id="statusText">Yuklanmoqda...</span></div>
+    </div>
+  </div>
+  <div class="shops" id="shopsList"></div>
+  <div class="tabs">
+    <button class="tab active" id="tab-bosh" onclick="switchTab('bosh')">📊 Bosh</button>
+    <button class="tab" id="tab-tovar" onclick="switchTab('tovar')">📦 Tovarlar</button>
+    <button class="tab" id="tab-ai" onclick="switchTab('ai')">🤖 AI</button>
+    <button class="tab" id="tab-ogoh" onclick="switchTab('ogoh')">🔔 Ogoh.</button>
+  </div>
+  <div class="content" id="content"></div>
+</div>
+
+<div id="modal" style="display:none" class="modal-overlay">
+  <div class="modal">
+    <div class="modal-title" id="mTitle"></div>
+    <div class="modal-sub" id="mSub"></div>
+    <div class="inp-grp"><div class="inp-lbl">Haqiqiy tannarx (so'm/dona)</div><input class="inp" type="number" id="iCost" placeholder="Xitoydan kelgan narx" oninput="refreshPreview()"></div>
+    <div class="inp-grp"><div class="inp-lbl">Saqlash (so'm/oy)</div><input class="inp" type="number" id="iStorage" placeholder="Ombor to'lovi" oninput="refreshPreview()"></div>
+    <div class="inp-grp"><div class="inp-lbl">Reklama (so'm/kun)</div><input class="inp" type="number" id="iAds" placeholder="BOOST va boshqalar" oninput="refreshPreview()"></div>
+    <div class="inp-grp"><div class="inp-lbl">Uy zaxirasi (dona)</div><input class="inp" type="number" id="iHome" placeholder="Uyda nechta bor"></div>
+    <div class="inp-grp"><div class="inp-lbl">Kunlik sotuv (dona)</div><input class="inp" type="number" id="iDaily" placeholder="Taxminan kuniga nechta" oninput="refreshPreview()"></div>
+    <div class="profit-preview" id="preview"></div>
+    <button class="btn-save" onclick="saveCost()">Saqlash</button>
+    <div style="height:10px"></div>
+  </div>
+</div>
+
+<div id="aiBar" style="display:none" class="ai-bar">
+  <input class="chat-inp" id="chatInput" placeholder="Savolingizni yozing..." onkeydown="if(event.key==='Enter')sendAI()">
+  <button class="send-btn" id="sendBtn" onclick="sendAI()">↑</button>
+</div>
+
+<script>
+const SERVER = 'https://uzum-pro-server-production.up.railway.app';
+const COMM = {elektronika:17,aksessuarlar:25,kiyim:25,poyabzal:25,kosmetika:20,sport:20,bolalar:15,uy:20,avto:18};
+function getComm(cat){ for(const [k,v] of Object.entries(COMM)) if((cat||'').toLowerCase().includes(k)) return v; return 20; }
+function getLog(gab){ return gab==='СГТ'?8000:gab==='КГТ'?20000:5000; }
+function fmt(n){ return Math.round(n||0).toLocaleString('uz-UZ'); }
+
+let products=[], shops=[], selectedShop='61122', costs={}, tab='bosh', editProd=null;
+let aiMsgs=[{r:'b',t:'Salom! Men sizning AI maslahatchiingizman. Savol bering!'}], aiLoading=false;
+
+try{ costs=JSON.parse(localStorage.getItem('uzum_costs')||'{}'); }catch(e){}
+try{ shops=JSON.parse(localStorage.getItem('uzum_shops')||'[]'); }catch(e){}
+if(!shops.length) shops=[{id:'61122',name:'Dokon 1'}];
+selectedShop=shops[0].id;
+
+function calcP(p){
+  const c=costs[p.id]||{};
+  const price=p.price||0;
+  const comm=price*getComm(p.category)/100;
+  const log=getLog(p.gab);
+  const stor=Number(c.storage||0);
+  const ads=Number(c.ads||0);
+  const cost=Number(c.realCost||0);
+  const profit=price-comm-log-stor-ads-cost;
+  const margin=price>0?(profit/price*100).toFixed(1):0;
+  const stock=p.stock>0?p.stock:0;
+  const home=Number(c.homeStock||0);
+  const daily=Number(c.dailySales||0);
+  const days=stock>0&&daily>0?Math.floor(stock/daily):null;
+  return{price,comm,log,stor,ads,cost,profit,margin,days,needOrder:days!==null&&days<28};
+}
+
+function status(p){
+  if(p.isBlocked) return 'blocked';
+  if(p.stock===0) return 'out';
+  const c=costs[p.id]||{};
+  const d=Number(c.dailySales||0);
+  if(d>0){const days=p.stock/d; if(days<3)return 'critical'; if(days<28)return 'low';}
+  return 'ok';
+}
+
+function badge(s){
+  const m={ok:'<span class="badge b-ok">Yetarli</span>',low:'<span class="badge b-low">Kam</span>',critical:'<span class="badge b-out">Kritik!</span>',out:'<span class="badge b-out">Tugagan</span>',blocked:'<span class="badge b-blocked">Bloklangan</span>'};
+  return m[s]||m.ok;
+}
+
+async function fetchData(){
+  try{
+    const r=await fetch(SERVER+'/api/products?shopId='+selectedShop+'&size=100&page=0');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const data=await r.json();
+    const list=data.productList||data.data||data||[];
+    products=[];
+    list.forEach(p=>{
+      const blocked=p.status?.value==='PERM_BANNED'||p.status?.value==='BLOCKED'||p.blocked===true;
+      const skus=p.skuList||[];
+      if(!skus.length){
+        products.push({id:String(p.productId||p.id),productId:p.productId,name:p.title||'Nomsiz',skuTitle:'',skuId:'',price:p.price||0,stock:blocked?-1:0,isBlocked:blocked,category:p.category?.title||'',gab:'МГТ',image:p.previewImg||p.image||''});
+      } else {
+        skus.forEach(sku=>{
+          products.push({id:String(p.productId||p.id)+'_'+String(sku.skuId||sku.id||''),productId:p.productId,name:p.title||'Nomsiz',skuTitle:sku.skuFullTitle||sku.skuTitle||'',skuId:String(sku.skuId||sku.id||''),price:sku.purchasePrice||sku.price||p.price||0,stock:blocked?-1:(sku.quantityActive||sku.quantity||0),isBlocked:blocked,category:p.category?.title||'',gab:sku.gab||'МГТ',image:sku.image||p.previewImg||p.image||''});
+        });
+      }
+    });
+    document.getElementById('statusText').textContent='✅ '+list.length+' tovar / '+products.length+' SKU';
+    renderShops();
+    render();
+  }catch(e){
+    document.getElementById('statusText').textContent='❌ '+e.message;
+    render();
+  }
+}
+
+function renderShops(){
+  const c=document.getElementById('shopsList');
+  c.innerHTML=shops.map(s=>`<button class="shop-btn ${selectedShop===s.id?'active':''}" onclick="changeShop('${s.id}')">${s.name}</button>`).join('')+
+  '<button class="shop-btn" onclick="addNewShop()" style="border-style:dashed">+ Dokon</button>';
+}
+
+function changeShop(id){selectedShop=id;renderShops();fetchData();}
+
+function addNewShop(){
+  const id=window.prompt('Dokon ID (seller.uzum.uz URL dan):');
+  if(!id||!id.trim())return;
+  const name=window.prompt('Dokon nomi:')||'Dokon '+id;
+  shops.push({id:id.trim(),name:name.trim()});
+  localStorage.setItem('uzum_shops',JSON.stringify(shops));
+  changeShop(id.trim());
+}
+
+function switchTab(t){
+  tab=t;
+  document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-'+t).classList.add('active');
+  document.getElementById('aiBar').style.display=t==='ai'?'flex':'none';
+  render();
+}
+
+function render(){
+  if(tab==='bosh') renderBosh();
+  else if(tab==='tovar') renderTovar();
+  else if(tab==='ai') renderAI();
+  else renderOgoh();
+}
+
+function renderBosh(){
+  const fp=products;
+  const active=fp.filter(p=>!p.isBlocked&&p.stock>0).length;
+  const out=fp.filter(p=>!p.isBlocked&&p.stock===0).length;
+  const blocked=fp.filter(p=>p.isBlocked).length;
+  const order=fp.filter(p=>calcP(p).needOrder);
+  
+  const wVal=fp.reduce((s,p)=>{const c=costs[p.id]||{};return s+(p.stock>0?p.stock:0)*Number(c.realCost||0);},0);
+  const wRev=fp.reduce((s,p)=>s+(p.stock>0?p.stock:0)*(p.price||0),0);
+  const wPro=fp.reduce((s,p)=>s+(p.stock>0?p.stock:0)*calcP(p).profit,0);
+
+  const probs=fp.filter(p=>status(p)!=='ok');
+  
+  document.getElementById('content').innerHTML=`
+  <div class="stats">
+    <div class="stat"><div class="stat-icon">✅</div><div class="stat-val" style="color:#00ffa3">${active}</div><div class="stat-lbl">Sotuvda</div></div>
+    <div class="stat"><div class="stat-icon">❌</div><div class="stat-val" style="color:${out>0?'#f87171':'#e2eaf2'}">${out}</div><div class="stat-lbl">Zaxira tugagan</div></div>
+    <div class="stat"><div class="stat-icon">🚫</div><div class="stat-val" style="color:${blocked>0?'#f87171':'#e2eaf2'}">${blocked}</div><div class="stat-lbl">Bloklangan</div></div>
+    <div class="stat"><div class="stat-icon">🚢</div><div class="stat-val" style="color:#fbbf24">${order.length}</div><div class="stat-lbl">Buyurtma kerak</div></div>
+  </div>
+  ${wVal>0?`
+  <div class="card">
+    <div class="card-title">🏭 Ombor tahlili</div>
+    <div class="p3">
+      <div class="p3-item"><div class="p3-val" style="color:#38bdf8">${fmt(wVal/1000000)}M</div><div class="p3-lbl">Sarflangan pul</div></div>
+      <div class="p3-item"><div class="p3-val" style="color:#fbbf24">${fmt(wRev/1000000)}M</div><div class="p3-lbl">Sotilsa tushum</div></div>
+      <div class="p3-item"><div class="p3-val" style="color:${wPro>0?'#00ffa3':'#f87171'}">${fmt(wPro/1000000)}M</div><div class="p3-lbl">Taxminiy foyda</div></div>
+    </div>
+  </div>`:''}
+  ${probs.length>0?`
+  <div class="card" style="border-color:rgba(248,113,113,.2)">
+    <div class="card-title" style="color:#f87171">🚨 Hozir diqqat kerak</div>
+    ${probs.slice(0,5).map(p=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.05)">
+      <div style="font-size:12px;font-weight:600;flex:1;margin-right:8px">${p.name.substring(0,30)}${p.skuTitle?'<br><span style="color:#00ffa3;font-size:10px">'+p.skuTitle.substring(0,25)+'</span>':''}</div>
+      ${badge(status(p))}
+    </div>`).join('')}
+  </div>`:`<div class="card" style="text-align:center;padding:20px"><div style="font-size:36px">🎉</div><div style="color:#00ffa3;font-weight:700;margin-top:8px">Hamma yaxshi!</div></div>`}
+  <div class="card" style="background:linear-gradient(135deg,rgba(0,255,163,.06),rgba(0,212,170,.04));border-color:rgba(0,255,163,.2);cursor:pointer" onclick="switchTab('ai');document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));document.getElementById('tab-ai').classList.add('active');document.getElementById('aiBar').style.display='flex'">
+    <div style="display:flex;align-items:center;gap:12px"><div style="font-size:32px">🤖</div><div style="flex:1"><div style="font-weight:800;color:#00ffa3">AI Maslahatchi</div><div style="font-size:11px;color:#4a6070">Bugun nima qilish kerak?</div></div><div style="color:#00ffa3;font-size:20px">→</div></div>
+  </div>`;
+}
+
+function renderTovar(){
+  const fp=products;
+  document.getElementById('content').innerHTML=`
+  <input class="inp" placeholder="Tovar nomi yoki SKU..." oninput="filterProds(this.value)" style="margin-bottom:12px">
+  <div id="prodList">${prodCards(fp)}</div>`;
+}
+
+function filterProds(q){
+  const fp=products.filter(p=>!q||p.name.toLowerCase().includes(q.toLowerCase())||(p.skuTitle||'').toLowerCase().includes(q.toLowerCase())||(p.skuId||'').includes(q));
+  document.getElementById('prodList').innerHTML=prodCards(fp);
+}
+
+function prodCards(list){
+  if(!list.length) return '<div class="empty">Tovarlar topilmadi</div>';
+  return list.map(p=>{
+    const s=status(p);
+    const c=costs[p.id]||{};
+    const calc=calcP(p);
+    const stk=p.stock>0?p.stock:0;
+    const pct=Math.min(100,stk>0?(stk/(Number(c.dailySales||1)*14))*100:0);
+    const barClr=pct<20?'#f87171':pct<50?'#fbbf24':'#00ffa3';
+    const imgHtml=p.image?`<img src="${p.image}" style="width:56px;height:56px;border-radius:10px;object-fit:cover;border:1px solid rgba(255,255,255,.08)" onerror="this.parentElement.innerHTML='📦'">`:'📦';
+    
+    return `<div class="product">
+      <div class="product-top">
+        <div class="product-img">${imgHtml}</div>
+        <div class="product-info">
+          <div class="product-name">${p.name}</div>
+          ${p.skuTitle?`<div class="product-sku">${p.skuTitle}</div>`:''}
+          <div class="product-id">${p.skuId||''}</div>
+        </div>
+        ${badge(s)}
+      </div>
+      <div class="pbar"><div class="pbar-fill" style="width:${pct}%;background:${barClr}"></div></div>
+      <div class="p3">
+        <div class="p3-item"><div class="p3-val" style="color:${stk<10?'#f87171':'#e2eaf2'}">${fmt(stk)} dona</div><div class="p3-lbl">Zaxira</div></div>
+        <div class="p3-item"><div class="p3-val">${fmt(p.price)}</div><div class="p3-lbl">Narx (so'm)</div></div>
+        <div class="p3-item"><div class="p3-val" style="color:${calc.days!==null&&calc.days<28?'#fbbf24':'#e2eaf2'}">${calc.days!==null?calc.days+' kun':'?'}</div><div class="p3-lbl">Qoldi</div></div>
+      </div>
+      ${c.realCost?`
+      <div class="cost-box">
+        <div class="card-title">Foyda hisob-kitobi</div>
+        <div class="cost-row"><span style="color:#4a6070">Sotuv narxi</span><span>${fmt(calc.price)} so'm</span></div>
+        <div class="cost-row"><span style="color:#4a6070">Komissiya (${getComm(p.category)}%)</span><span style="color:#f87171">-${fmt(calc.comm)} so'm</span></div>
+        <div class="cost-row"><span style="color:#4a6070">Logistika</span><span style="color:#f87171">-${fmt(calc.log)} so'm</span></div>
+        ${calc.stor?`<div class="cost-row"><span style="color:#4a6070">Saqlash</span><span style="color:#f87171">-${fmt(calc.stor)} so'm</span></div>`:''}
+        ${calc.ads?`<div class="cost-row"><span style="color:#4a6070">Reklama</span><span style="color:#f87171">-${fmt(calc.ads)} so'm</span></div>`:''}
+        <div class="cost-row"><span style="color:#4a6070">Tannarx</span><span style="color:#f87171">-${fmt(calc.cost)} so'm</span></div>
+        <div class="profit-row"><span>Sof foyda/dona</span><span style="color:${calc.profit>0?'#00ffa3':'#f87171'}">${fmt(calc.profit)} so'm (${calc.margin}%)</span></div>
+      </div>
+      ${calc.needOrder?`<div class="info">🚢 ${calc.days} kunda tugaydi — Xitoydan HOZIR buyurtma qiling!</div>`:''}
+      ${calc.profit<0?`<div class="warn">Zarar ko'ryapsiz! Narxni ko'taring yoki xarajatni kamaytiring.</div>`:''}
+      `:`<div class="add-cost" onclick="openModal('${p.id}')"><div style="color:#00ffa3;font-size:12px">+ Tannarx va xarajatlarni kiriting</div><div style="color:#4a6070;font-size:10px;margin-top:2px">Foyda hisoblash uchun</div></div>`}
+      <button class="btn-edit" onclick="openModal('${p.id}')">✏️ Xarajatlarni tahrirlash</button>
+    </div>`;
+  }).join('');
+}
+
+function openModal(pid){
+  editProd=products.find(p=>p.id===pid);
+  if(!editProd)return;
+  const c=costs[pid]||{};
+  document.getElementById('mTitle').textContent=editProd.name.substring(0,35);
+  document.getElementById('mSub').textContent=(editProd.skuTitle||'')+' | '+fmt(editProd.price)+' so\'m';
+  document.getElementById('iCost').value=c.realCost||'';
+  document.getElementById('iStorage').value=c.storage||'';
+  document.getElementById('iAds').value=c.ads||'';
+  document.getElementById('iHome').value=c.homeStock||'';
+  document.getElementById('iDaily').value=c.dailySales||'';
+  refreshPreview();
+  document.getElementById('modal').style.display='flex';
+}
+
+function refreshPreview(){
+  if(!editProd)return;
+  const cost=Number(document.getElementById('iCost').value)||0;
+  const stor=Number(document.getElementById('iStorage').value)||0;
+  const ads=Number(document.getElementById('iAds').value)||0;
+  const price=editProd.price||0;
+  const comm=price*getComm(editProd.category)/100;
+  const log=getLog(editProd.gab);
+  const profit=price-comm-log-stor-ads-cost;
+  const margin=price>0?(profit/price*100).toFixed(1):0;
+  document.getElementById('preview').innerHTML=`
+    <div style="font-size:10px;color:#4a6070;font-weight:700;margin-bottom:8px">HISOB-KITOB</div>
+    <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:#4a6070">Komissiya</span><span style="color:#f87171">-${fmt(comm)}</span></div>
+    <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:#4a6070">Logistika</span><span style="color:#f87171">-${fmt(log)}</span></div>
+    <div style="display:flex;justify-content:space-between;font-size:13px;font-weight:700;border-top:1px solid rgba(255,255,255,.08);padding-top:6px;margin-top:4px">
+      <span>Sof foyda/dona</span><span style="color:${profit>0?'#00ffa3':'#f87171'}">${fmt(profit)} so'm (${margin}%)</span>
+    </div>`;
+}
+
+function saveCost(){
+  if(!editProd)return;
+  costs[editProd.id]={realCost:Number(document.getElementById('iCost').value)||0,storage:Number(document.getElementById('iStorage').value)||0,ads:Number(document.getElementById('iAds').value)||0,homeStock:Number(document.getElementById('iHome').value)||0,dailySales:Number(document.getElementById('iDaily').value)||0};
+  localStorage.setItem('uzum_costs',JSON.stringify(costs));
+  document.getElementById('modal').style.display='none';
+  render();
+}
+
+document.getElementById('modal').addEventListener('click',function(e){if(e.target===this)this.style.display='none';});
+
+function renderAI(){
+  document.getElementById('aiBar').style.display='flex';
+  const msgs=aiMsgs.map(m=>m.r==='u'?`<div class="msg-u"><div class="bubble-u">${m.t}</div></div>`:`<div class="msg-b"><div class="avatar">🤖</div><div class="bubble-b">${m.t}</div></div>`).join('');
+  const typing=aiLoading?'<div class="msg-b"><div class="avatar">🤖</div><div class="bubble-b">...</div></div>':'';
+  document.getElementById('content').innerHTML=`
+  <div class="quick-btns" style="margin-bottom:8px">
+    <button class="quick-btn" onclick="sendAI('Bugun nima qilishim kerak?')">Bugun nima qilishim kerak?</button>
+    <button class="quick-btn" onclick="sendAI('Qaysi tovar muammoli?')">Qaysi tovar muammoli?</button>
+    <button class="quick-btn" onclick="sendAI('Xitoydan nima buyurtma qilay?')">Xitoydan nima buyurtma qilay?</button>
+    <button class="quick-btn" onclick="sendAI('Savdoni qanday oshiraman?')">Savdoni qanday oshiraman?</button>
+  </div>
+  <div id="chatMsgs">${msgs}${typing}</div>`;
+  document.getElementById('chatMsgs').lastElementChild?.scrollIntoView({behavior:'smooth'});
+}
+
+async function sendAI(custom){
+  const msg=custom||document.getElementById('chatInput').value.trim();
+  if(!msg||aiLoading)return;
+  document.getElementById('chatInput').value='';
+  aiMsgs.push({r:'u',t:msg});
+  aiLoading=true;
+  renderAI();
+  
+  const summary=products.slice(0,15).map(p=>{
+    const c=costs[p.id]||{};
+    const calc=calcP(p);
+    return{nom:p.name,sku:p.skuTitle,zaxira:p.stock,daily:c.dailySales||'?',days:calc.days||'?',order:calc.needOrder?'HA':'Yoq',tannarx:c.realCost||'?',foyda:calc.profit||'?'};
+  });
+  
+  try{
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:800,system:`Sen Uzum Market sotuvchisi uchun AI maslahatchi. Uzbek tilida qisqa va amaliy javob ber.\nTovarlar: ${JSON.stringify(summary)}\n28 kunlik Xitoy yetkazib berishni hisobga ol. 200 sozdan oshirma.`,messages:[...aiMsgs.slice(-6).map(m=>({role:m.r==='u'?'user':'assistant',content:m.t})),{role:'user',content:msg}]})});
+    const d=await resp.json();
+    aiMsgs.push({r:'b',t:d.content?.map(c=>c.text||'').join('')||'Xatolik.'});
+  }catch(e){aiMsgs.push({r:'b',t:'Tarmoq xatoligi.'});}
+  aiLoading=false;
+  renderAI();
+}
+
+function renderOgoh(){
+  const notifs=[];
+  products.forEach(p=>{
+    const s=status(p);
+    const calc=calcP(p);
+    if(p.stock===0&&!p.isBlocked) notifs.push({type:'danger',text:'❌ '+p.name.substring(0,30)+' — tugagan! Zudlik bilan buyurtma qiling'});
+    else if(s==='critical') notifs.push({type:'danger',text:'🔴 '+p.name.substring(0,30)+' — kritik darajada kam!'});
+    else if(s==='low') notifs.push({type:'warn',text:'⚠️ '+p.name.substring(0,30)+' — kam qoldi'});
+    if(calc.needOrder&&p.stock>0) notifs.push({type:'info',text:'🚢 '+p.name.substring(0,25)+' — '+calc.days+' kunda tugaydi, buyurtma qiling!'});
+    if(calc.profit<0&&costs[p.id]?.realCost) notifs.push({type:'danger',text:'💸 '+p.name.substring(0,25)+' — zarar! Narxni kotaring'});
+  });
+  
+  document.getElementById('content').innerHTML=notifs.length===0?
+  `<div class="empty"><div style="font-size:48px">🎉</div><div style="color:#00ffa3;font-weight:700;margin-top:12px">Hamma yaxshi!</div></div>`:
+  notifs.map(n=>`<div class="notif-item n-${n.type}"><div class="ndot" style="background:${n.type==='danger'?'#f87171':n.type==='warn'?'#fbbf24':'#38bdf8'}"></div><div style="font-size:12px;color:${n.type==='danger'?'#f87171':n.type==='warn'?'#fbbf24':'#38bdf8'};line-height:1.5">${n.text}</div></div>`).join('');
+}
+
+fetchData();
+setInterval(fetchData, 5*60*1000);
+</script>
+</body>
+</html>
