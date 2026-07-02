@@ -1,513 +1,677 @@
-// bot.js — EnvoCam yordamchi bot
-// Bosqich 1: /yangi_model buyrug'i orqali model yaratish + kanalni unga bog'lash
-//            va kanaldagi postlarni avtomatik o'qib bazaga saqlash.
-// Keyingi bosqichda: Business xabarlarga AI javob qismi qo'shiladi.
-
-require('dotenv').config();
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
+const fetch = require('node-fetch'); // Ensure fetch helper is available if Node version < 18
 const db = require('./db');
 const ai = require('./ai');
-const queueLib = require('./queue');
-const { startReviewScheduler } = require('./reviewScheduler');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) {
-  console.error('XATOLIK: BOT_TOKEN topilmadi. .env faylida yoki Railway Variables ichida belgilang.');
+  console.error("FATAL ERROR: BOT_TOKEN is missing!");
   process.exit(1);
 }
 
-const bot = new Telegraf(BOT_TOKEN, { handlerTimeout: Infinity });
-
-// Dastur kutilmagan xatolik tufayli "yiqilib" qayta ishga tushib qolmasligi uchun —
-// bu xato bo'lganda mijozga ikki marta bir xil xabar yuborilishiga olib kelardi.
-process.on('unhandledRejection', (err) => {
-  console.error('Ushlanmagan xatolik (unhandledRejection):', err);
-});
-process.on('uncaughtException', (err) => {
-  console.error('Ushlanmagan xatolik (uncaughtException):', err);
+const bot = new Telegraf(BOT_TOKEN, {
+  handlerTimeout: Infinity // Allow long processes without timing out
 });
 
-// Faqat sizga (admin) ruxsat berish uchun — o'z Telegram ID'ingizni shu yerga yozasiz.
-// ID'ingizni bilmasangiz, botga /id buyrug'ini yuborib aniqlab olasiz.
-const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(',').map(id => id.trim()).filter(Boolean);
+
+// Temporary state variables for current operational processes
+const adminStates = {};
+
+// Process level safety listeners
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception caught:', error);
+});
+
+// Helper: Uzbek/Russian auto-language detection rule
+function detectLanguage(text) {
+  if (/[\u049B\u0493\u04B3\u04AF]/i.test(text)) return 'uz'; // Unique Uzbek Cyrillic letters
+  if (/o['`’ ]/i.test(text)) return 'uz'; // Uzbek latin apostrophe character check
+  if ((text.match(/[\u0430-\u044F]/g) || []).length > 3) return 'ru'; // Standard Cyrillic density
+  return 'uz';
+}
+
+// Download Telegram file helper
+async function getTelegramFileAsBase64(fileId) {
+  const fileInfo = await bot.telegram.getFile(fileId);
+  const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileInfo.file_path}`;
+  const response = await fetch(fileUrl);
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer).toString('base64');
+}
+
+// Helper logic: Simulates delayed, human-like interactive typing
+async function sendHumanDelayedResponses(ctx, text, isImage = false, customChatId = null) {
+  const targetId = customChatId || ctx.chat.id;
+  const connectionId = ctx.businessConnectionId || ctx.update?.business_message?.business_connection_id;
+
+  const minDelay = isImage ? 25000 : 15000;
+  const maxDelay = isImage ? 70000 : 50000;
+  const chosenDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+
+  // Set typing activity state
+  try {
+    if (connectionId) {
+      await bot.telegram.sendChatAction(targetId, 'typing', { business_connection_id: connectionId });
+    } else {
+      await ctx.sendChatAction('typing');
+    }
+  } catch (err) {
+    console.error('Error sending chat action:', err);
+  }
+
+  await new Promise(res => setTimeout(res, chosenDelay));
+
+  // Explode thoughts via specified delimiter "###"
+  const thoughts = text.split('###').map(p => p.trim()).filter(Boolean);
+
+  for (const part of thoughts) {
+    const opts = connectionId ? { business_connection_id: connectionId } : {};
+    await bot.telegram.sendMessage(targetId, part, opts);
+    await new Promise(res => setTimeout(res, 2000)); // Minor natural reading gap
+  }
+}
+
+// Ensure the request has not been processed already (Deduplication check)
+function isDuplicateMessage(messageId) {
+  const config = db.getConfig();
+  if (config.processedMessages.includes(messageId)) {
+    return true;
+  }
+  config.processedMessages.push(messageId);
+  // Keep log buffer bounded
+  if (config.processedMessages.length > 10000) {
+    config.processedMessages.shift();
+  }
+  db.saveConfig(config);
+  return false;
+}
+
+// Handle registering business connection status updates
+bot.on('business_connection', async (ctx) => {
+  const conn = ctx.businessConnection;
+  const config = db.getConfig();
+  config.businessOwners[conn.user_id] = conn.id;
+  db.saveConfig(config);
+});
+
+
+// ==========================================
+// ADMIN INTERFACES & WORKFLOW
+// ==========================================
 
 function isAdmin(ctx) {
-  if (ADMIN_IDS.length === 0) return true; // hali sozlanmagan bo'lsa, hammaga ruxsat (boshlanishda)
-  return ADMIN_IDS.includes(String(ctx.from.id));
+  const userId = String(ctx.from?.id);
+  return ADMIN_IDS.includes(userId);
 }
 
-// Suhbat holatini saqlash uchun oddiy xotira (kichik loyiha uchun yetarli)
-// sessions[userId] = { step: 'waiting_name' | 'waiting_link', modelName: '...' }
-const sessions = {};
-
-bot.command('id', (ctx) => {
-  ctx.reply(`Sizning Telegram ID: ${ctx.from.id}`);
+// Panel Base command
+bot.command('panel', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  return showAdminMainMenu(ctx);
 });
 
-bot.command('yangi_model', (ctx) => {
-  if (!isAdmin(ctx)) return;
-  sessions[ctx.from.id] = { step: 'waiting_name' };
-  ctx.reply('📷 Yangi model qo\'shamiz.\n\nModel nomini yuboring (masalan: EnvoCam Mini-X1):');
-});
-
-bot.command('modellar', (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const models = db.getAllModels();
-  const names = Object.keys(models);
-  if (names.length === 0) {
-    return ctx.reply('Hozircha hech qanday model qo\'shilmagan.');
+function showAdminMainMenu(ctx) {
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('📦 Modellar ro\'yxati', 'admin_models'), Markup.button.callback('➕ Yangi model qo\'shish', 'admin_add_model')],
+    [Markup.button.callback('👥 Mijozlar soni', 'admin_cust_count'), Markup.button.callback('📢 Hammaga xabar', 'admin_broadcast')]
+  ]);
+  const text = "EnvoCam Admin boshqaruv paneli:";
+  if (ctx.callbackQuery) {
+    return ctx.editMessageText(text, keyboard);
   }
-  let text = '📋 Mavjud modellar:\n\n';
-  for (const name of names) {
-    const m = models[name];
-    text += `• ${name}\n   Kanal: ${m.channelId ? '✅ ulangan' : '❌ ulanmagan'}\n   Rasmlar: ${m.images.length}, Yo'riqnoma: ${(m.manualImages || []).length}, Ilova skrinshot: ${m.appScreenshots.length}, Matn: ${m.textGuides.length}, Video: ${m.videoGuides.length}\n   Sharh ovoz: ${m.reviewVoiceFileId ? '✅' : '❌'}, Sharh video: ${m.reviewVideoFileId ? '✅' : '❌'}\n\n`;
-  }
-  ctx.reply(text);
-});
+  return ctx.reply(text, keyboard);
+}
 
-// Taklif-havola (t.me/+...) orqali kanalni topib bo'lmagan hollar uchun —
-// kanal Chat ID'sini to'g'ridan-to'g'ri qo'lda kiritib bog'lash imkoni.
-// Chat ID'ni topish uchun: kanalga bitta post yuboring, keyin Railway
-// Deploy Logs'da "Bog'lanmagan kanaldan post keldi: -100..." qatorini ko'rasiz.
-bot.command('kanal_bog_la', (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const parts = ctx.message.text.split(' ').filter(Boolean);
-  // /kanal_bog_la Model Nomi -1001234567890  -> oxirgisi ID, qolgani model nomi
-  if (parts.length < 3) {
-    return ctx.reply(
-      '❗ Foydalanish: /kanal_bog_la Model Nomi -1001234567890\n\n' +
-      '(Model nomidan keyin, oxiriga kanal Chat ID\'sini yozing)'
+// Handle interactions
+bot.on('callback_query', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery("Ruxsat berilmagan!");
+  const data = ctx.callbackQuery.data;
+
+  if (data === 'admin_main') {
+    adminStates[ctx.from.id] = null;
+    return showAdminMainMenu(ctx);
+  }
+
+  if (data === 'admin_models') {
+    const models = db.getModels();
+    if (models.length === 0) {
+      return ctx.editMessageText("Hozircha birorta ham model mavjud emas.", Markup.inlineKeyboard([
+        [Markup.button.callback('⬅️ Orqaga', 'admin_main')]
+      ]));
+    }
+    const buttons = models.map(m => [Markup.button.callback(m.name, `model_view:${m.name}`)]);
+    buttons.push([Markup.button.callback('⬅️ Orqaga', 'admin_main')]);
+    return ctx.editMessageText("Boshqarish uchun modelni tanlang:", Markup.inlineKeyboard(buttons));
+  }
+
+  if (data.startsWith('model_view:')) {
+    const modelName = data.split(':')[1];
+    const model = db.findModelByName(modelName);
+    if (!model) return ctx.answerCbQuery("Model topilmadi");
+
+    const imagesCount = model.images?.length || 0;
+    const manualCount = model.manualImages?.length || 0;
+    const appCount = model.appScreenshots?.length || 0;
+    const videoCount = model.videoGuides?.length || 0;
+    const hasVoice = model.reviewVoiceFileId ? "OK" : "Yo'q";
+    const hasVideo = model.reviewVideoFileId ? "OK" : "Yo'q";
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback(`Rasmlar (${imagesCount})`, `edit_cat:${model.name}:images`), Markup.button.callback(`Yo'riqnoma (${manualCount})`, `edit_cat:${model.name}:manualImages`)],
+      [Markup.button.callback(`Ilova (${appCount})`, `edit_cat:${model.name}:appScreenshots`), Markup.button.callback(`Video (${videoCount})`, `edit_cat:${model.name}:videoGuides`)],
+      [Markup.button.callback(`Sharh ovoz: ${hasVoice}`, `edit_cat:${model.name}:reviewVoiceFileId`), Markup.button.callback(`Sharh video: ${hasVideo}`, `edit_cat:${model.name}:reviewVideoFileId`)],
+      [Markup.button.callback('❌ Kanalni uzish', `disconnect_chan:${model.name}`)],
+      [Markup.button.callback('⬅️ Orqaga', 'admin_models')]
+    ]);
+
+    return ctx.editMessageText(`Model sahifasi: *${model.name}*\nKanal ID: \`${model.channelId || 'Ulanmagan'}\``, { parse_mode: 'Markdown', ...keyboard });
+  }
+
+  if (data.startsWith('edit_cat:')) {
+    const [_, modelName, category] = data.split(':');
+    const model = db.findModelByName(modelName);
+    if (!model) return ctx.answerCbQuery();
+
+    let count = 0;
+    if (Array.isArray(model[category])) count = model[category].length;
+    else if (model[category]) count = 1;
+
+    adminStates[ctx.from.id] = { state: 'ADD_CONTENT', modelName, category };
+
+    return ctx.editMessageText(
+      `Model: *${model.name}* — Kategoriya: *${category}*\nHozirda elementlar soni: ${count}.\n\nYangi material qo'shish uchun uni shu yerga yuboring (Rasm, Video yoki Ovozli xabar).`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('✅ Tayyor', `model_view:${model.name}`)],
+          [Markup.button.callback('⬅️ Orqaga', `model_view:${model.name}`)]
+        ])
+      }
     );
   }
-  const chatId = parts[parts.length - 1];
-  const modelName = parts.slice(1, -1).join(' ');
 
-  if (!/^-?\d+$/.test(chatId)) {
-    return ctx.reply('❌ Oxirgi qism raqamli Chat ID bo\'lishi kerak (masalan: -1001234567890).');
-  }
-
-  db.linkChannelToModel(chatId, modelName);
-  ctx.reply(`🎉 "${modelName}" modeli ${chatId} kanaliga bog'landi.\n\nEndi kanalga ma'lumot joylashtirishni boshlang.`);
-});
-
-// Oddiy matn xabarlarni boshqarish (suhbat oqimi uchun)
-bot.on('text', async (ctx, next) => {
-  const session = sessions[ctx.from.id];
-  if (!session) return next();
-
-  if (session.step === 'waiting_name') {
-    const modelName = ctx.message.text.trim();
-    db.createModel(modelName);
-    session.modelName = modelName;
-    session.step = 'waiting_link';
-    return ctx.reply(
-      `✅ Model nomi saqlandi: "${modelName}"\n\n` +
-      `Endi shu modelga tegishli kanal havolasini yuboring.\n\n` +
-      `⚠️ Eslatma: bot kanalga admin qilib qo'shilgan bo'lishi shart, va bu xabarni yuborgandan KEYIN kanalga ma'lumot joylashtiring (eski postlarni bot ko'rmaydi).`
-    );
-  }
-
-  if (session.step === 'waiting_link') {
-    const link = ctx.message.text.trim();
-    let chatRef = link;
-    const match = link.match(/t\.me\/(.+)$/);
-    if (match) chatRef = '@' + match[1];
-    if (!chatRef.startsWith('@') && !chatRef.startsWith('-')) chatRef = '@' + chatRef;
-
-    try {
-      const chat = await ctx.telegram.getChat(chatRef);
-      db.linkChannelToModel(chat.id, session.modelName);
-      delete sessions[ctx.from.id];
-      return ctx.reply(
-        `🎉 Tayyor! "${session.modelName}" modeli kanal bilan bog'landi.\n\n` +
-        `Endi kanalga rasm, video, matn joylashtirishni boshlang — bot ularni avtomatik o'qiydi.\n\n` +
-        `Eslatma: yopiq (private) kanal bo'lsa, ba'zan getChat bot qo'shilgandan keyin ham xato berishi mumkin — agar shu xabar chiqsa, kanalda biror narsa post qilib ko'ring, keyin qaytadan urinib ko'ramiz.`
-      );
-    } catch (err) {
-      console.error(err);
-      return ctx.reply(
-        '❌ Kanalni topa olmadim. Tekshiring:\n' +
-        '1) Bot shu kanalga admin qilib qo\'shilganmi?\n' +
-        '2) Havola to\'g\'ri yuborilganmi?\n\n' +
-        'Qaytadan kanal havolasini yuboring, yoki /yangi_model bilan qaytadan boshlang.'
-      );
-    }
-  }
-
-  return next();
-});
-
-// Kanaldagi har bir yangi post kelganda — qaysi modelga tegishli ekanini aniqlab,
-// turi bo'yicha bazaga saqlaymiz. Caption'dagi teglar orqali aniq ajratiladi:
-// RASM: / YORIQNOMA: / VIDEO: / ILOVA: / SHARH: / SHARH VIDEO:
-bot.on('channel_post', async (ctx) => {
-  const post = ctx.channelPost;
-  const channelId = post.chat.id;
-  const model = db.getModelByChannelId(channelId);
-
-  if (!model) {
-    console.log(`Bog'lanmagan kanaldan post keldi: ${channelId} — e'tiborga olinmadi.`);
-    return;
-  }
-
-  const caption = (post.caption || post.text || '').trim();
-  const lowerCaption = caption.toLowerCase();
-
-  try {
-    if (post.photo && post.photo.length > 0) {
-      const fileId = post.photo[post.photo.length - 1].file_id;
-
-      const isManual = lowerCaption.includes('yoriqnoma') || lowerCaption.includes('yo\'riqnoma') || lowerCaption.includes('qollanma rasm');
-      const isApp = lowerCaption.includes('ilova') || lowerCaption.includes('skrinshot') || lowerCaption.includes('skreenshot');
-
-      if (isManual || isApp) {
-        // Rasm ichidagi matnni bir martalik tahlil qilib bazaga saqlaymiz
-        let extractedText = '';
-        try {
-          const fileLink = await ctx.telegram.getFileLink(fileId);
-          const imageRes = await fetch(fileLink.href);
-          const buffer = await imageRes.arrayBuffer();
-          const base64Image = Buffer.from(buffer).toString('base64');
-          extractedText = await ai.extractTextFromImage({ base64Image, mediaType: 'image/jpeg', hint: caption });
-        } catch (err) {
-          console.error('Rasm matnini ajratishda xatolik:', err.message);
-        }
-
-        if (isManual) {
-          db.addManualImageToModel(model.name, fileId, caption, extractedText);
-          console.log(`[${model.name}] yo'riqnoma rasmi saqlandi (matn ajratildi)`);
-        } else {
-          db.addAppScreenshotToModel(model.name, fileId, caption, extractedText);
-          console.log(`[${model.name}] ilova skrinshoti saqlandi (matn ajratildi)`);
-        }
-      } else {
-        db.addImageToModel(model.name, fileId, caption);
-        console.log(`[${model.name}] tashqi ko'rinish rasmi saqlandi`);
-      }
-    } else if (post.video) {
-      if (lowerCaption.includes('sharh video') || lowerCaption.includes('sharh qollanma')) {
-        db.setReviewVideo(model.name, post.video.file_id);
-        console.log(`[${model.name}] sharh-video qo'llanmasi saqlandi`);
-      } else {
-        db.addVideoGuideToModel(model.name, post.video.file_id, caption);
-        console.log(`[${model.name}] video qo'llanma saqlandi`);
-      }
-    } else if (post.voice || post.audio) {
-      const fileId = post.voice ? post.voice.file_id : post.audio.file_id;
-      if (lowerCaption.includes('sharh')) {
-        db.setReviewVoice(model.name, fileId);
-        console.log(`[${model.name}] sharh so'rash ovozi saqlandi`);
-      }
-    } else if (post.text) {
-      db.addTextGuideToModel(model.name, post.text, '');
-      console.log(`[${model.name}] matnli qo'llanma saqlandi`);
-    }
-  } catch (err) {
-    console.error('Post saqlashda xatolik:', err);
-  }
-});
-
-// Business ulanish o'rnatilganda — egasining (sizning) user ID'sini saqlaymiz,
-// shunda keyinchalik sizning o'z xabarlaringizni mijoz xabari deb aralashtirmaymiz.
-bot.on('business_connection', (ctx) => {
-  const conn = ctx.update.business_connection;
-  console.log('Business ulanish:', JSON.stringify(conn));
-  try {
-    if (conn.user && conn.id) {
-      db.setBusinessOwner(conn.id, conn.user.id);
-    }
-  } catch (err) {
-    console.error('Business owner saqlashda xatolik:', err);
-  }
-});
-
-bot.on('business_message', async (ctx) => {
-  const msg = ctx.update.business_message;
-
-  try {
-    // Agar bu xabarni SIZ (do'kon egasi) o'zingiz business ilovasi orqali
-    // yozgan bo'lsangiz — buni mijoz xabari deb hisoblamaymiz, AI javob bermaydi.
-    const ownerId = db.getBusinessOwner(msg.business_connection_id);
-    if (ownerId && String(msg.from.id) === String(ownerId)) {
-      return;
-    }
-
-    const from = msg.from;
-    const existingCustomer = db.getCustomer(msg.chat.id);
-
-    // Telegram ba'zan bir xabarni qaytadan yuborishi mumkin (masalan dastur
-    // qayta ishga tushganda) — shu xabarni ikkinchi marta qayta ishlamaymiz.
-    if (existingCustomer && existingCustomer.lastProcessedMessageId === msg.message_id) {
-      return;
-    }
-
-    const language = ai.detectLanguage(msg.text || msg.caption || '') || (existingCustomer && existingCustomer.language) || 'uz';
-
-    const customer = db.upsertCustomer({
-      chatId: msg.chat.id,
-      firstName: from.first_name,
-      lastName: from.last_name,
-      username: from.username,
-      businessConnectionId: msg.business_connection_id,
-      language,
-      lastProcessedMessageId: msg.message_id
+  if (data.startsWith('disconnect_chan:')) {
+    const modelName = data.split(':')[1];
+    return ctx.editMessageText(`Haqiqatan ham *${modelName}* modelidan kanalni uzmoqchimisiz?`, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('Ha, uzish', `confirm_disconn:${modelName}`)],
+        [Markup.button.callback('Yo\'q, bekor qilish', `model_view:${modelName}`)]
+      ])
     });
+  }
 
-    if (msg.photo && msg.photo.length > 0) {
-      await handleCustomerPhoto(ctx, msg, customer);
-      return;
+  if (data.startsWith('confirm_disconn:')) {
+    const modelName = data.split(':')[1];
+    const models = db.getModels();
+    const model = models.find(m => m.name === modelName);
+    if (model) {
+      model.channelId = null;
+      db.saveModels(models);
     }
-
-    if (msg.voice) {
-      await handleCustomerVoice(ctx, msg, customer);
-      return;
-    }
-
-    if (msg.text) {
-      await handleCustomerText(ctx, msg, customer);
-      return;
-    }
-  } catch (err) {
-    console.error('Business xabarni qayta ishlashda xatolik:', err);
-  }
-});
-
-// Mijoz kamera rasmi yuborganda: modelni aniqlab, video qo'llanma (caption bilan
-// birga) yuboradi. Agar rasm xira bo'lsa qayta so'raydi, agar model bazada
-// umuman yo'q bo'lsa (hali tayyorlanmagan) — shu haqida xabar beradi.
-async function handleCustomerPhoto(ctx, msg, customer) {
-  const models = db.getAllModels();
-  const modelNames = Object.keys(models);
-  if (modelNames.length === 0) return;
-
-  const fileId = msg.photo[msg.photo.length - 1].file_id;
-  const fileLink = await ctx.telegram.getFileLink(fileId);
-  const imageRes = await fetch(fileLink.href);
-  const buffer = await imageRes.arrayBuffer();
-  const base64Image = Buffer.from(buffer).toString('base64');
-
-  const { status, modelName } = await ai.identifyModelFromImage({
-    base64Image,
-    mediaType: 'image/jpeg',
-    modelNames
-  });
-
-  const humanDelay = queueLib.randomDelay(25000, 70000);
-  const hasGreeted = customer.hasGreeted;
-
-  if (status === 'unclear') {
-    const text = await ai.craftUnclearImageMessage({ language: customer.language, hasGreeted });
-    await queueLib.enqueue(() => sendBiz(ctx, msg, { text }), { humanDelayMs: humanDelay });
-    db.upsertCustomer({ chatId: msg.chat.id, hasGreeted: true, businessConnectionId: msg.business_connection_id });
-    return;
+    return ctx.editMessageText(`Kanal muvaffaqiyatli uzildi.`, Markup.inlineKeyboard([
+      [Markup.button.callback('⬅️ Modelga qaytish', `model_view:${modelName}`)]
+    ]));
   }
 
-  if (status === 'no_match' || !modelName || !models[modelName]) {
-    const text = await ai.craftModelNotReadyMessage({ language: customer.language, hasGreeted });
-    await queueLib.enqueue(() => sendBiz(ctx, msg, { text }), { humanDelayMs: humanDelay });
-    db.upsertCustomer({ chatId: msg.chat.id, hasGreeted: true, businessConnectionId: msg.business_connection_id });
-    return;
+  if (data === 'admin_add_model') {
+    adminStates[ctx.from.id] = { state: 'AWAITING_MODEL_NAME' };
+    return ctx.editMessageText("Iltimos, yangi model nomini kiriting:", Markup.inlineKeyboard([
+      [Markup.button.callback('⬅️ Orqaga', 'admin_main')]
+    ]));
   }
 
-  const model = models[modelName];
-
-  // Agar shu model uchun hali video qo'llanma tayyor bo'lmasa
-  if (!model.videoGuides || model.videoGuides.length === 0) {
-    const text = await ai.craftModelNotReadyMessage({ language: customer.language, hasGreeted });
-    await queueLib.enqueue(() => sendBiz(ctx, msg, { text }), { humanDelayMs: humanDelay });
-    db.upsertCustomer({ chatId: msg.chat.id, hasGreeted: true, lastModelName: modelName, businessConnectionId: msg.business_connection_id });
-    return;
-  }
-
-  db.upsertCustomer({
-    chatId: msg.chat.id,
-    lastModelName: modelName,
-    businessConnectionId: msg.business_connection_id,
-    awaitingConnectionConfirm: true,
-    connectionFollowupSentAt: null
-  });
-
-  await queueLib.enqueue(async () => {
-    const greetPrefix = !hasGreeted
-      ? (customer.language === 'ru' ? 'Здравствуйте. ' : 'Assalomu alaykum. ')
-      : '';
-    const confirmText = customer.language === 'ru'
-      ? `${greetPrefix}Это камера ${modelName}. Сейчас отправлю видео-инструкцию.`
-      : `${greetPrefix}Bu — ${modelName} kamerasi. Hozir video qo'llanmani yuboraman.`;
-    await sendBiz(ctx, msg, { text: confirmText });
-    await new Promise(r => setTimeout(r, queueLib.randomDelay(1000, 2000)));
-
-    const video = model.videoGuides[0];
-    await sendBiz(ctx, msg, { video: video.file_id, caption: video.caption || '' });
-  }, { humanDelayMs: humanDelay });
-
-  db.upsertCustomer({ chatId: msg.chat.id, hasGreeted: true, businessConnectionId: msg.business_connection_id });
-}
-
-async function handleCustomerText(ctx, msg, customer) {
-  const models = db.getAllModels();
-  const modelName = customer.lastModelName;
-  const model = modelName ? models[modelName] : null;
-  const hasGreeted = customer.hasGreeted;
-  const humanDelay = queueLib.randomDelay(15000, 50000);
-
-  // Mijoz "ulay oldim" / mamnunlik bildirishi mumkin — shunda sharhni so'raymiz
-  if (model && customer.awaitingConnectionConfirm) {
-    const success = await ai.detectConnectionSuccess({ text: msg.text, language: customer.language });
-    if (success) {
-      await sendReviewRequest(ctx, msg, customer, model);
-      db.upsertCustomer({ chatId: msg.chat.id, awaitingConnectionConfirm: false, businessConnectionId: msg.business_connection_id });
-      return;
+  if (data.startsWith('connect_method:')) {
+    const [_, modelName, method] = data.split(':');
+    if (method === 'chat_id') {
+      adminStates[ctx.from.id] = { state: 'AWAITING_CHAT_ID', modelName };
+      return ctx.editMessageText("Kanal yopiq bo'lsa, botni u yerga admin qilib qo'shing, keyin kanal Chat ID raqamini yuboring:", Markup.inlineKeyboard([
+        [Markup.button.callback('⬅️ Orqaga', 'admin_models')]
+      ]));
+    } else {
+      adminStates[ctx.from.id] = { state: 'AWAITING_CHANNEL_LINK', modelName };
+      return ctx.editMessageText("Kanal ommaviy havolasini kiriting (Masalan, @kanal_user yoki link):", Markup.inlineKeyboard([
+        [Markup.button.callback('⬅️ Orqaga', 'admin_models')]
+      ]));
     }
   }
 
-  if (!model) {
-    const intent = await ai.classifyCustomerIntent({ text: msg.text });
-
-    if (intent === 'gratitude') {
-      const text = customer.language === 'ru'
-        ? 'Пожалуйста. Если будут вопросы, пишите в любое время.'
-        : 'Arzimaydi. Savol bo\'lsa, istalgan vaqtda yozing.';
-      await queueLib.enqueue(() => sendBiz(ctx, msg, { text }), { humanDelayMs: humanDelay });
-      db.upsertCustomer({ chatId: msg.chat.id, hasGreeted: true, businessConnectionId: msg.business_connection_id });
-      return;
-    }
-
-    // Mijoz aniq savol so'rayapti (model noma'lum bo'lsa ham) — boshqa
-    // kameralar uchun yozilgan umumiy ma'lumotdan foydalanib, real javob
-    // beramiz, va shu bilan birga rasmni ham (faqat bir marta) so'raymiz.
-    const allModels = Object.values(models);
-    const parts = await ai.answerGeneralCameraQuestion({
-      question: msg.text,
-      allModels,
-      language: customer.language,
-      hasGreeted,
-      shouldAskForPhoto: !customer.askedForPhotoOnce
-    });
-
-    await queueLib.enqueue(async () => {
-      for (const part of parts) {
-        await sendBiz(ctx, msg, { text: part });
-        if (parts.length > 1) await new Promise(r => setTimeout(r, queueLib.randomDelay(1200, 2500)));
-      }
-    }, { humanDelayMs: humanDelay });
-
-    db.upsertCustomer({ chatId: msg.chat.id, hasGreeted: true, askedForPhotoOnce: true, businessConnectionId: msg.business_connection_id });
-    return;
+  if (data === 'admin_cust_count') {
+    const customers = db.getCustomers();
+    return ctx.editMessageText(`Tizimdagi jami mijozlar soni: ${customers.length} nafar.`, Markup.inlineKeyboard([
+      [Markup.button.callback('⬅️ Orqaga', 'admin_main')]
+    ]));
   }
 
-  const parts = await ai.answerCustomerQuestion({
-    question: msg.text,
-    model,
-    language: customer.language,
-    hasGreeted
-  });
-
-  await queueLib.enqueue(async () => {
-    for (const part of parts) {
-      await sendBiz(ctx, msg, { text: part });
-      if (parts.length > 1) await new Promise(r => setTimeout(r, queueLib.randomDelay(1200, 2500)));
-    }
-  }, { humanDelayMs: humanDelay });
-
-  db.upsertCustomer({ chatId: msg.chat.id, hasGreeted: true, businessConnectionId: msg.business_connection_id });
-}
-
-async function handleCustomerVoice(ctx, msg, customer) {
-  const humanDelay = queueLib.randomDelay(15000, 40000);
-  const text = customer.language === 'ru'
-    ? 'Простите, сейчас мне удобнее понять текстовое сообщение — не могли бы вы написать словами?'
-    : 'Kechirasiz, hozircha matn ko\'rinishida yozsangiz menga tushunarliroq bo\'lardi.';
-  await queueLib.enqueue(() => sendBiz(ctx, msg, { text }), { humanDelayMs: humanDelay });
-}
-
-// Sharh so'rash (ovozli xabar + "qanday sharh yozish" videosi) — mijoz ulanishni
-// tasdiqlaganda yoki 10 soat javob bermaganda (reviewScheduler.js orqali) chaqiriladi
-async function sendReviewRequest(ctx, msg, customer, model) {
-  if (!model.reviewVoiceFileId) return;
-  await sendBiz(ctx, msg, { voice: model.reviewVoiceFileId });
-  if (model.reviewVideoFileId) {
-    await new Promise(r => setTimeout(r, queueLib.randomDelay(1000, 2000)));
-    await sendBiz(ctx, msg, { video: model.reviewVideoFileId });
+  if (data === 'admin_broadcast') {
+    adminStates[ctx.from.id] = { state: 'AWAITING_BROADCAST_TEXT' };
+    return ctx.editMessageText("Barcha foydalanuvchilarga yuboriladigan xabar matnini kiriting:", Markup.inlineKeyboard([
+      [Markup.button.callback('⬅️ Orqaga', 'admin_main')]
+    ]));
   }
-  db.markReviewSent(msg.chat.id);
-}
 
-// Business ulanish orqali xabar yuborish (matn/video/ovoz, caption bilan)
-async function sendBiz(ctx, originalMsg, { text, video, voice, caption }) {
-  const chatId = originalMsg.chat.id;
-  const businessConnectionId = originalMsg.business_connection_id;
-  const base = { chat_id: chatId };
-  if (businessConnectionId) base.business_connection_id = businessConnectionId;
+  if (data === 'confirm_broadcast') {
+    const state = adminStates[ctx.from.id];
+    if (!state || !state.text) return ctx.answerCbQuery("Xatolik yuz berdi");
 
-  if (text) {
-    await ctx.telegram.callApi('sendMessage', { ...base, text });
-  }
-  if (video) {
-    const payload = { ...base, video };
-    if (caption) payload.caption = caption;
-    await ctx.telegram.callApi('sendVideo', payload);
-  }
-  if (voice) {
-    await ctx.telegram.callApi('sendVoice', { ...base, voice });
-  }
-}
+    ctx.answerCbQuery("Yuborish boshlandi...");
+    ctx.editMessageText("Xabar yuborilmoqda...");
 
-// Mijozlar sonini ko'rish
-bot.command('mijozlar', (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const count = db.getCustomerCount();
-  ctx.reply(`📊 Bazada jami ${count} ta mijoz bor.`);
-});
+    const customers = db.getCustomers();
+    let sentCount = 0;
 
-// Hammaga bir vaqtda xabar yuborish (Business orqali, shaxsiy profil nomidan)
-const broadcastSessions = {};
-
-bot.command('hammaga_xabar', (ctx) => {
-  if (!isAdmin(ctx)) return;
-  broadcastSessions[ctx.from.id] = { step: 'waiting_text' };
-  ctx.reply('📢 Barcha mijozlarga yuboriladigan xabar matnini yuboring:');
-});
-
-bot.on('text', async (ctx, next) => {
-  const bSession = broadcastSessions[ctx.from.id];
-  if (bSession && bSession.step === 'waiting_text') {
-    const text = ctx.message.text;
-    delete broadcastSessions[ctx.from.id];
-    const customers = db.getAllCustomers();
-    await ctx.reply(`⏳ ${customers.length} ta mijozga xabar yuborilmoqda...`);
-
-    let success = 0;
-    let failed = 0;
     for (const customer of customers) {
       try {
         if (customer.businessConnectionId) {
-          // Business ulanish orqali — shaxsiy profil nomidan yuboriladi
-          await ctx.telegram.callApi('sendMessage', {
-            chat_id: customer.chatId,
-            text: text,
+          // Send on behalf of business personal account
+          await bot.telegram.sendMessage(customer.chatId, state.text, {
             business_connection_id: customer.businessConnectionId
           });
         } else {
-          await ctx.telegram.sendMessage(customer.chatId, text);
+          await bot.telegram.sendMessage(customer.chatId, state.text);
         }
-        success++;
+        sentCount++;
       } catch (err) {
-        failed++;
-        console.error(`Mijoz ${customer.chatId} ga yuborilmadi:`, err.message);
+        console.error(`Failed to send broadcast to ${customer.chatId}:`, err);
       }
-      // Telegram tezlik cheklovi uchun kichik kutish
-      await new Promise(resolve => setTimeout(resolve, 50));
+      // Anti-flood rate limit
+      await new Promise(res => setTimeout(res, 2500));
     }
 
-    return ctx.reply(`✅ Tugadi.\nMuvaffaqiyatli: ${success}\nXato: ${failed}`);
+    adminStates[ctx.from.id] = null;
+    return ctx.reply(`Xabar muvaffaqiyatli tarqatildi. Qabul qildi: ${sentCount}/${customers.length}`);
   }
-  return next();
 });
 
-bot.launch();
-console.log('Bot ishga tushdi (polling rejimida).');
-startReviewScheduler(bot.telegram);
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// ==========================================
+// TEXT MESSAGE ROUTING (ADMIN STATES & CLIENT QUERIES)
+// ==========================================
+
+bot.on(['message', 'business_message'], async (ctx) => {
+  const msg = ctx.message || ctx.businessMessage;
+  if (!msg) return;
+
+  // Deduplication check
+  if (isDuplicateMessage(msg.message_id)) return;
+
+  // Rule: Do'kon egasining o'z xabarlari qayta ishlanmaydi
+  const config = db.getConfig();
+  const personalOwners = Object.keys(config.businessOwners);
+  if (personalOwners.includes(String(msg.from?.id))) {
+    return;
+  }
+
+  // Admin interaction state flow
+  if (isAdmin(ctx) && adminStates[msg.from.id]) {
+    const state = adminStates[msg.from.id];
+
+    if (state.state === 'AWAITING_MODEL_NAME') {
+      const name = msg.text.trim();
+      const models = db.getModels();
+      if (models.some(m => m.name.toLowerCase() === name.toLowerCase())) {
+        return ctx.reply("Bunday model allaqachon mavjud. Boshqa nom kiriting:");
+      }
+      const newModel = {
+        name,
+        channelId: null,
+        images: [],
+        manualImages: [],
+        appScreenshots: [],
+        videoGuides: [],
+        reviewVoiceFileId: null,
+        reviewVideoFileId: null
+      };
+      models.push(newModel);
+      db.saveModels(models);
+
+      adminStates[msg.from.id] = { state: 'CHOOSE_CONN_METHOD', modelName: name };
+      return ctx.reply(`Model yaratildi: *${name}*\nKanalni ulash usulini tanlang:`, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('Havola orqali', `connect_method:${name}:link`), Markup.button.callback('Chat ID orqali', `connect_method:${name}:chat_id`)]
+        ])
+      });
+    }
+
+    if (state.state === 'AWAITING_CHANNEL_LINK' || state.state === 'AWAITING_CHAT_ID') {
+      const input = msg.text.trim();
+      let targetChatId = input;
+      if (state.state === 'AWAITING_CHANNEL_LINK') {
+        if (!input.startsWith('@') && !input.startsWith('-100')) {
+          targetChatId = '@' + input;
+        }
+      }
+
+      try {
+        const chat = await ctx.telegram.getChat(targetChatId);
+        const models = db.getModels();
+        const mIdx = models.findIndex(m => m.name === state.modelName);
+        if (mIdx !== -1) {
+          models[mIdx].channelId = String(chat.id);
+          db.saveModels(models);
+          adminStates[msg.from.id] = null;
+          return ctx.reply(`Kanal muvaffaqiyatli ulandi! Kanal ID: \`${chat.id}\``, {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Modelga o\'tish', `model_view:${state.modelName}`)]])
+          });
+        }
+      } catch (e) {
+        return ctx.reply(`Kanal topilmadi yoki bot u yerda admin emas. Qayta urinib ko'ring:`);
+      }
+    }
+
+    if (state.state === 'ADD_CONTENT') {
+      const models = db.getModels();
+      const model = models.find(m => m.name === state.modelName);
+      if (!model) return;
+
+      const category = state.category;
+      let saved = false;
+
+      if (category === 'images' && msg.photo) {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+        const caption = msg.caption || '';
+        model.images.push({ file_id: fileId, caption });
+        saved = true;
+      } else if (category === 'videoGuides' && msg.video) {
+        const fileId = msg.video.file_id;
+        const caption = msg.caption || '';
+        model.videoGuides.push({ file_id: fileId, caption });
+        saved = true;
+      } else if (category === 'reviewVoiceFileId' && msg.voice) {
+        model.reviewVoiceFileId = msg.voice.file_id;
+        saved = true;
+      } else if (category === 'reviewVideoFileId' && msg.video) {
+        model.reviewVideoFileId = msg.video.file_id;
+        saved = true;
+      } else if ((category === 'manualImages' || category === 'appScreenshots') && msg.photo) {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+        const caption = msg.caption || '';
+        await ctx.reply("Rasm yuklab olinmoqda va tahlil qilinmoqda (Claude OCR)...");
+        try {
+          const base64 = await getTelegramFileAsBase64(fileId);
+          const ocrText = await ai.extractTextFromImage(base64);
+          model[category].push({
+            file_id: fileId,
+            caption,
+            extractedText: ocrText
+          });
+          saved = true;
+        } catch (err) {
+          return ctx.reply("Rasmdan matn ajratishda xatolik yuz berdi. Iltimos qayta urining.");
+        }
+      }
+
+      if (saved) {
+        db.saveModels(models);
+        return ctx.reply("Material muvaffaqiyatli saqlandi! Qo'shishni davom ettirishingiz yoki 'Tayyor' tugmasini bosishingiz mumkin.");
+      } else {
+        return ctx.reply("Yuborilgan format ushbu kategoriya uchun mos emas.");
+      }
+    }
+
+    if (state.state === 'AWAITING_BROADCAST_TEXT') {
+      const text = msg.text.trim();
+      adminStates[msg.from.id] = { state: 'CONFIRM_BROADCAST', text };
+      return ctx.reply(`Barcha foydalanuvchilarga yuborishni tasdiqlaysizmi?\n\n*Xabar:* \n${text}`, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('Ha, yuborish', 'confirm_broadcast'), Markup.button.callback('Bekor qilish', 'admin_main')]
+        ])
+      });
+    }
+
+    return; // Block execution
+  }
+
+  // ==========================================
+  // CUSTOMER CHAT FLOW INTERACTION
+  // ==========================================
+
+  const customerChatId = msg.chat.id;
+  let customer = db.getCustomer(customerChatId);
+
+  // Initialize customer entry if new
+  if (!customer) {
+    customer = {
+      chatId: String(customerChatId),
+      language: 'uz',
+      lastModelName: null,
+      businessConnectionId: msg.business_connection_id || null,
+      hasGreeted: false,
+      askedForPhotoOnce: false,
+      awaitingConnectionConfirm: false,
+      connectionFollowupSentAt: null,
+      reviewSent: false,
+      lastProcessedMessageId: msg.message_id,
+      firstSeen: new Date().toISOString(),
+      lastSeen: new Date().toISOString(),
+      lastVideoSentAt: null
+    };
+  } else {
+    customer.lastSeen = new Date().toISOString();
+    customer.lastProcessedMessageId = msg.message_id;
+    if (msg.business_connection_id) {
+      customer.businessConnectionId = msg.business_connection_id;
+    }
+  }
+
+  // Handle Photo message types
+  if (msg.photo) {
+    const fileId = msg.photo[msg.photo.length - 1].file_id;
+    await ctx.sendChatAction('typing');
+
+    const base64 = await getTelegramFileAsBase64(fileId);
+    const models = db.getModels();
+    const modelNames = models.map(m => m.name);
+
+    const result = await ai.matchPhotoToModel(base64, modelNames);
+
+    if (result.status === 'matched') {
+      const selectedModel = db.findModelByName(result.model);
+      if (selectedModel) {
+        customer.lastModelName = selectedModel.name;
+        customer.awaitingConnectionConfirm = true;
+        db.saveCustomer(customer);
+
+        // Confirm identity message
+        const confirmText = customer.language === 'uz'
+          ? `Kamerangiz modeli muvaffaqiyatli aniqlandi: ${selectedModel.name} ### Quyida sizga birinchi video-yo'riqnomani yuboraman ### Uni diqqat bilan tomosha qilib, kamerani ulashga harakat qilib ko'ring.`
+          : `Модель вашей камеры успешно определена: ${selectedModel.name} ### Ниже я отправлю вам первую видеоинструкцию ### Пожалуйста, внимательно посмотрите ее и попробуйте подключить камеру.`;
+
+        await sendHumanDelayedResponses(ctx, confirmText, true);
+
+        // Check and send video asset if setup guides exist
+        if (selectedModel.videoGuides && selectedModel.videoGuides.length > 0) {
+          const guide = selectedModel.videoGuides[0];
+          const opts = customer.businessConnectionId ? { business_connection_id: customer.businessConnectionId } : {};
+          if (guide.caption) opts.caption = guide.caption;
+
+          await bot.telegram.sendVideo(customerChatId, guide.file_id, opts);
+
+          customer.lastVideoSentAt = new Date().toISOString();
+          db.saveCustomer(customer);
+        }
+        return;
+      }
+    }
+
+    if (result.status === 'unclear') {
+      if (!customer.askedForPhotoOnce) {
+        customer.askedForPhotoOnce = true;
+        db.saveCustomer(customer);
+        const replyText = customer.language === 'uz'
+          ? "Yorug' joyda, model yozuvi ko'rinadigan qilib qayta rasm yuboring"
+          : "Пожалуйста, отправьте фото еще раз при хорошем освещении, чтобы было видно название модели";
+        return sendHumanDelayedResponses(ctx, replyText, true);
+      }
+    }
+
+    // fallback / no_match
+    const noMatchText = customer.language === 'uz'
+      ? "Bu kamera uchun qo'llanma tez orada tayyorlanadi, biroz sabr qiling"
+      : "Инструкция для этой камеры скоро будет готова, пожалуйста, наберитесь терпения";
+    return sendHumanDelayedResponses(ctx, noMatchText, true);
+  }
+
+  // Handle Voice message types
+  if (msg.voice) {
+    const replyText = customer.language === 'uz'
+      ? "Kechirasiz, hozircha matn ko'rinishida yozsangiz tushunarli bo'ladi."
+      : "Извините, на данный момент мне удобнее, если вы напишете текстом.";
+    return sendHumanDelayedResponses(ctx, replyText, false);
+  }
+
+  // Handle Text message types
+  if (msg.text) {
+    const text = msg.text.trim();
+    const detectedLang = detectLanguage(text);
+    customer.language = detectedLang;
+
+    // Fast-track hook checks for specific successful connections
+    const lowercaseText = text.toLowerCase();
+    const successKeywords = ['uladim', 'boldi', 'bo\'ldi', 'ishlayapti', 'rahmat', 'подключил', 'работает', 'спасибо'];
+    const matchesSuccess = successKeywords.some(kw => lowercaseText.includes(kw));
+
+    if (matchesSuccess && customer.lastModelName) {
+      const model = db.findModelByName(customer.lastModelName);
+      if (model && model.reviewVoiceFileId) {
+        const textReply = customer.language === 'uz'
+          ? "Sizga foydali bo'lganidan xursandman! ### Quyidagi ovozli xabarni tinglang va video sharhni ko'ring."
+          : "Рад, что вам это помогло! ### Пожалуйста, прослушайте голосовое сообщение и посмотрите видеообзор.";
+        await sendHumanDelayedResponses(ctx, textReply, false);
+
+        const opts = customer.businessConnectionId ? { business_connection_id: customer.businessConnectionId } : {};
+        await bot.telegram.sendVoice(customerChatId, model.reviewVoiceFileId, opts);
+        if (model.reviewVideoFileId) {
+          await bot.telegram.sendVideo(customerChatId, model.reviewVideoFileId, opts);
+        }
+        customer.reviewSent = true;
+        db.saveCustomer(customer);
+        return;
+      }
+    }
+
+    // Determine Intent with Claude
+    const analysis = await ai.detectUserIntent(text);
+
+    if (analysis.intent === 'gratitude') {
+      const resp = customer.language === 'uz' ? "Arzimaydi. Savol bo'lsa yozing." : "Не за что. Если возникнут вопросы, пишите.";
+      await sendHumanDelayedResponses(ctx, resp, false);
+      return;
+    }
+
+    if (analysis.intent === 'cannot_send_photo') {
+      const resp = customer.language === 'uz'
+        ? "Tushunarli, kamerangiz qaysi model ekanini so'z bilan yozing"
+        : "Понимаю, напишите словами, какая у вас модель камеры";
+      await sendHumanDelayedResponses(ctx, resp, false);
+      return;
+    }
+
+    // Process Q&A Question intent
+    let kbText = "";
+    if (customer.lastModelName) {
+      const model = db.findModelByName(customer.lastModelName);
+      if (model) {
+        kbText += `Model: ${model.name}\n`;
+        model.manualImages.forEach(m => { kbText += `Yo'riqnoma: ${m.extractedText}\n`; });
+        model.appScreenshots.forEach(s => { kbText += `Ilova: ${s.extractedText}\n`; });
+      }
+    } else {
+      // General overview mapping fallback
+      const models = db.getModels();
+      kbText = `Mavjud kamera modellarimiz: ${models.map(m => m.name).join(', ')}`;
+    }
+
+    const includeGreeting = !customer.hasGreeted;
+    const responseText = await ai.generateCustomerResponse(text, kbText, customer.language, includeGreeting);
+
+    if (includeGreeting) {
+      customer.hasGreeted = true;
+      db.saveCustomer(customer);
+    }
+
+    await sendHumanDelayedResponses(ctx, responseText, false);
+
+    // Prompt for Photo on first text interaction if model isn't set yet
+    if (!customer.lastModelName && !customer.askedForPhotoOnce) {
+      customer.askedForPhotoOnce = true;
+      db.saveCustomer(customer);
+      const photoPrompt = customer.language === 'uz'
+        ? "Kamerangiz modelini aniqroq aniqlashim uchun, uning rasmini yubora olasizmi?"
+        : "Чтобы я мог точнее определить модель вашей камеры, не могли бы вы прислать ее фото?";
+      await sendHumanDelayedResponses(ctx, photoPrompt, false);
+    }
+  }
+});
+
+
+// ==========================================
+// BACKGROUND AUTOMATED CRON TASKS
+// ==========================================
+
+// Checks background processes state queues every 15 minutes
+setInterval(async () => {
+  try {
+    const customers = db.getCustomers();
+    const now = Date.now();
+
+    for (const customer of customers) {
+      // Check 1: Inactive Video guide followup checker (1 hour)
+      if (customer.lastVideoSentAt && !customer.connectionFollowupSentAt) {
+        const videoSentTime = new Date(customer.lastVideoSentAt).getTime();
+        const differenceHours = (now - videoSentTime) / (1000 * 60 * 60);
+
+        if (differenceHours >= 1.0) {
+          const checkText = customer.language === 'uz'
+            ? "Kamerani ulay oldingizmi? Qiyinchilik bo'lsa yozing"
+            : "У вас получилось подключить камеру? Если возникли трудности, напишите";
+
+          const opts = customer.businessConnectionId ? { business_connection_id: customer.businessConnectionId } : {};
+          await bot.telegram.sendMessage(customer.chatId, checkText, opts);
+
+          customer.connectionFollowupSentAt = new Date().toISOString();
+          db.saveCustomer(customer);
+        }
+      }
+
+      // Check 2: Automatic Review Request Dispatcher (10 hours elapsed context)
+      if (!customer.reviewSent && customer.lastModelName) {
+        const lastMessageTime = new Date(customer.lastSeen).getTime();
+        const differenceHours = (now - lastMessageTime) / (1000 * 60 * 60);
+
+        if (differenceHours >= 10.0) {
+          const model = db.findModelByName(customer.lastModelName);
+          if (model && model.reviewVoiceFileId) {
+            const opts = customer.businessConnectionId ? { business_connection_id: customer.businessConnectionId } : {};
+
+            await bot.telegram.sendVoice(customer.chatId, model.reviewVoiceFileId, opts);
+            if (model.reviewVideoFileId) {
+              await bot.telegram.sendVideo(customer.chatId, model.reviewVideoFileId, opts);
+            }
+
+            customer.reviewSent = true;
+            db.saveCustomer(customer);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error running background loop job tasks:', err);
+  }
+}, 15 * 60 * 1000);
+
+
+// ==========================================
+// TELEGRAM UPDATE INSTANTIATION
+// ==========================================
+
+bot.launch().then(() => {
+  console.log("EnvoCam Telegram Bot successfully connected and launched.");
+});
