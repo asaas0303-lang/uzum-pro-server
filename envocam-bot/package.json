@@ -1,14 +1,16 @@
 {
-  "name": "envocam-bot",
-  "version": "1.0.0",
+  "name": "envocam-telegram-business-bot",
+  "version": "2.0.0",
+  "description": "EnvoCam Telegram Business Bot with Claude AI Integration",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
-    "telegraf": "^4.16.3",
-    "express": "^4.19.2",
-    "node-fetch": "^2.7.0",
-    "dotenv": "^16.4.5"
+    "@anthropic-ai/sdk": "^0.28.0",
+    "telegraf": "^4.16.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
