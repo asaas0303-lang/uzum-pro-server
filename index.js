@@ -13,9 +13,9 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// Diagnostika: joriy deploy qaysi Git commit'dan ekanini ko'rsatadi (Railway avtomatik o'rnatadi)
+// Diagnostika: joriy deploy qaysi Git commit'dan ekanini va APP_URL qanday sozlanganini ko'rsatadi
 app.get('/version', (req, res) => {
-  res.json({ commit: process.env.RAILWAY_GIT_COMMIT_SHA || null });
+  res.json({ commit: process.env.RAILWAY_GIT_COMMIT_SHA || null, appUrl: process.env.APP_URL || null });
 });
 
 // In-memory sync cache from frontend to allow Bot commands to use the actual customized states
