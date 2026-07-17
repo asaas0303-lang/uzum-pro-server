@@ -186,14 +186,106 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             productTypes: state.productTypes,
+            skuMappings: state.skuMappings,
             costs: state.costs,
             shops: state.shops,
-            activeShop: state.activeShop
+            activeShop: state.activeShop,
+            products: state.cachedUzumProducts,
+            orders: state.orders,
+            expenses: state.expenses
           })
         });
       } catch(e) {
         console.error("Failed to sync client state to Express Server:", e);
       }
+    }
+
+    // Same metric logic used by dashboard.html (simulator) and index.js (bot report) — keep both in sync
+    function buildReportMetrics(orders, expenses, productTypes, skuMappings, products) {
+      const ordersCount = orders.length;
+      const soldQty = orders.reduce((acc, o) => acc + (o.quantity || 1), 0);
+      const revenue = orders.reduce((acc, o) => acc + (o.price * (o.quantity || 1)), 0);
+
+      let profitSum = 0;
+      let unmappedCount = 0;
+      orders.forEach(o => {
+        const type = productTypes.find(t => t.id === skuMappings[o.skuId]);
+        if (type) {
+          profitSum += (o.payout || 0) - (type.cost * (o.quantity || 1));
+        } else {
+          unmappedCount++;
+        }
+      });
+
+      const withdrawable = orders
+        .filter(o => o.status === 'DELIVERED')
+        .reduce((acc, o) => acc + (o.payout || 0), 0);
+
+      const expenseByType = { STORAGE: 0, LOGISTICS: 0, MARKETING: 0 };
+      expenses.forEach(x => {
+        if (expenseByType[x.type] !== undefined) expenseByType[x.type] += x.amount;
+      });
+      const totalExpenses = expenseByType.STORAGE + expenseByType.LOGISTICS + expenseByType.MARKETING;
+
+      let activeCount = products.length;
+      let outOfStockCount = 0;
+      let alertCount = 0;
+      let blockedCount = 0;
+      const urgentItems = [];
+
+      products.forEach(p => {
+        if (p.status?.value === 'PERM_BANNED') blockedCount++;
+        (p.skuList || []).forEach(sku => {
+          const qty = sku.availableAmount;
+          if (qty === 0) outOfStockCount++;
+          if (qty > 0 && qty < 15) alertCount++;
+
+          const type = productTypes.find(t => t.id === skuMappings[sku.skuId]);
+          if (qty === 0 && type && type.stock > 0) {
+            urgentItems.push(`${type.name}: ${sku.skuTitle} o'rniga uy zaxirasidan yuboring (Hozir Uzum omborida: 0 dona, Uyda: ${type.stock} dona kutilmoqda)`);
+          }
+        });
+      });
+
+      return { ordersCount, soldQty, revenue, profitSum, unmappedCount, withdrawable, expenseByType, totalExpenses, activeCount, outOfStockCount, alertCount, blockedCount, urgentItems };
+    }
+
+    // Builds the exact Telegram report text from live dashboard state (same shape as backend generateReportText)
+    function buildReportText() {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const products = state.cachedUzumProducts || [];
+      const m = buildReportMetrics(state.orders, state.expenses, state.productTypes, state.skuMappings, products);
+
+      const urgentSection = m.urgentItems.length
+        ? `\n🚨 *ZUDLIK BILAN OMBORGA YUBORING:*\n${m.urgentItems.map(t => `• ${t}`).join('\n')}\n`
+        : '';
+
+      return `🟣 *Uzum Pro Dashboard*
+Assalomu alaykum!
+
+📅 *${todayStr}* uchun hisobot
+
+📦 Qabul qilingan buyurtmalar: ${m.ordersCount} ta
+🛍️ Sotilgan tovarlar: ${m.soldQty} ta
+🏦 Daromad: ${m.revenue.toLocaleString('uz-UZ')} so'm
+💵 Sof foyda: ${m.profitSum.toLocaleString('uz-UZ')} so'm${m.unmappedCount > 0 ? ` (bog'lanmagan: ${m.unmappedCount} ta buyurtma hisobga kirmadi)` : ''}
+
+💰 Yechib olish mumkin (yetkazilgan buyurtmalar bo'yicha): ${m.withdrawable.toLocaleString('uz-UZ')} so'm
+
+💸 Xarajatlar (jami ${m.totalExpenses.toLocaleString('uz-UZ')} so'm):
+  ➤ Logistika: ${m.expenseByType.LOGISTICS.toLocaleString('uz-UZ')} so'm
+  ➤ Saqlash: ${m.expenseByType.STORAGE.toLocaleString('uz-UZ')} so'm
+  ➤ Marketing: ${m.expenseByType.MARKETING.toLocaleString('uz-UZ')} so'm
+
+📦 Tovarlar holati:
+✅ Sotuvda: ${m.activeCount} ta tovar
+❌ Ogohlantirish (Tugagan): ${m.outOfStockCount} ta SKU
+⚠️ Kam qolgan: ${m.alertCount} ta SKU
+🚫 Bloklangan: ${m.blockedCount} ta
+${urgentSection}
+/start — boshlash
+/hisobot — hisobot
+/dashboard — mini app ochish`;
     }
 
     function saveState() {
@@ -257,14 +349,21 @@
         const pData = await fetchFromProxy(`/api/uzum/product/shop/${state.activeShop}`);
         state.cachedUzumProducts = pData.payload || [];
 
-        const oData = await fetchFromProxy('/api/uzum/finance/orders');
+        // Sana oralig'i: oxirgi 30 kun
+        const dateTo = new Date().toISOString().split('T')[0];
+        const dateFrom = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        const financeQuery = `shopIds=${state.activeShop}&dateFrom=${dateFrom}&dateTo=${dateTo}`;
+
+        const oData = await fetchFromProxy(`/api/uzum/finance/orders?${financeQuery}`);
         state.orders = oData.payload?.orders || [];
 
-        const eData = await fetchFromProxy('/api/uzum/finance/expenses');
+        const eData = await fetchFromProxy(`/api/uzum/finance/expenses?${financeQuery}`);
         state.expenses = eData.payload || [];
 
         const rData = await fetchFromProxy(`/api/uzum/shop/${state.activeShop}/return`);
         state.returns = rData.payload || [];
+
+        syncStateToServer();
 
         renderShopPills();
         switchTab(state.activeTab); // Re-renders current active tab with fresh loads
@@ -758,10 +857,14 @@
             const costSetting = state.costs[sku.skuId] || { budget: 0, size: 'МГТ' };
             const logistics = getLogisticsCost(costSetting.size);
             const storage = 2000; // Estimated 2k Storage UZS per item
-            const marketing = costSetting.budget;
+            const dailyBudget = costSetting.budget; // "Reklama byudjeti (kuniga, so'm)"
+            // oxirgi 30 kunda shu SKU necha dona sotilgani
+            const unitsSold = state.orders.filter(o => o.skuId === sku.skuId).reduce((acc, o) => acc + (o.quantity || 1), 0);
+            const adCostPerUnit = unitsSold > 0 ? (dailyBudget * 30) / unitsSold : 0;
+            const noSalesWithSpend = dailyBudget > 0 && unitsSold === 0;
             const tannarx = mappedType ? mappedType.cost : 0;
 
-            const profit = sellPrice - commission - logistics - storage - marketing - tannarx;
+            const profit = sellPrice - commission - logistics - storage - adCostPerUnit - tannarx;
             const pmMargin = sellPrice > 0 ? ((profit / sellPrice) * 100).toFixed(1) : 0;
             const profitColor = profit >= 0 ? "text-brand" : "text-rose-400";
 
@@ -806,9 +909,13 @@
                 </div>
 
                 <!-- ROI alerts -->
-                ${marketing > 0 ? `
+                ${noSalesWithSpend ? `
+                  <div class="mt-2 text-[9.5px] bg-slate-900 border border-amber-800 p-1 rounded-md text-center flex items-center justify-center gap-1.5">
+                    <span class="text-amber-400">⚠️ Reklama ketyapti, sotuv yo'q — to'xtating yoki tekshiring</span>
+                  </div>
+                ` : dailyBudget > 0 ? `
                   <div class="mt-2 text-[9.5px] bg-slate-900 border border-slate-800 p-1 rounded-md text-center flex items-center justify-center gap-1.5">
-                    <span class="${profit <= 0 ? 'text-rose-400' : 'text-emerald-400'}">● Spend: ${marketing.toLocaleString()} d | ROI: ${((profit / marketing) * 100).toFixed(0)}%</span>
+                    <span class="${profit <= 0 ? 'text-rose-400' : 'text-emerald-400'}">● Reklama/dona: ${adCostPerUnit.toLocaleString(undefined, {maximumFractionDigits: 0})} d | ROI: ${((profit / adCostPerUnit) * 100).toFixed(0)}%</span>
                     ${profit <= 0 ? `<span class="text-amber-400">⚠️ Sarf zarar berdi — kamaytiring!</span>` : ''}
                   </div>
                 ` : ''}
@@ -949,10 +1056,15 @@
       let totalMappedCostSum = 0;
 
       // Feed from fallback or real API values
+      const unitsSoldBySku = {};
+      state.orders.forEach(o => {
+        unitsSoldBySku[o.skuId] = (unitsSoldBySku[o.skuId] || 0) + (o.quantity || 1);
+      });
+
       state.orders.forEach(o => {
         totalSales += o.price * (o.quantity || 1);
         totalPayout += o.payout || (o.price * 0.8);
-        
+
         const mappedTypeId = state.skuMappings[o.skuId];
         const mappedType = state.productTypes.find(t => t.id === mappedTypeId);
         if (mappedType) {
@@ -963,7 +1075,19 @@
 
         const costSetting = state.costs[o.skuId] || { budget: 0, size: 'МГТ' };
         totalShipping += getLogisticsCost(costSetting.size) * (o.quantity || 1);
-        totalMarketingVal += costSetting.budget;
+      });
+
+      // Reklama: kunlik byudjet * 30 kun, faqat shu SKU oxirgi 30 kunda sotilgan bo'lsa hisoblanadi
+      const noSaleAdSpendSkus = [];
+      Object.keys(state.costs).forEach(skuId => {
+        const dailyBudget = state.costs[skuId].budget || 0;
+        if (dailyBudget <= 0) return;
+        const unitsSold = unitsSoldBySku[skuId] || 0;
+        if (unitsSold > 0) {
+          totalMarketingVal += dailyBudget * 30;
+        } else {
+          noSaleAdSpendSkus.push(skuId);
+        }
       });
 
       // Storage and general expense feeds
@@ -1025,6 +1149,12 @@
                 <span class="text-slate-400">Marketing & Reklama:</span>
                 <span class="text-slate-100 font-mono">${totalMarketingVal.toLocaleString()} so'm</span>
               </div>
+              ${noSaleAdSpendSkus.length > 0 ? `
+                <div class="flex items-start gap-1.5 text-[10.5px] text-amber-400 bg-amber-950/20 border border-amber-900/40 rounded-lg px-2 py-1.5">
+                  <span>⚠️</span>
+                  <span>Reklama ketyapti, sotuv yo'q — to'xtating yoki tekshiring (${noSaleAdSpendSkus.length} ta SKU)</span>
+                </div>
+              ` : ''}
               <div class="flex justify-between text-sm py-2 border-t border-darkBorder/40 mt-1.5">
                 <span class="text-slate-300 font-bold uppercase text-[11px] tracking-wider">Hisoblangan Sof Foyda:</span>
                 <span class="font-black font-mono text-xs ${profitColor}">${totalProfit.toLocaleString()} so'm</span>
@@ -1164,38 +1294,7 @@
         if (command === '/start') {
           reply = `🟣 *Uzum Pro Dashboard* \n\nAssalomu alaykum! Sokin kiritshingiz muvaffaqiyatli sodir bo'ldi. Men sizning Uzum sotuvchi yordamchingizmi.\n\nFoydalanish uchun buyruqlar:\n/hisobot — Kunlik savdo va moliya hisoboti\n/dashboard — Mini App darchasiga kirish`;
         } else if (command === '/hisobot') {
-          const todayStr = new Date().toISOString().split('T')[0];
-          // Collect counts
-          let totalSalesVal = state.orders.reduce((acc, o) => acc + (o.price * o.quantity), 0);
-          let totalPayoutVal = state.orders.reduce((acc, o) => acc + o.payout, 0);
-          let totalProfitVal = totalPayoutVal - (state.orders.length * 45000); // estimated tannarx default
-          
-          reply = `🟣 *Uzum Pro Dashboard*
-Assalomu alaykum!
-
-📅 *${todayStr}* uchun hisobot
-
-📦 Qabul qilingan buyurtmalar: ${state.orders.length || 0} ta
-🛍️ Sotilgan tovarlar: ${state.orders.reduce((acc, o) => acc + o.quantity, 0) || 0} ta
-🏦 Daromad: ${totalSalesVal.toLocaleString('uz-UZ')} so'm
-💵 Sof foyda: ${totalProfitVal.toLocaleString('uz-UZ')} so'm
-
-📤 Yechib olishga tayyor: 147 ta
-💰 Summa: ${(totalPayoutVal - 150000).toLocaleString('uz-UZ')} so'm
-
-🚫 Kecha xarajatlar: 1 230 000 so'm
-  ➤ Logistika: 450 000 so'm
-  ➤ Saqlash: 230 000 so'm
-  ➤ Marketing: 550 000 so'm
-
-📦 Tovarlar holati:
-✅ Sotuvda: ${state.cachedUzumProducts?.length || 3} ta tovar
-❌ Ogohlantirish (Tugagan): 1 ta SKU
-⚠️ Kam qolgan: 2 ta SKU
-🚫 Bloklangan: 1 ta
-
-🚨 *ZUDLIK BILAN OMBORGA YUBORING:*
-• A9 kamera: Yashirin Kamera HD (Qora) o'rniga uy zaxirasidan yuboring (Hozir Uzum omborida: 0 dona, Uyda: 400 dona kutilmoqda)`;
+          reply = buildReportText();
         }
 
         // Output Bot Bubble
@@ -1242,7 +1341,7 @@ Assalomu alaykum!
         document.getElementById('ai-results-panel').classList.remove('hidden');
         selectAiTab('bugun');
       } catch (err) {
-        alert(err.message || Xatolik);
+        alert(err.message || "Xatolik yuz berdi. Qayta urinib ko'ring.");
       } finally {
         btn.disabled = false;
         btn.innerHTML = `<i data-lucide="brain-circuit" class="w-4 h-4"></i> "Bugun nima qilishim kerak?" va AI Tahlil`;

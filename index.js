@@ -1,13 +1,15 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
+import cron from 'node-cron';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
@@ -18,12 +20,20 @@ let syncedState = {
     { id: 't2', name: 'X5 kamera', stock: 300, cost: 95000 },
     { id: 't3', name: 'To\'rt burchak', stock: 150, cost: 180000 }
   ],
+  skuMappings: {
+    '5501': 't1', '5502': 't1', '5503': 't1',
+    '5601': 't2', '5602': 't2',
+    '5701': 't3', '5702': 't3'
+  },
   costs: {}, // ad spends e.g. { skuId: 10000 }
   shops: [
     { shopId: 61122, shopTitle: 'Uzum Pro Store' },
     { shopId: 72540, shopTitle: 'Smart Gadgets Market' }
   ],
-  activeShop: 61122
+  activeShop: 61122,
+  products: [], // real Uzum product cards synced from frontend (dashboard.html state.cachedUzumProducts)
+  orders: [], // real Uzum finance orders synced from frontend (dashboard.html state.orders)
+  expenses: [] // real Uzum finance expenses synced from frontend (dashboard.html state.expenses)
 };
 
 // Fallback high-fidelity Uzum Mock Data to allow beautiful demo interaction instantly
@@ -103,38 +113,40 @@ const MOCK_RETURNS = [
   { returnId: 3002, skuId: 5702, productTitle: "Kvadrat Kamera Magnitli", price: 199000, returnDate: "2026-05-22T15:30:00Z", status: "ACCEPTED", defectReason: "Noto'g'ri rang kelgan" }
 ];
 
-// Helper to construct tokenized headers
-function getHeaders(req) {
-  const authHeader = req.headers['authorization'];
-  if (authHeader) {
-    return {
-      'Authorization': authHeader,
-      'Content-Type': 'application/json'
-    };
-  }
-  const token = process.env.UZUM_TOKEN;
-  if (token) {
-    return {
-      'Authorization': token,
-      'Content-Type': 'application/json'
-    };
-  }
-  return {};
+// Tokenni bitta joydan olamiz
+function getAuthToken(req) {
+  return req.headers['authorization'] || process.env.UZUM_TOKEN || null;
+}
+
+// GET so'rovlar uchun — MUHIM: Content-Type YO'Q!
+function getGetHeaders(req) {
+  const token = getAuthToken(req);
+  return token ? { 'Authorization': token } : {};
+}
+
+// POST so'rovlar uchun — Content-Type kerak
+function getPostHeaders(req) {
+  const token = getAuthToken(req);
+  return token ? { 'Authorization': token, 'Content-Type': 'application/json' } : {};
 }
 
 // 1. Service: State sync for Bot calculations
 app.post('/api/sync-state', (req, res) => {
-  const { productTypes, costs, shops, activeShop } = req.body;
+  const { productTypes, skuMappings, costs, shops, activeShop, products, orders, expenses } = req.body;
   if (productTypes) syncedState.productTypes = productTypes;
+  if (skuMappings) syncedState.skuMappings = skuMappings;
   if (costs) syncedState.costs = costs;
   if (shops) syncedState.shops = shops;
   if (activeShop) syncedState.activeShop = activeShop;
+  if (products) syncedState.products = products;
+  if (orders) syncedState.orders = orders;
+  if (expenses) syncedState.expenses = expenses;
   res.json({ success: true, message: "State synced successfully server-side." });
 });
 
 // 2. Proxies / Mimics for Uzum Seller API
 app.get('/api/uzum/shops', async (req, res) => {
-  const headers = getHeaders(req);
+  const headers = getGetHeaders(req);
   if (Object.keys(headers).length > 0) {
     try {
       const response = await fetch('https://api-seller.uzum.uz/api/seller-openapi/v1/shops', { headers });
@@ -149,7 +161,7 @@ app.get('/api/uzum/shops', async (req, res) => {
 
 app.get('/api/uzum/product/shop/:shopId', async (req, res) => {
   const shopId = req.params.shopId;
-  const headers = getHeaders(req);
+  const headers = getGetHeaders(req);
   if (Object.keys(headers).length > 0) {
     try {
       const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/product/shop/${shopId}`, { headers });
@@ -167,7 +179,7 @@ app.get('/api/uzum/product/shop/:shopId', async (req, res) => {
 });
 
 app.get('/api/uzum/finance/orders', async (req, res) => {
-  const headers = getHeaders(req);
+  const headers = getGetHeaders(req);
   if (Object.keys(headers).length > 0) {
     try {
       const query = new URLSearchParams(req.query).toString();
@@ -182,7 +194,7 @@ app.get('/api/uzum/finance/orders', async (req, res) => {
 });
 
 app.get('/api/uzum/finance/expenses', async (req, res) => {
-  const headers = getHeaders(req);
+  const headers = getGetHeaders(req);
   if (Object.keys(headers).length > 0) {
     try {
       const query = new URLSearchParams(req.query).toString();
@@ -198,7 +210,7 @@ app.get('/api/uzum/finance/expenses', async (req, res) => {
 
 app.get('/api/uzum/shop/:shopId/return', async (req, res) => {
   const shopId = req.params.shopId;
-  const headers = getHeaders(req);
+  const headers = getGetHeaders(req);
   if (Object.keys(headers).length > 0) {
     try {
       const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/shop/${shopId}/return`, { headers });
@@ -212,7 +224,7 @@ app.get('/api/uzum/shop/:shopId/return', async (req, res) => {
 });
 
 app.get('/api/uzum/fbs/orders', async (req, res) => {
-  const headers = getHeaders(req);
+  const headers = getGetHeaders(req);
   if (Object.keys(headers).length > 0) {
     try {
       const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v2/fbs/orders`, { headers });
@@ -326,70 +338,97 @@ async function sendTelegramMessage(token, chatId, text, replyMarkup = null) {
   }
 }
 
-// Global Text Builder for Telegram Daily Report
-function generateReportText() {
-  const todayStr = new Date().toISOString().split('T')[0];
-  
-  // Calculate dynamic metrics based on simulated state or mock database
-  const activeCount = MOCK_PRODUCTS_61122.length + MOCK_PRODUCTS_72540.length;
-  
-  // Inventory metrics
-  let totalUzumStock = 0;
-  let outOfStockCount = 0;
-  let blockedCount = 0;
-  let alertCount = 0;
+// Real data source: prefer frontend-synced live data, fall back to mock demo data
+function getReportDataSource() {
+  const orders = (syncedState.orders && syncedState.orders.length) ? syncedState.orders : MOCK_ORDERS;
+  const expenses = (syncedState.expenses && syncedState.expenses.length) ? syncedState.expenses : MOCK_EXPENSES;
+  const products = (syncedState.products && syncedState.products.length) ? syncedState.products : [...MOCK_PRODUCTS_61122, ...MOCK_PRODUCTS_72540];
+  return { orders, expenses, products };
+}
 
-  MOCK_PRODUCTS_61122.forEach(p => {
-    const isBanned = p.status?.value === 'PERM_BANNED';
-    if (isBanned) blockedCount++;
-    p.skuList.forEach(sku => {
-      totalUzumStock += sku.availableAmount;
-      if (sku.availableAmount === 0) outOfStockCount++;
-      if (sku.availableAmount > 0 && sku.availableAmount < 15) alertCount++;
+// Same metric logic used by index.js (bot report) and dashboard.html (simulator) — keep both in sync
+function buildReportMetrics(orders, expenses, productTypes, skuMappings, products) {
+  const ordersCount = orders.length;
+  const soldQty = orders.reduce((acc, o) => acc + (o.quantity || 1), 0);
+  const revenue = orders.reduce((acc, o) => acc + (o.price * (o.quantity || 1)), 0);
+
+  let profitSum = 0;
+  let unmappedCount = 0;
+  orders.forEach(o => {
+    const type = productTypes.find(t => t.id === skuMappings[o.skuId]);
+    if (type) {
+      profitSum += (o.payout || 0) - (type.cost * (o.quantity || 1));
+    } else {
+      unmappedCount++;
+    }
+  });
+
+  const withdrawable = orders
+    .filter(o => o.status === 'DELIVERED')
+    .reduce((acc, o) => acc + (o.payout || 0), 0);
+
+  const expenseByType = { STORAGE: 0, LOGISTICS: 0, MARKETING: 0 };
+  expenses.forEach(x => {
+    if (expenseByType[x.type] !== undefined) expenseByType[x.type] += x.amount;
+  });
+  const totalExpenses = expenseByType.STORAGE + expenseByType.LOGISTICS + expenseByType.MARKETING;
+
+  let activeCount = products.length;
+  let outOfStockCount = 0;
+  let alertCount = 0;
+  let blockedCount = 0;
+  const urgentItems = [];
+
+  products.forEach(p => {
+    if (p.status?.value === 'PERM_BANNED') blockedCount++;
+    (p.skuList || []).forEach(sku => {
+      const qty = sku.availableAmount;
+      if (qty === 0) outOfStockCount++;
+      if (qty > 0 && qty < 15) alertCount++;
+
+      const type = productTypes.find(t => t.id === skuMappings[sku.skuId]);
+      if (qty === 0 && type && type.stock > 0) {
+        urgentItems.push(`${type.name}: ${sku.skuTitle} o'rniga uy zaxirasidan yuboring (Hozir Uzum omborida: 0 dona, Uyda: ${type.stock} dona kutilmoqda)`);
+      }
     });
   });
 
-  // Home stock calculations
-  let homeStockSumQty = 0;
-  let homeStockSumValue = 0;
-  syncedState.productTypes.forEach(t => {
-    homeStockSumQty += t.stock;
-    homeStockSumValue += (t.stock * t.cost);
-  });
+  return { ordersCount, soldQty, revenue, profitSum, unmappedCount, withdrawable, expenseByType, totalExpenses, activeCount, outOfStockCount, alertCount, blockedCount, urgentItems };
+}
 
-  // Finance
-  let totalSalesVal = MOCK_ORDERS.reduce((acc, o) => acc + (o.price * o.quantity), 0);
-  let totalPayoutVal = MOCK_ORDERS.reduce((acc, o) => acc + o.payout, 0);
-  let totalProfitVal = totalPayoutVal - (MOCK_ORDERS.length * 45000); // Tannarx fallback
+// Global Text Builder for Telegram Daily Report
+function generateReportText() {
+  const todayStr = new Date().toISOString().split('T')[0];
+  const { orders, expenses, products } = getReportDataSource();
+  const m = buildReportMetrics(orders, expenses, syncedState.productTypes, syncedState.skuMappings, products);
 
-  // Return text format requested exactly
+  const urgentSection = m.urgentItems.length
+    ? `\n🚨 *ZUDLIK BILAN OMBORGA YUBORING:*\n${m.urgentItems.map(t => `• ${t}`).join('\n')}\n`
+    : '';
+
   return `🟣 *Uzum Pro Dashboard*
 Assalomu alaykum!
 
 📅 *${todayStr}* uchun hisobot
 
-📦 Qabul qilingan buyurtmalar: ${MOCK_ORDERS.length} ta
-🛍️ Sotilgan tovarlar: ${MOCK_ORDERS.reduce((acc, o) => acc + o.quantity, 0)} ta
-🏦 Daromad: ${totalSalesVal.toLocaleString('uz-UZ')} so'm
-💵 Sof foyda: ${totalProfitVal.toLocaleString('uz-UZ')} so'm
+📦 Qabul qilingan buyurtmalar: ${m.ordersCount} ta
+🛍️ Sotilgan tovarlar: ${m.soldQty} ta
+🏦 Daromad: ${m.revenue.toLocaleString('uz-UZ')} so'm
+💵 Sof foyda: ${m.profitSum.toLocaleString('uz-UZ')} so'm${m.unmappedCount > 0 ? ` (bog'lanmagan: ${m.unmappedCount} ta buyurtma hisobga kirmadi)` : ''}
 
-📤 Yechib olishga tayyor: 147 ta
-💰 Summa: ${(totalPayoutVal - 150000).toLocaleString('uz-UZ')} so'm
+💰 Yechib olish mumkin (yetkazilgan buyurtmalar bo'yicha): ${m.withdrawable.toLocaleString('uz-UZ')} so'm
 
-🚫 Kecha xarajatlar: 1 230 000 so'm
-  ➤ Logistika: 450 000 so'm
-  ➤ Saqlash: 230 000 so'm
-  ➤ Marketing: 550 000 so'm
+💸 Xarajatlar (jami ${m.totalExpenses.toLocaleString('uz-UZ')} so'm):
+  ➤ Logistika: ${m.expenseByType.LOGISTICS.toLocaleString('uz-UZ')} so'm
+  ➤ Saqlash: ${m.expenseByType.STORAGE.toLocaleString('uz-UZ')} so'm
+  ➤ Marketing: ${m.expenseByType.MARKETING.toLocaleString('uz-UZ')} so'm
 
 📦 Tovarlar holati:
-✅ Sotuvda: ${activeCount} ta tovar
-❌ Ogohlantirish (Tugagan): ${outOfStockCount} ta SKU
-⚠️ Kam qolgan: ${alertCount} ta SKU
-🚫 Bloklangan: ${blockedCount} ta
-
-🚨 *ZUDLIK BILAN OMBORGA YUBORING:*
-• A9 kamera: Yashirin Kamera HD (Qora) o'rniga uy zaxirasidan yuboring (Hozir Uzum omborida: 0 dona, Uyda: 400 dona kutilmoqda)
-
+✅ Sotuvda: ${m.activeCount} ta tovar
+❌ Ogohlantirish (Tugagan): ${m.outOfStockCount} ta SKU
+⚠️ Kam qolgan: ${m.alertCount} ta SKU
+🚫 Bloklangan: ${m.blockedCount} ta
+${urgentSection}
 /start — boshlash
 /hisobot — hisobot
 /dashboard — mini app ochish`;
@@ -443,10 +482,10 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
 });
 
 // Endpoint to fetch simulated bot report text in the simulator
-app.get('/api/tg-bot/simulate-report', (res, req) => {
+app.get('/api/tg-bot/simulate-report', (req, res) => {
   // Return the textual report so frontend simulator can demonstrate beautifully
   const text = generateReportText();
-  req.json({ report: text });
+  res.json({ report: text });
 });
 
 // Automatic bot registration logic
@@ -462,6 +501,21 @@ if (process.env.TELEGRAM_BOT_TOKEN && process.env.APP_URL) {
     .catch(err => {
       console.error(`Telegram Bot webhook registration failed:`, err);
     });
+}
+
+// Scheduled daily report — 04:00 UTC (09:00 Toshkent vaqti)
+const ADMIN_CHAT_ID = '5155194813';
+if (process.env.TELEGRAM_BOT_TOKEN) {
+  cron.schedule('0 4 * * *', async () => {
+    try {
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      const reportText = generateReportText();
+      await sendTelegramMessage(token, ADMIN_CHAT_ID, reportText);
+      console.log('Scheduled daily report sent to admin chat.');
+    } catch (err) {
+      console.error('Scheduled daily report failed:', err);
+    }
+  });
 }
 
 // Serve Telegram UI directly
