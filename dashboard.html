@@ -169,6 +169,7 @@
       productTypes: JSON.parse(localStorage.getItem('uz_product_types')) || defaultProductTypes,
       skuMappings: JSON.parse(localStorage.getItem('uz_sku_mappings')) || defaultSkuMappings,
       costs: JSON.parse(localStorage.getItem('uz_costs')) || defaultCosts,
+      productFilter: localStorage.getItem('uz_product_filter') || 'active', // Kartochkalar filtri: 'active'|'all'|'banned'|'depleted'
       cachedUzumProducts: null,
       orders: [],
       expenses: [],
@@ -315,6 +316,32 @@ ${urgentSection}
       if (size === 'СГТ') return 8000;
       if (size === 'КГТ') return 20000;
       return 5000; // МГТ default
+    }
+
+    // Kartochkalar filtri (Uzum ilovasidagidek): mahsulot berilgan filtrga tushadimi?
+    function productMatchesFilter(p, filter) {
+      const isBanned = p.status?.value === 'PERM_BANNED';
+      const anyInStock = (p.skuList || []).some(s => (s.availableAmount || 0) > 0);
+      const allOut = (p.skuList || []).every(s => (s.availableAmount || 0) <= 0);
+      switch (filter) {
+        case 'active': return !isBanned && anyInStock;   // Sotuvda
+        case 'banned': return isBanned;                  // Bloklangan
+        case 'depleted': return !isBanned && allOut;     // Tugagan
+        case 'all':
+        default: return true;                            // Barcha tovarlar
+      }
+    }
+
+    // Mahsulotning umumiy zaxirasi (barcha SKU'lar yig'indisi)
+    function productTotalStock(p) {
+      return (p.skuList || []).reduce((acc, s) => acc + (s.availableAmount || 0), 0);
+    }
+
+    // Filtrni tanlash: state + localStorage'da saqlanadi, tab almashtirilganda yo'qolmaydi
+    function setProductFilter(filter) {
+      state.productFilter = filter;
+      localStorage.setItem('uz_product_filter', filter);
+      renderProducts(document.getElementById('main-view'));
     }
 
     // Server API Fetcher
@@ -823,10 +850,12 @@ ${urgentSection}
     // UI Panel: PRODUCTS & MAPPINGS
     function renderProducts(root) {
       let searchVal = document.getElementById('product-search-input')?.value || '';
+      const activeFilter = state.productFilter || 'active';
+      const allProducts = state.cachedUzumProducts || [];
 
       let listHTML = '';
 
-      if (!state.cachedUzumProducts || state.cachedUzumProducts.length === 0) {
+      if (allProducts.length === 0) {
         listHTML = `
           <div class="p-6 text-center text-slate-500 bg-darkCard border border-darkBorder rounded-2xl flex flex-col items-center gap-2">
             <i data-lucide="package-search" class="w-8 h-8 text-slate-600"></i>
@@ -834,12 +863,28 @@ ${urgentSection}
           </div>
         `;
       } else {
-        const filtered = state.cachedUzumProducts.filter(p => {
-          if (!searchVal) return true;
-          return p.title.toLowerCase().includes(searchVal.toLowerCase()) || 
-                 p.skuList.some(s => s.skuTitle.toLowerCase().includes(searchVal.toLowerCase()) || s.skuCode.toLowerCase().includes(searchVal.toLowerCase()));
-        });
+        // Avval filtr qo'llanadi, keyin qidiruv matni
+        let working = allProducts.filter(p => productMatchesFilter(p, activeFilter));
+        if (searchVal) {
+          working = working.filter(p =>
+            p.title.toLowerCase().includes(searchVal.toLowerCase()) ||
+            p.skuList.some(s => s.skuTitle.toLowerCase().includes(searchVal.toLowerCase()) || s.skuCode.toLowerCase().includes(searchVal.toLowerCase()))
+          );
+        }
+        // Sotuvda: tugash arafasidagilar (kam zaxira) tepada — o'sish tartibida
+        if (activeFilter === 'active') {
+          working = working.slice().sort((a, b) => productTotalStock(a) - productTotalStock(b));
+        }
+        const filtered = working;
 
+        if (filtered.length === 0) {
+          listHTML = `
+            <div class="p-6 text-center text-slate-500 bg-darkCard border border-darkBorder rounded-2xl flex flex-col items-center gap-2">
+              <i data-lucide="inbox" class="w-8 h-8 text-slate-600"></i>
+              <span class="text-xs">Bu bo'limda tovar yo'q</span>
+            </div>
+          `;
+        } else {
         listHTML = filtered.map(p => {
           const isBanned = p.status?.value === 'PERM_BANNED';
           const pImage = p.photos?.[0]?.photoKey || 'https://via.placeholder.com/60';
@@ -950,10 +995,33 @@ ${urgentSection}
             </div>
           `;
         }).join('');
+        }
       }
+
+      // Filtr tugmalari uchun sonlar (butun ro'yxat bo'yicha, qidiruvdan mustaqil)
+      const filterDefs = [
+        { key: 'active', label: 'Sotuvda' },
+        { key: 'all', label: 'Barcha tovarlar' },
+        { key: 'banned', label: 'Bloklangan' },
+        { key: 'depleted', label: 'Tugagan' }
+      ];
+      const filterButtons = filterDefs.map(f => {
+        const selected = f.key === activeFilter;
+        const count = allProducts.filter(p => productMatchesFilter(p, f.key)).length;
+        return `
+          <button onclick="setProductFilter('${f.key}')" class="shrink-0 text-[11px] font-semibold px-3 py-1.5 rounded-lg border transition ${selected ? 'bg-brand text-darkBg border-brand badge-glow' : 'bg-darkBg text-slate-300 border-darkBorder hover:text-white'}">
+            ${f.label} <span class="${selected ? 'text-darkBg/70' : 'text-slate-500'}">${count}</span>
+          </button>
+        `;
+      }).join('');
 
       root.innerHTML = `
         <div class="flex flex-col gap-4">
+          <!-- Filtr tugmalari (Uzum ilovasidagidek) -->
+          <div class="flex gap-2 overflow-x-auto pb-1 -mb-1">
+            ${filterButtons}
+          </div>
+
           <!-- Filter Search block -->
           <div class="p-3 bg-darkCard border border-darkBorder rounded-2xl flex items-center gap-2">
             <i data-lucide="search" class="w-4 h-4 text-slate-400"></i>
