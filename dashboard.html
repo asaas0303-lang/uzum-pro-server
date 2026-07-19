@@ -174,6 +174,7 @@
       orders: [],
       expenses: [],
       returns: [],
+      dataErrors: { products: null, orders: null, expenses: null, returns: null },
       activeTab: 'dashboard',
       aiResults: null,
       aiLoading: false
@@ -346,61 +347,85 @@ ${urgentSection}
 
     // Server API Fetcher
     async function fetchFromProxy(endpoint) {
-      // Tries to pull live config or mock.
       const headers = {};
       const token = localStorage.getItem('uzum_api_token');
       if (token) {
         headers['Authorization'] = token;
       }
       const response = await fetch(endpoint, { headers });
+      const data = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(`API failed with status ${response.status}`);
+        // Backend 502 UZUM_API_ERROR bilan aniq sabab qaytaradi — shuni ko'rsatamiz
+        const detail = (data && data.detail) ? data.detail : `HTTP ${response.status}`;
+        throw new Error(detail);
       }
-      return response.json();
+      return data;
+    }
+
+    function setBadge(state_, cls) {
+      const badge = document.getElementById('api-status-badge');
+      badge.textContent = state_;
+      badge.className = `text-[10px] px-2 py-0.5 rounded-full font-mono ${cls}`;
     }
 
     async function refreshData() {
       document.getElementById('api-status-badge').classList.add('animate-pulse');
-      const badge = document.getElementById('api-status-badge');
+      state.dataErrors = { products: null, orders: null, expenses: null, returns: null };
+
+      // Mahsulotlar — badge asosan shu chaqiruvga qarab belgilanadi
       try {
-        // Fetch products, orders, returns, and expenses
         const pData = await fetchFromProxy(`/api/uzum/product/shop/${state.activeShop}`);
         state.cachedUzumProducts = pData.payload || [];
-
-        // Badge haqiqiy holatni ko'rsatadi: proxy real Uzum'dan javob bergan bo'lsa (source==='live') "Live"
         if (pData.source === 'live') {
-          badge.textContent = "Live Connected";
-          badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 font-mono badge-glow";
+          setBadge('Live Connected', 'bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 badge-glow');
         } else {
-          badge.textContent = "Demo Mode";
-          badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-300 font-mono";
+          setBadge('Demo Mode', 'bg-slate-800 border border-slate-700 text-slate-300');
         }
+      } catch (e) {
+        console.error("Mahsulotlarni yuklashda xato:", e);
+        state.cachedUzumProducts = null;
+        state.dataErrors.products = e.message;
+        setBadge("⚠️ Ma'lumot yo'q", 'bg-rose-950/80 border border-rose-500/50 text-rose-300');
+      }
 
-        // Sana oralig'i: oxirgi 30 kun
-        const dateTo = new Date().toISOString().split('T')[0];
-        const dateFrom = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-        const financeQuery = `shopIds=${state.activeShop}&dateFrom=${dateFrom}&dateTo=${dateTo}`;
+      // Sana oralig'i: oxirgi 30 kun
+      const dateTo = new Date().toISOString().split('T')[0];
+      const dateFrom = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const financeQuery = `shopIds=${state.activeShop}&dateFrom=${dateFrom}&dateTo=${dateTo}`;
 
+      // Har bir bo'lim mustaqil yuklanadi — bittasi qulasa, boshqalari baribir urinib ko'radi
+      try {
         const oData = await fetchFromProxy(`/api/uzum/finance/orders?${financeQuery}`);
         state.orders = oData.payload?.orders || [];
+      } catch (e) {
+        console.error("Buyurtmalarni yuklashda xato:", e);
+        state.orders = [];
+        state.dataErrors.orders = e.message;
+      }
 
+      try {
         const eData = await fetchFromProxy(`/api/uzum/finance/expenses?${financeQuery}`);
         state.expenses = eData.payload || [];
+      } catch (e) {
+        console.error("Xarajatlarni yuklashda xato:", e);
+        state.expenses = [];
+        state.dataErrors.expenses = e.message;
+      }
 
+      try {
         const rData = await fetchFromProxy(`/api/uzum/shop/${state.activeShop}/return`);
         state.returns = rData.payload || [];
-
-        syncStateToServer();
-
-        renderShopPills();
-        switchTab(state.activeTab); // Re-renders current active tab with fresh loads
       } catch (e) {
-        console.error("Uzum fetch errored, loading mock defaults instead.", e);
-        // Fallback already bound to index.js endpoints so index.js acts as high-fidelity server proxy.
-      } finally {
-        document.getElementById('api-status-badge').classList.remove('animate-pulse');
-        lucide.createIcons();
+        console.error("Qaytarishlarni yuklashda xato:", e);
+        state.returns = [];
+        state.dataErrors.returns = e.message;
       }
+
+      syncStateToServer();
+      renderShopPills();
+      switchTab(state.activeTab); // Re-renders current active tab with fresh loads
+      document.getElementById('api-status-badge').classList.remove('animate-pulse');
+      lucide.createIcons();
     }
 
     // Modal Control
@@ -647,6 +672,32 @@ ${urgentSection}
       }
     }
 
+    // Render funksiyalaridan biri qulasa, shu tab'da toza xato ko'rsatiladi (boshqa tab'lar ishlayveradi)
+    function showRenderError(root, label, err) {
+      console.error(`${label} render xatosi:`, err);
+      root.innerHTML = `
+        <div class="p-6 text-center text-rose-400 bg-rose-950/20 border border-rose-900/40 rounded-2xl flex flex-col items-center gap-2">
+          <i data-lucide="alert-triangle" class="w-8 h-8"></i>
+          <span class="text-xs font-bold">Bu bo'limni ko'rsatishda xato:</span>
+          <span class="text-[10px] text-rose-300 font-mono break-all">${(err && err.message) || 'Noma\'lum xato'}</span>
+        </div>
+      `;
+      lucide.createIcons();
+    }
+
+    // Ma'lumot yuklashda xato bo'lganda ko'rinadigan banner (bo'sh/soxta raqam o'rniga)
+    function dataErrorBanner(detail) {
+      return `
+        <div class="p-4 rounded-2xl border border-rose-900/40 bg-rose-950/20 flex items-start gap-2.5">
+          <i data-lucide="alert-triangle" class="w-4.5 h-4.5 text-rose-400 shrink-0 mt-0.5"></i>
+          <div class="flex flex-col gap-0.5 min-w-0">
+            <span class="text-xs font-bold text-rose-400">⚠️ Uzum'dan ma'lumot olinmadi</span>
+            <span class="text-[10px] text-rose-300/80 break-all">Sabab: ${detail || "Noma'lum xato"}</span>
+          </div>
+        </div>
+      `;
+    }
+
     // Dynamic views renderers
     function switchTab(tabId) {
       state.activeTab = tabId;
@@ -668,22 +719,33 @@ ${urgentSection}
 
       const root = document.getElementById('main-view');
 
-      if (tabId === 'dashboard') {
-        renderDashboard(root);
-      } else if (tabId === 'products') {
-        renderProducts(root);
-      } else if (tabId === 'inventory') {
-        renderInventory(root);
-      } else if (tabId === 'finance') {
-        renderFinance(root);
-      } else if (tabId === 'lounge') {
-        renderLounge(root);
+      // Har bir tab render'i alohida himoyalangan — bittasi qulasa, boshqa tab'lar ishlayveradi
+      const renderers = {
+        dashboard: renderDashboard,
+        products: renderProducts,
+        inventory: renderInventory,
+        finance: renderFinance,
+        lounge: renderLounge
+      };
+      try {
+        const renderFn = renderers[tabId];
+        if (renderFn) renderFn(root);
+      } catch (err) {
+        showRenderError(root, `Tab "${tabId}"`, err);
       }
       lucide.createIcons();
     }
 
     // UI Panel: DASHBOARD
     function renderDashboard(root) {
+      try {
+        renderDashboardUnsafe(root);
+      } catch (err) {
+        showRenderError(root, 'Dashboard', err);
+      }
+    }
+
+    function renderDashboardUnsafe(root) {
       // Calculate high-fidelity stats
       let activeListings = 0;
       let outOfStockSkuCount = 0;
@@ -740,7 +802,9 @@ ${urgentSection}
 
       root.innerHTML = `
         <div class="flex flex-col gap-5">
-          
+
+          ${state.dataErrors?.products ? dataErrorBanner(state.dataErrors.products) : ''}
+
           <!-- Urgent Alert Notifications Banner -->
           ${alertBadgeCount > 0 ? `
             <div class="rounded-2xl border border-rose-500/20 bg-rose-950/20 p-4">
@@ -849,13 +913,23 @@ ${urgentSection}
 
     // UI Panel: PRODUCTS & MAPPINGS
     function renderProducts(root) {
+      try {
+        renderProductsUnsafe(root);
+      } catch (err) {
+        showRenderError(root, 'Kartochkalar', err);
+      }
+    }
+
+    function renderProductsUnsafe(root) {
       let searchVal = document.getElementById('product-search-input')?.value || '';
       const activeFilter = state.productFilter || 'active';
       const allProducts = state.cachedUzumProducts || [];
 
       let listHTML = '';
 
-      if (allProducts.length === 0) {
+      if (state.dataErrors?.products) {
+        listHTML = dataErrorBanner(state.dataErrors.products);
+      } else if (allProducts.length === 0) {
         listHTML = `
           <div class="p-6 text-center text-slate-500 bg-darkCard border border-darkBorder rounded-2xl flex flex-col items-center gap-2">
             <i data-lucide="package-search" class="w-8 h-8 text-slate-600"></i>
@@ -1042,6 +1116,14 @@ ${urgentSection}
 
     // UI Panel: BASE PHYSICAL INVENTORY (UY ZAXIRASI)
     function renderInventory(root) {
+      try {
+        renderInventoryUnsafe(root);
+      } catch (err) {
+        showRenderError(root, 'Uy Zaxirasi', err);
+      }
+    }
+
+    function renderInventoryUnsafe(root) {
       let totalStockValue = 0;
       let totalQty = 0;
 
@@ -1114,6 +1196,14 @@ ${urgentSection}
 
     // UI Panel: FINANCE & ACCOUNTING
     function renderFinance(root) {
+      try {
+        renderFinanceUnsafe(root);
+      } catch (err) {
+        showRenderError(root, 'Moliya', err);
+      }
+    }
+
+    function renderFinanceUnsafe(root) {
       // Calculate realistic financial figures
       let totalSales = 0;
       let totalPayout = 0;
@@ -1169,24 +1259,19 @@ ${urgentSection}
 
       root.innerHTML = `
         <div class="flex flex-col gap-5">
-          
-          <!-- Balance Widget from Uzum API -->
+
+          ${state.dataErrors?.orders ? dataErrorBanner('Buyurtmalar — ' + state.dataErrors.orders) : ''}
+          ${state.dataErrors?.expenses ? dataErrorBanner('Xarajatlar — ' + state.dataErrors.expenses) : ''}
+          ${state.dataErrors?.returns ? dataErrorBanner('Qaytarishlar — ' + state.dataErrors.returns) : ''}
+
+          <!-- Balance Widget — Uzum Seller API'da balans/yechib olish endpointi yo'q, shuning uchun bu yerda soxta raqam ko'rsatilmaydi -->
           <div class="bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20 rounded-3xl p-5 relative overflow-hidden accent-glow">
             <div class="absolute -right-10 -bottom-10 opacity-5">
               <i data-lucide="gem" class="w-32 h-32 text-brand"></i>
             </div>
             <span class="text-xs text-brand uppercase tracking-wider font-mono">UZUM BANK BALANSI (Shop ID: ${state.activeShop})</span>
-            <div class="text-2xl font-black text-slate-100 mt-2">18 420 500 so'm</div>
-            <div class="grid grid-cols-2 gap-3 mt-4 border-t border-brand/10 pt-3.5 text-xs text-slate-300 font-medium">
-              <div>
-                <span class="text-[10px] block text-slate-400 uppercase">To'lanishi kerak:</span>
-                <span class="font-bold font-mono">6 180 000 so'm</span>
-              </div>
-              <div>
-                <span class="text-[10px] block text-brand uppercase font-mono">Yechib olish mumkin:</span>
-                <span class="font-extrabold text-brand font-mono">12 240 500 so'm</span>
-              </div>
-            </div>
+            <div class="text-xs text-slate-400 mt-2">⚠️ Bu ma'lumot Uzum API'da mavjud emas (balans endpointi yo'q)</div>
+            <div class="text-[10px] text-slate-500 mt-1">Pastdagi "Kutilayotgan Payout" — buyurtmalar asosida hisoblangan taxmin, Uzum'ning rasmiy balansi emas.</div>
           </div>
 
           <!-- Sales Profit analysis -->
@@ -1233,17 +1318,19 @@ ${urgentSection}
           <!-- Returns Tracker widget -->
           <div class="bg-darkCard border border-darkBorder rounded-2xl p-4">
             <div class="flex items-center justify-between mb-3 border-b border-darkBorder pb-2.5">
-              <span class="text-xs uppercase font-bold text-slate-300 tracking-wider">Mijoz Qaytarishlari (Returns)</span>
-              <span class="text-[10px] font-mono font-bold text-rose-400">Defect Rate: 13.5%</span>
+              <span class="text-xs uppercase font-bold text-slate-300 tracking-wider">Ombor Qaytarishlari (Returns)</span>
+              <span class="text-[10px] font-mono font-bold text-rose-400">${state.returns.length} ta</span>
             </div>
             <div class="flex flex-col gap-2 max-h-[140px] overflow-y-auto">
-              ${state.returns.map(r => `
+              ${state.returns.length === 0 ? `
+                <div class="text-[11px] text-slate-500 text-center py-2">Qaytarishlar topilmadi</div>
+              ` : state.returns.map(r => `
                 <div class="p-2 py-1.5 rounded-lg bg-darkBg border border-darkBorder flex items-center justify-between text-[11px] gap-2">
                   <div class="flex flex-col min-w-0">
-                    <span class="font-semibold text-slate-300 truncate">${r.productTitle}</span>
-                    <span class="text-[9.5px] text-rose-400 italic">${r.defectReason}</span>
+                    <span class="font-semibold text-slate-300 truncate">${r.productTitle || 'Nomsiz'}</span>
+                    <span class="text-[9.5px] text-rose-400 italic">${r.defectReason || "Sabab ko'rsatilmagan"}</span>
                   </div>
-                  <span class="font-mono text-rose-400 text-right font-bold shrink-0">${r.price.toLocaleString()} s.</span>
+                  <span class="font-mono text-rose-400 text-right font-bold shrink-0">${(r.price || 0).toLocaleString()} s.</span>
                 </div>
               `).join('')}
             </div>
@@ -1255,6 +1342,14 @@ ${urgentSection}
 
     // UI Panel: ASSISTANT CHAT & BOT SIMULATOR
     function renderLounge(root) {
+      try {
+        renderLoungeUnsafe(root);
+      } catch (err) {
+        showRenderError(root, 'AI & Bot', err);
+      }
+    }
+
+    function renderLoungeUnsafe(root) {
       const activeStateDescription = `Foydalanuvchi joriy vaqtda jami ${state.productTypes.length} ta zaxira turi va mapped do'konlarni saqlab kelgan.`;
 
       root.innerHTML = `

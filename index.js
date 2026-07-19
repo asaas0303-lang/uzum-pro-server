@@ -135,10 +135,20 @@ function getPostHeaders(req) {
   return token ? { 'Authorization': token, 'Content-Type': 'application/json' } : {};
 }
 
+// Production'da hech qachon soxta (mock) ma'lumot ko'rsatilmasin. Faqat lokal
+// test uchun DEMO_MODE=true o'rnatilganda mock fallback ishlaydi.
+const DEMO_MODE = process.env.DEMO_MODE === 'true';
+
+// Uzum chaqiruvi muvaffaqiyatsiz bo'lganda aniq xato qaytaradi (jim mock'ga tushmaydi)
+function sendUzumError(res, detail) {
+  return res.status(502).json({ error: 'UZUM_API_ERROR', detail: String(detail).slice(0, 500), source: 'error' });
+}
+
 // Real Uzum product javobini frontend/hisobot kutgan (mock) shaklga keltiradi.
 // Real Uzum maydonlari mock'dan farq qiladi (quantityAvailable, price, category string va h.k.)
 function normalizeUzumProducts(data) {
-  const list = data.productList || data.payload || [];
+  const rawList = data.productList || data.payload || [];
+  const list = Array.isArray(rawList) ? rawList : [];
   const normalized = list.map(p => ({
     productId: p.productId,
     title: p.title || p.skuTitle || '',
@@ -154,6 +164,26 @@ function normalizeUzumProducts(data) {
     }))
   }));
   return { payload: normalized };
+}
+
+// Real Uzum /shop/:id/return javobi mijoz qaytarishi EMAS — bu FBS ombor
+// logistikasi yozuvlari (id, status, type, ombor manzili). SKU, mahsulot nomi,
+// narx va sabab matni bu endpointda UMUMAN YO'Q — Uzum API'da mavjud emas.
+// Xavfsiz defaultlar bilan frontend kutgan shaklga keltiramiz, hech narsa o'ylab topilmaydi.
+function normalizeUzumReturns(data) {
+  const rawList = data.payload || data.returnList || [];
+  const list = Array.isArray(rawList) ? rawList : [];
+  return {
+    payload: list.map(r => ({
+      returnId: r.id,
+      skuId: null, // Uzum bu endpointda SKU bermaydi
+      productTitle: r.externalNumber ? `Qaytarish #${r.externalNumber}` : `Qaytarish #${r.id || ''}`,
+      price: 0, // Uzum bu endpointda narx bermaydi
+      returnDate: r.dateCreated ? new Date(r.dateCreated).toISOString() : null,
+      status: r.status || 'UNKNOWN',
+      defectReason: r.type ? `Turi: ${r.type}` : 'Sabab ko\'rsatilmagan'
+    }))
+  };
 }
 
 // Uzum finance endpointlari sanani epoch millisekundda kutadi (YYYY-MM-DD emas).
@@ -187,128 +217,158 @@ app.post('/api/sync-state', (req, res) => {
 });
 
 // 2. Proxies / Mimics for Uzum Seller API
+// Hech biri jim mock'ga tushmaydi: token yo'q yoki Uzum xato qaytarsa — aniq 502 xato,
+// faqat DEMO_MODE=true bo'lganda mock ishlatiladi (lokal test uchun).
 app.get('/api/uzum/shops', async (req, res) => {
   const headers = getGetHeaders(req);
-  if (Object.keys(headers).length > 0) {
-    try {
-      const response = await fetch('https://api-seller.uzum.uz/api/seller-openapi/v1/shops', { headers });
-      if (!response.ok) {
-        console.warn(`Uzum Shops call ${response.status}:`, await response.text());
-        throw new Error(`Uzum returned ${response.status}`);
-      }
-      const data = await response.json();
-      return res.json(data);
-    } catch (err) {
-      console.warn("Real Uzum Shops call failed, using mock data", err);
-    }
+  if (Object.keys(headers).length === 0) {
+    if (DEMO_MODE) return res.json({ payload: MOCK_SHOPS, source: 'mock' });
+    return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
   }
-  return res.json({ payload: MOCK_SHOPS });
+  try {
+    const response = await fetch('https://api-seller.uzum.uz/api/seller-openapi/v1/shops', { headers });
+    if (!response.ok) {
+      const text = await response.text();
+      console.warn(`Uzum Shops call ${response.status}:`, text);
+      if (DEMO_MODE) return res.json({ payload: MOCK_SHOPS, source: 'mock' });
+      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
+    }
+    const data = await response.json();
+    // Real javob bare massiv: [{id, name}]. Frontend { payload: [...] } kutadi.
+    const list = Array.isArray(data) ? data : (data.payload || []);
+    return res.json({ payload: list, source: 'live' });
+  } catch (err) {
+    console.warn("Real Uzum Shops call failed:", err);
+    if (DEMO_MODE) return res.json({ payload: MOCK_SHOPS, source: 'mock' });
+    return sendUzumError(res, err.message);
+  }
 });
 
 app.get('/api/uzum/product/shop/:shopId', async (req, res) => {
   const shopId = req.params.shopId;
   const headers = getGetHeaders(req);
-  if (Object.keys(headers).length > 0) {
-    try {
-      // Uzum product endpoint pagination parametrlarini majburiy talab qiladi
-      const page = req.query.page || 0;
-      const size = req.query.size || 100;
-      const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/product/shop/${shopId}?page=${page}&size=${size}`, { headers });
-      if (!response.ok) {
-        console.warn(`Uzum Products call ${response.status}:`, await response.text());
-        throw new Error(`Uzum returned ${response.status}`);
-      }
-      const data = await response.json();
-      // Real javobni frontend kutgan { payload: [...] } shakliga normallashtiramiz
-      // source: 'live' — badge haqiqiy holatni ko'rsatishi uchun
-      return res.json({ ...normalizeUzumProducts(data), source: 'live' });
-    } catch (err) {
-      console.warn("Real Uzum Products call failed, using mock data", err);
+  if (Object.keys(headers).length === 0) {
+    if (DEMO_MODE) return res.json({ payload: shopId === '72540' ? MOCK_PRODUCTS_72540 : MOCK_PRODUCTS_61122, source: 'mock' });
+    return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
+  }
+  try {
+    // Uzum product endpoint pagination parametrlarini majburiy talab qiladi
+    const page = req.query.page || 0;
+    const size = req.query.size || 100;
+    const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/product/shop/${shopId}?page=${page}&size=${size}`, { headers });
+    if (!response.ok) {
+      const text = await response.text();
+      console.warn(`Uzum Products call ${response.status}:`, text);
+      if (DEMO_MODE) return res.json({ payload: shopId === '72540' ? MOCK_PRODUCTS_72540 : MOCK_PRODUCTS_61122, source: 'mock' });
+      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
     }
+    const data = await response.json();
+    // Real javobni frontend kutgan { payload: [...] } shakliga normallashtiramiz
+    return res.json({ ...normalizeUzumProducts(data), source: 'live' });
+  } catch (err) {
+    console.warn("Real Uzum Products call failed:", err);
+    if (DEMO_MODE) return res.json({ payload: shopId === '72540' ? MOCK_PRODUCTS_72540 : MOCK_PRODUCTS_61122, source: 'mock' });
+    return sendUzumError(res, err.message);
   }
-  // Custom mock depending on selected shop
-  if (shopId === '72540') {
-    return res.json({ payload: MOCK_PRODUCTS_72540, source: 'mock' });
-  }
-  return res.json({ payload: MOCK_PRODUCTS_61122, source: 'mock' });
 });
 
 app.get('/api/uzum/finance/orders', async (req, res) => {
   const headers = getGetHeaders(req);
-  if (Object.keys(headers).length > 0) {
-    try {
-      const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
-      const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/finance/orders?${query}`, { headers });
-      if (!response.ok) {
-        console.warn(`Uzum Finance Orders call ${response.status}:`, await response.text());
-        throw new Error(`Uzum returned ${response.status}`);
-      }
-      const data = await response.json();
-      // Real javob: { orderItems: [...] }. Frontend { payload: { orders: [...] } } kutadi.
-      const orders = data.orderItems || data.payload?.orders || data.payload || [];
-      return res.json({ payload: { orders } });
-    } catch (err) {
-      console.warn("Real Uzum Finance Orders call failed, using mock data", err);
-    }
+  if (Object.keys(headers).length === 0) {
+    if (DEMO_MODE) return res.json({ payload: { orders: MOCK_ORDERS }, source: 'mock' });
+    return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
   }
-  return res.json({ payload: { orders: MOCK_ORDERS } });
+  try {
+    const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
+    const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/finance/orders?${query}`, { headers });
+    if (!response.ok) {
+      const text = await response.text();
+      console.warn(`Uzum Finance Orders call ${response.status}:`, text);
+      if (DEMO_MODE) return res.json({ payload: { orders: MOCK_ORDERS }, source: 'mock' });
+      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
+    }
+    const data = await response.json();
+    // Real javob: { orderItems: [...] }. Frontend { payload: { orders: [...] } } kutadi.
+    const orders = data.orderItems || data.payload?.orders || (Array.isArray(data.payload) ? data.payload : []);
+    return res.json({ payload: { orders: Array.isArray(orders) ? orders : [] }, source: 'live' });
+  } catch (err) {
+    console.warn("Real Uzum Finance Orders call failed:", err);
+    if (DEMO_MODE) return res.json({ payload: { orders: MOCK_ORDERS }, source: 'mock' });
+    return sendUzumError(res, err.message);
+  }
 });
 
 app.get('/api/uzum/finance/expenses', async (req, res) => {
   const headers = getGetHeaders(req);
-  if (Object.keys(headers).length > 0) {
-    try {
-      const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
-      const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/finance/expenses?${query}`, { headers });
-      if (!response.ok) {
-        console.warn(`Uzum Finance Expenses call ${response.status}:`, await response.text());
-        throw new Error(`Uzum returned ${response.status}`);
-      }
-      const data = await response.json();
-      // Frontend eData.payload ni massiv sifatida kutadi
-      return res.json({ payload: data.payload || data.expenses || data.expenseItems || [] });
-    } catch (err) {
-      console.warn("Real Uzum Finance Expenses call failed, using mock data", err);
-    }
+  if (Object.keys(headers).length === 0) {
+    if (DEMO_MODE) return res.json({ payload: MOCK_EXPENSES, source: 'mock' });
+    return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
   }
-  return res.json({ payload: MOCK_EXPENSES });
+  try {
+    const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
+    const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/finance/expenses?${query}`, { headers });
+    if (!response.ok) {
+      const text = await response.text();
+      console.warn(`Uzum Finance Expenses call ${response.status}:`, text);
+      if (DEMO_MODE) return res.json({ payload: MOCK_EXPENSES, source: 'mock' });
+      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
+    }
+    const data = await response.json();
+    // Real javob: { payload: { payments: [...], totalElements: N } }. Frontend eData.payload ni massiv sifatida kutadi.
+    const expenses = data.payload?.payments || data.payments || data.payload || data.expenses || data.expenseItems || [];
+    return res.json({ payload: Array.isArray(expenses) ? expenses : [], source: 'live' });
+  } catch (err) {
+    console.warn("Real Uzum Finance Expenses call failed:", err);
+    if (DEMO_MODE) return res.json({ payload: MOCK_EXPENSES, source: 'mock' });
+    return sendUzumError(res, err.message);
+  }
 });
 
 app.get('/api/uzum/shop/:shopId/return', async (req, res) => {
   const shopId = req.params.shopId;
   const headers = getGetHeaders(req);
-  if (Object.keys(headers).length > 0) {
-    try {
-      const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/shop/${shopId}/return`, { headers });
-      if (!response.ok) {
-        console.warn(`Uzum Returns call ${response.status}:`, await response.text());
-        throw new Error(`Uzum returned ${response.status}`);
-      }
-      const data = await response.json();
-      return res.json(data);
-    } catch (err) {
-      console.warn("Real Uzum Returns call failed, using mock data", err);
-    }
+  if (Object.keys(headers).length === 0) {
+    if (DEMO_MODE) return res.json({ payload: MOCK_RETURNS, source: 'mock' });
+    return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
   }
-  return res.json({ payload: MOCK_RETURNS });
+  try {
+    const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/shop/${shopId}/return`, { headers });
+    if (!response.ok) {
+      const text = await response.text();
+      console.warn(`Uzum Returns call ${response.status}:`, text);
+      if (DEMO_MODE) return res.json({ payload: MOCK_RETURNS, source: 'mock' });
+      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
+    }
+    const data = await response.json();
+    return res.json({ ...normalizeUzumReturns(data), source: 'live' });
+  } catch (err) {
+    console.warn("Real Uzum Returns call failed:", err);
+    if (DEMO_MODE) return res.json({ payload: MOCK_RETURNS, source: 'mock' });
+    return sendUzumError(res, err.message);
+  }
 });
 
 app.get('/api/uzum/fbs/orders', async (req, res) => {
   const headers = getGetHeaders(req);
-  if (Object.keys(headers).length > 0) {
-    try {
-      const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v2/fbs/orders`, { headers });
-      if (!response.ok) {
-        console.warn(`Uzum FBS Orders call ${response.status}:`, await response.text());
-        throw new Error(`Uzum returned ${response.status}`);
-      }
-      const data = await response.json();
-      return res.json(data);
-    } catch (err) {
-      console.warn("Real Uzum FBS Orders call failed, using mock data", err);
-    }
+  if (Object.keys(headers).length === 0) {
+    if (DEMO_MODE) return res.json({ payload: [], source: 'mock' });
+    return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
   }
-  return res.json({ payload: [] });
+  try {
+    const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v2/fbs/orders`, { headers });
+    if (!response.ok) {
+      const text = await response.text();
+      console.warn(`Uzum FBS Orders call ${response.status}:`, text);
+      if (DEMO_MODE) return res.json({ payload: [], source: 'mock' });
+      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
+    }
+    const data = await response.json();
+    return res.json({ ...data, source: 'live' });
+  } catch (err) {
+    console.warn("Real Uzum FBS Orders call failed:", err);
+    if (DEMO_MODE) return res.json({ payload: [], source: 'mock' });
+    return sendUzumError(res, err.message);
+  }
 });
 
 // 3. Gemini Server AI Advice Engine
