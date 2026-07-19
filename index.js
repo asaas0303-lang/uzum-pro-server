@@ -402,13 +402,20 @@ async function sendTelegramMessage(token, chatId, text, replyMarkup = null) {
     if (replyMarkup) {
       body.reply_markup = replyMarkup;
     }
-    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      console.error("Telegram sendMessage rejected:", response.status, data);
+      return false;
+    }
+    return true;
   } catch (err) {
     console.error("Telegram sendMessage call failed:", err);
+    return false;
   }
 }
 
@@ -508,6 +515,30 @@ ${urgentSection}
 /dashboard — mini app ochish`;
 }
 
+// Kunlik hisobotni yuborish — cron va qo'lda diagnostika endpoint ikkalasi ham shu funksiyani ishlatadi
+const ADMIN_CHAT_ID = '5155194813';
+async function runDailyReport() {
+  console.log(`[CRON] Kunlik hisobot boshlandi: ${new Date().toISOString()}`);
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    console.error('[CRON] TELEGRAM_BOT_TOKEN topilmadi — hisobot yuborilmadi.');
+    return { success: false, error: "TELEGRAM_BOT_TOKEN yo'q" };
+  }
+  try {
+    const reportText = generateReportText();
+    const sent = await sendTelegramMessage(token, ADMIN_CHAT_ID, reportText);
+    if (!sent) {
+      console.error(`[CRON] Kunlik hisobot yuborilmadi — Telegram API rad etdi: ${new Date().toISOString()}`);
+      return { success: false, error: 'Telegram API xabarni rad etdi (loglarga qarang)' };
+    }
+    console.log(`[CRON] Kunlik hisobot muvaffaqiyatli yuborildi: ${new Date().toISOString()}`);
+    return { success: true };
+  } catch (err) {
+    console.error(`[CRON] Kunlik hisobot yuborishda xato: ${new Date().toISOString()}`, err);
+    return { success: false, error: err.message };
+  }
+}
+
 // 4. Telegram Bot Webhook Route
 app.post('/api/tg-bot/webhook', async (req, res) => {
   res.sendStatus(200);
@@ -562,6 +593,12 @@ app.get('/api/tg-bot/simulate-report', (req, res) => {
   res.json({ report: text });
 });
 
+// Diagnostika: kunlik hisobotni qo'lda, darhol ishga tushiradi (cron kutmasdan sinash uchun)
+app.get('/api/tg-bot/trigger-daily-report', async (req, res) => {
+  const result = await runDailyReport();
+  res.json(result);
+});
+
 // Automatic bot registration logic
 if (process.env.TELEGRAM_BOT_TOKEN && process.env.APP_URL) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -577,19 +614,13 @@ if (process.env.TELEGRAM_BOT_TOKEN && process.env.APP_URL) {
     });
 }
 
-// Scheduled daily report — 04:00 UTC (09:00 Toshkent vaqti)
-const ADMIN_CHAT_ID = '5155194813';
+// Scheduled daily report — har kuni 05:00 Toshkent vaqtida (timezone aniq ko'rsatilgan,
+// server konteyneri qaysi TZ'da ishlashidan qat'i nazar to'g'ri vaqtda ishga tushadi)
 if (process.env.TELEGRAM_BOT_TOKEN) {
-  cron.schedule('0 4 * * *', async () => {
-    try {
-      const token = process.env.TELEGRAM_BOT_TOKEN;
-      const reportText = generateReportText();
-      await sendTelegramMessage(token, ADMIN_CHAT_ID, reportText);
-      console.log('Scheduled daily report sent to admin chat.');
-    } catch (err) {
-      console.error('Scheduled daily report failed:', err);
-    }
-  });
+  cron.schedule('0 5 * * *', runDailyReport, { timezone: 'Asia/Tashkent' });
+  console.log('[CRON] Kunlik hisobot rejalashtirildi: har kuni 05:00 Asia/Tashkent vaqtida.');
+} else {
+  console.warn('[CRON] TELEGRAM_BOT_TOKEN yo\'q — kunlik hisobot rejalashtirilmadi.');
 }
 
 // Serve Telegram UI directly
