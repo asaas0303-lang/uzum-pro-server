@@ -334,20 +334,20 @@ ${urgentSection}
 
     async function refreshData() {
       document.getElementById('api-status-badge').classList.add('animate-pulse');
+      const badge = document.getElementById('api-status-badge');
       try {
-        const token = localStorage.getItem('uzum_api_token');
-        const badge = document.getElementById('api-status-badge');
-        if (token) {
+        // Fetch products, orders, returns, and expenses
+        const pData = await fetchFromProxy(`/api/uzum/product/shop/${state.activeShop}`);
+        state.cachedUzumProducts = pData.payload || [];
+
+        // Badge haqiqiy holatni ko'rsatadi: proxy real Uzum'dan javob bergan bo'lsa (source==='live') "Live"
+        if (pData.source === 'live') {
           badge.textContent = "Live Connected";
           badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 font-mono badge-glow";
         } else {
           badge.textContent = "Demo Mode";
           badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-300 font-mono";
         }
-
-        // Fetch products, orders, returns, and expenses
-        const pData = await fetchFromProxy(`/api/uzum/product/shop/${state.activeShop}`);
-        state.cachedUzumProducts = pData.payload || [];
 
         // Sana oralig'i: oxirgi 30 kun
         const dateTo = new Date().toISOString().split('T')[0];

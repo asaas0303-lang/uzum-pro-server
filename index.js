@@ -135,6 +135,43 @@ function getPostHeaders(req) {
   return token ? { 'Authorization': token, 'Content-Type': 'application/json' } : {};
 }
 
+// Real Uzum product javobini frontend/hisobot kutgan (mock) shaklga keltiradi.
+// Real Uzum maydonlari mock'dan farq qiladi (quantityAvailable, price, category string va h.k.)
+function normalizeUzumProducts(data) {
+  const list = data.productList || data.payload || [];
+  const normalized = list.map(p => ({
+    productId: p.productId,
+    title: p.title || p.skuTitle || '',
+    status: p.status || { value: 'UNKNOWN' },
+    category: typeof p.category === 'string' ? { title: p.category } : (p.category || { title: 'Boshqa' }),
+    photos: [{ photoKey: p.previewImg || p.image || '' }],
+    skuList: (p.skuList || []).map(s => ({
+      skuId: s.skuId,
+      skuTitle: s.skuTitle || s.skuFullTitle || s.productTitle || 'SKU',
+      availableAmount: s.quantityAvailable != null ? s.quantityAvailable : 0,
+      purchasePrice: s.price != null ? s.price : (s.purchasePrice || 0),
+      skuCode: s.sellerItemCode || s.article || String(s.barcode || s.skuId)
+    }))
+  }));
+  return { payload: normalized };
+}
+
+// Uzum finance endpointlari sanani epoch millisekundda kutadi (YYYY-MM-DD emas).
+// Frontend YYYY-MM-DD yuboradi — shuni millisga aylantiramiz.
+function financeQueryToMillis(query) {
+  const params = new URLSearchParams(query);
+  for (const key of ['dateFrom', 'dateTo']) {
+    const val = params.get(key);
+    if (val && /^\d{4}-\d{2}-\d{2}$/.test(val)) {
+      // dateTo uchun kun oxirini olamiz (23:59:59.999), dateFrom uchun kun boshini
+      const suffix = key === 'dateTo' ? 'T23:59:59.999Z' : 'T00:00:00.000Z';
+      const millis = new Date(val + suffix).getTime();
+      if (!Number.isNaN(millis)) params.set(key, String(millis));
+    }
+  }
+  return params.toString();
+}
+
 // 1. Service: State sync for Bot calculations
 app.post('/api/sync-state', (req, res) => {
   const { productTypes, skuMappings, costs, shops, activeShop, products, orders, expenses } = req.body;
@@ -155,6 +192,10 @@ app.get('/api/uzum/shops', async (req, res) => {
   if (Object.keys(headers).length > 0) {
     try {
       const response = await fetch('https://api-seller.uzum.uz/api/seller-openapi/v1/shops', { headers });
+      if (!response.ok) {
+        console.warn(`Uzum Shops call ${response.status}:`, await response.text());
+        throw new Error(`Uzum returned ${response.status}`);
+      }
       const data = await response.json();
       return res.json(data);
     } catch (err) {
@@ -169,28 +210,43 @@ app.get('/api/uzum/product/shop/:shopId', async (req, res) => {
   const headers = getGetHeaders(req);
   if (Object.keys(headers).length > 0) {
     try {
-      const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/product/shop/${shopId}`, { headers });
+      // Uzum product endpoint pagination parametrlarini majburiy talab qiladi
+      const page = req.query.page || 0;
+      const size = req.query.size || 100;
+      const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/product/shop/${shopId}?page=${page}&size=${size}`, { headers });
+      if (!response.ok) {
+        console.warn(`Uzum Products call ${response.status}:`, await response.text());
+        throw new Error(`Uzum returned ${response.status}`);
+      }
       const data = await response.json();
-      return res.json(data);
+      // Real javobni frontend kutgan { payload: [...] } shakliga normallashtiramiz
+      // source: 'live' — badge haqiqiy holatni ko'rsatishi uchun
+      return res.json({ ...normalizeUzumProducts(data), source: 'live' });
     } catch (err) {
       console.warn("Real Uzum Products call failed, using mock data", err);
     }
   }
   // Custom mock depending on selected shop
   if (shopId === '72540') {
-    return res.json({ payload: MOCK_PRODUCTS_72540 });
+    return res.json({ payload: MOCK_PRODUCTS_72540, source: 'mock' });
   }
-  return res.json({ payload: MOCK_PRODUCTS_61122 });
+  return res.json({ payload: MOCK_PRODUCTS_61122, source: 'mock' });
 });
 
 app.get('/api/uzum/finance/orders', async (req, res) => {
   const headers = getGetHeaders(req);
   if (Object.keys(headers).length > 0) {
     try {
-      const query = new URLSearchParams(req.query).toString();
+      const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
       const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/finance/orders?${query}`, { headers });
+      if (!response.ok) {
+        console.warn(`Uzum Finance Orders call ${response.status}:`, await response.text());
+        throw new Error(`Uzum returned ${response.status}`);
+      }
       const data = await response.json();
-      return res.json(data);
+      // Real javob: { orderItems: [...] }. Frontend { payload: { orders: [...] } } kutadi.
+      const orders = data.orderItems || data.payload?.orders || data.payload || [];
+      return res.json({ payload: { orders } });
     } catch (err) {
       console.warn("Real Uzum Finance Orders call failed, using mock data", err);
     }
@@ -202,10 +258,15 @@ app.get('/api/uzum/finance/expenses', async (req, res) => {
   const headers = getGetHeaders(req);
   if (Object.keys(headers).length > 0) {
     try {
-      const query = new URLSearchParams(req.query).toString();
+      const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
       const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/finance/expenses?${query}`, { headers });
+      if (!response.ok) {
+        console.warn(`Uzum Finance Expenses call ${response.status}:`, await response.text());
+        throw new Error(`Uzum returned ${response.status}`);
+      }
       const data = await response.json();
-      return res.json(data);
+      // Frontend eData.payload ni massiv sifatida kutadi
+      return res.json({ payload: data.payload || data.expenses || data.expenseItems || [] });
     } catch (err) {
       console.warn("Real Uzum Finance Expenses call failed, using mock data", err);
     }
@@ -219,6 +280,10 @@ app.get('/api/uzum/shop/:shopId/return', async (req, res) => {
   if (Object.keys(headers).length > 0) {
     try {
       const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/shop/${shopId}/return`, { headers });
+      if (!response.ok) {
+        console.warn(`Uzum Returns call ${response.status}:`, await response.text());
+        throw new Error(`Uzum returned ${response.status}`);
+      }
       const data = await response.json();
       return res.json(data);
     } catch (err) {
@@ -233,6 +298,10 @@ app.get('/api/uzum/fbs/orders', async (req, res) => {
   if (Object.keys(headers).length > 0) {
     try {
       const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v2/fbs/orders`, { headers });
+      if (!response.ok) {
+        console.warn(`Uzum FBS Orders call ${response.status}:`, await response.text());
+        throw new Error(`Uzum returned ${response.status}`);
+      }
       const data = await response.json();
       return res.json(data);
     } catch (err) {
