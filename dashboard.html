@@ -182,7 +182,27 @@
       aiLoading: false
     };
 
-    // Auto synchronize to server side for Bot queries integration
+    // FAQAT foydalanuvchi sozlamalarini serverga yuboradi (do'kon/tannarx/bog'lanish).
+    // Bu mahsulot fetch'idan MUTLAQO mustaqil — Uzum API xato bersa ham sozlamalar saqlanadi.
+    async function syncSettingsToServer() {
+      try {
+        await fetch('/api/sync-state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            productTypes: state.productTypes,
+            skuMappings: state.skuMappings,
+            costs: state.costs,
+            shops: state.shops,
+            activeShop: state.activeShop
+          })
+        });
+      } catch(e) {
+        console.error("Sozlamalarni serverga sync qilish muvaffaqiyatsiz:", e);
+      }
+    }
+
+    // To'liq sync — sozlamalar + jonli ma'lumot (refreshData oxirida)
     async function syncStateToServer() {
       try {
         await fetch('/api/sync-state', {
@@ -298,7 +318,7 @@ ${urgentSection}
       localStorage.setItem('uz_product_types', JSON.stringify(state.productTypes));
       localStorage.setItem('uz_sku_mappings', JSON.stringify(state.skuMappings));
       localStorage.setItem('uz_costs', JSON.stringify(state.costs));
-      syncStateToServer();
+      syncSettingsToServer(); // sozlamalar — fetch'dan mustaqil, har doim yuboriladi
     }
 
     // Helper functions
@@ -373,6 +393,9 @@ ${urgentSection}
     async function refreshData() {
       document.getElementById('api-status-badge').classList.add('animate-pulse');
       state.dataErrors = { products: null, orders: null, expenses: null, returns: null };
+
+      // Sozlamalarni AVVAL, fetch'lardan oldin yuboramiz — Uzum API xato bersa ham saqlanadi (barqarorlik)
+      syncSettingsToServer();
 
       // Mahsulotlar — badge asosan shu chaqiruvga qarab belgilanadi
       try {
