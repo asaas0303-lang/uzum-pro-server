@@ -217,6 +217,7 @@ function normalizeUzumProducts(data) {
     status: p.status || { value: 'UNKNOWN' },
     category: typeof p.category === 'string' ? { title: p.category } : (p.category || { title: 'Boshqa' }),
     photos: [{ photoKey: uzumImageUrl(p.previewImg || p.image) }],
+    // Mahsulot darajasidagi API komissiyasi (commissionDto min==max) — SKU'da bo'lmasa zaxira sifatida
     skuList: (p.skuList || []).map(s => ({
       skuId: s.skuId,
       skuTitle: s.skuTitle || s.skuFullTitle || s.productTitle || 'SKU',
@@ -224,6 +225,7 @@ function normalizeUzumProducts(data) {
       purchasePrice: s.price != null ? s.price : (s.purchasePrice || 0),
       skuCode: s.sellerItemCode || s.article || String(s.barcode || s.skuId),
       image: uzumImageUrl(s.previewImage || s.photo || s.image), // SKU darajasidagi rasm (3.3)
+      commissionApi: resolveApiCommission(s, p), // API komissiyasi: SKU commission -> commissionDto (3.1)
       quantitySold: s.quantitySold != null ? s.quantitySold : 0, // umriy cumulative — snapshot diff uchun
       quantityReturned: s.quantityReturned != null ? s.quantityReturned : 0 // umriy cumulative — snapshot diff uchun
     }))
@@ -231,11 +233,25 @@ function normalizeUzumProducts(data) {
   return { payload: normalized };
 }
 
-// Uzum rasm kaliti to'liq URL bo'lmasligi mumkin — to'g'ri to'liq URL yasaymiz (3.3)
+// API'dan komissiya foizini oladi: (b) SKU darajasidagi commission, (c) mahsulot commissionDto (min==max). Yo'q bo'lsa null.
+function resolveApiCommission(sku, product) {
+  if (sku.commission != null) return Number(sku.commission);
+  const dto = product.commissionDto;
+  if (dto && dto.minCommission != null && dto.maxCommission != null) {
+    return (Number(dto.minCommission) + Number(dto.maxCommission)) / 2;
+  }
+  return null;
+}
+
+// Uzum rasm URL'ini yasaydi. Sinovdan o'tgan format: /t_product_240_high.jpg (240px, ~20KB, kartochka uchun).
+// Suffikssiz bazaviy URL (https://images.uzum.uz/<key>) 404 beradi — suffiks majburiy.
 function uzumImageUrl(key) {
   if (!key) return '';
-  if (/^https?:\/\//.test(key)) return key; // allaqachon to'liq URL
-  return `https://images.uzum.uz/${key}/original.jpg`;
+  // https://images.uzum.uz/<key> (suffikssiz) bo'lsa suffiks qo'shamiz
+  const m = String(key).match(/^https?:\/\/images\.uzum\.uz\/([^/]+)\/?$/);
+  if (m) return `https://images.uzum.uz/${m[1]}/t_product_240_high.jpg`;
+  if (/^https?:\/\//.test(key)) return key; // allaqachon suffiksli to'liq URL
+  return `https://images.uzum.uz/${key}/t_product_240_high.jpg`;
 }
 
 // Real Uzum /shop/:id/return javobi mijoz qaytarishi EMAS — bu FBS ombor
@@ -720,12 +736,14 @@ async function sendTelegramMessage(token, chatId, text, replyMarkup = null) {
   }
 }
 
-// Per-SKU iqtisod: komissiya % va logistika (qo'lda kiritilgan bo'lsa o'shani, aks holda default)
-function commissionPct(skuId) {
+// Per-SKU iqtisod (3.1): komissiya % ustuvorligi — (a) qo'lda, (b) SKU/API, (d) 18% default
+function commissionPct(skuId, sku) {
   const c = syncedState.costs[skuId];
   if (c && c.commissionPercent != null && c.commissionPercent !== '') return Number(c.commissionPercent);
-  return 18; // default (3.1)
+  if (sku && sku.commissionApi != null) return Number(sku.commissionApi);
+  return 18; // oxirgi zaxira default (3.1)
 }
+// Logistika (3.2): qo'lda kiritilgan yoki default 5250
 function logisticsCost(skuId) {
   const c = syncedState.costs[skuId];
   if (c && c.logisticsCost != null && c.logisticsCost !== '') return Number(c.logisticsCost);
@@ -806,7 +824,7 @@ async function generateReportText(shopId) {
       revenue += price * d.soldDelta;
       const type = syncedState.productTypes.find(t => t.id === syncedState.skuMappings[skuId]);
       if (!type || !sku) { unmapped++; continue; }
-      const perUnit = price - price * (commissionPct(skuId) / 100) - logisticsCost(skuId) - type.cost;
+      const perUnit = price - price * (commissionPct(skuId, sku) / 100) - logisticsCost(skuId) - type.cost;
       profit += perUnit * d.soldDelta;
     }
     salesSection = `🛍️ Kechagi sotilgan: ${delta.totalSold.toLocaleString('uz-UZ')} dona\n↩️ Kechagi qaytarilgan: ${delta.totalReturned.toLocaleString('uz-UZ')} dona\n🏦 Kechagi daromad: ${revenue.toLocaleString('uz-UZ')} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${profit.toLocaleString('uz-UZ')} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}`;
