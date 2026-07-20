@@ -185,6 +185,12 @@
     // FAQAT foydalanuvchi sozlamalarini serverga yuboradi (do'kon/tannarx/bog'lanish).
     // Bu mahsulot fetch'idan MUTLAQO mustaqil — Uzum API xato bersa ham sozlamalar saqlanadi.
     async function syncSettingsToServer() {
+      // B (frontend himoya): bo'sh/deyarli bo'sh sozlamani (0 do'kon VA 0 productType) YUBORMAYMIZ —
+      // aks holda serverdagi to'liq sozlamani o'chirib yuborishi mumkin.
+      if ((state.shops || []).length === 0 && (state.productTypes || []).length === 0) {
+        console.warn("[SETTINGS] Bo'sh sozlama — serverga yuborilmadi (himoya).");
+        return;
+      }
       try {
         await fetch('/api/sync-state', {
           method: 'POST',
@@ -199,6 +205,35 @@
         });
       } catch(e) {
         console.error("Sozlamalarni serverga sync qilish muvaffaqiyatsiz:", e);
+      }
+    }
+
+    // B: yuklanishda serverdagi sozlamalarni o'qib, localStorage bilan birlashtiradi.
+    // Qoida: localStorage bo'sh yoki serverdagidan KAM bo'lsa — serverdagini ishlatadi (ustidan yozmaydi).
+    async function loadServerSettings() {
+      try {
+        const res = await fetch('/api/settings');
+        if (!res.ok) return;
+        const srv = await res.json();
+        let changed = false;
+        // Server manba: serverdagi ma'lumot local'dan KAM bo'lmasa (>=) serverni ishlatamiz.
+        // Local faqat qat'iy KO'P bo'lsa (hali sync bo'lmagan qo'shimchalar) saqlanadi.
+        if ((srv.shops || []).length >= (state.shops || []).length && (srv.shops || []).length > 0) { state.shops = srv.shops; changed = true; }
+        if ((srv.productTypes || []).length >= (state.productTypes || []).length && (srv.productTypes || []).length > 0) { state.productTypes = srv.productTypes; changed = true; }
+        if (Object.keys(srv.skuMappings || {}).length >= Object.keys(state.skuMappings || {}).length && Object.keys(srv.skuMappings || {}).length > 0) { state.skuMappings = srv.skuMappings; changed = true; }
+        if (Object.keys(srv.costs || {}).length >= Object.keys(state.costs || {}).length && Object.keys(srv.costs || {}).length > 0) { state.costs = srv.costs; changed = true; }
+        if (srv.activeShop && !state.shops.find(s => s.shopId === state.activeShop)) { state.activeShop = srv.activeShop; changed = true; }
+        if (changed) {
+          // faqat localStorage'ni yangilaymiz (serverga qayta yubormaymiz — u allaqachon manba)
+          localStorage.setItem('uz_shops', JSON.stringify(state.shops));
+          localStorage.setItem('uz_active_shop', state.activeShop);
+          localStorage.setItem('uz_product_types', JSON.stringify(state.productTypes));
+          localStorage.setItem('uz_sku_mappings', JSON.stringify(state.skuMappings));
+          localStorage.setItem('uz_costs', JSON.stringify(state.costs));
+          console.log("[SETTINGS] Serverdagi sozlamalar localStorage'ga birlashtirildi (server to'liqroq edi).");
+        }
+      } catch (e) {
+        console.error("Server sozlamalarini o'qishda xato:", e);
       }
     }
 
@@ -1616,7 +1651,9 @@ ${urgentSection}
     }
 
     // On Load Boostrapper
-    window.addEventListener('DOMContentLoaded', () => {
+    window.addEventListener('DOMContentLoaded', async () => {
+      // B: avval serverdagi sozlamalarni o'qib birlashtiramiz (bo'sh localStorage saqlangan ma'lumotni o'chirmasin)
+      await loadServerSettings();
       refreshData();
     });
   </script>

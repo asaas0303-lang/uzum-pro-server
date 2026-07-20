@@ -82,24 +82,72 @@ let syncedState = {
 
 // Faqat foydalanuvchi sozlamalari diskda saqlanadi (2.1: sotuv/mahsulot ma'lumoti jonli tortiladi, saqlanmaydi)
 const SETTINGS_KEYS = ['productTypes', 'skuMappings', 'costs', 'shops', 'activeShop'];
+const SETTINGS_BACKUP_FILE = path.join(DATA_DIR, 'settings.backup.json');
+const SETTINGS_BACKUP_RETENTION_DAYS = 7;
 
-function saveSettings() {
+// Sozlama "bo'sh" (foydali ma'lumot yo'q) — 0 do'kon VA 0 productType bo'lsa
+function isSettingsEmpty(s) {
+  if (!s) return true;
+  const shops = s.shops || [];
+  const types = s.productTypes || [];
+  return shops.length === 0 && types.length === 0;
+}
+
+function currentSettings() {
   const settings = {};
   for (const k of SETTINGS_KEYS) settings[k] = syncedState[k];
-  writeJsonFile(SETTINGS_FILE, settings);
+  return settings;
+}
+
+// C: yozishdan oldin oldingi nusxani settings.backup.json ga, kuniga bir marta sana bilan zaxira
+function backupSettings() {
+  try {
+    if (!fs.existsSync(SETTINGS_FILE)) return;
+    const prev = fs.readFileSync(SETTINGS_FILE, 'utf8');
+    fs.writeFileSync(SETTINGS_BACKUP_FILE, prev); // har doim oxirgi nusxa
+    // kunlik sana bilan zaxira
+    const dated = path.join(DATA_DIR, `settings.${todayTashkent()}.json`);
+    if (!fs.existsSync(dated)) fs.writeFileSync(dated, prev);
+    // 7 kundan eski sanali zaxiralarni tozalaymiz
+    const cutoff = new Date(Date.now() - SETTINGS_BACKUP_RETENTION_DAYS * 86400000).toISOString().slice(0, 10);
+    for (const f of fs.readdirSync(DATA_DIR)) {
+      const m = f.match(/^settings\.(\d{4}-\d{2}-\d{2})\.json$/);
+      if (m && m[1] < cutoff) { try { fs.unlinkSync(path.join(DATA_DIR, f)); } catch {} }
+    }
+  } catch (err) {
+    console.error('[SETTINGS] Zaxira olishda xato (davom etamiz):', err.message);
+  }
+}
+
+// B (server himoya): mavjud sozlama ustiga bo'sh sozlama YOZILMAYDI
+function saveSettings() {
+  const settings = currentSettings();
+  if (isSettingsEmpty(settings)) {
+    const existing = readJsonFile(SETTINGS_FILE, null);
+    if (existing && !isSettingsEmpty(existing)) {
+      console.warn('[SETTINGS] RAD ETILDI: bo\'sh sozlama mavjud sozlama ustiga yozilmadi (himoya).');
+      return;
+    }
+  }
+  backupSettings(); // C: avval zaxira
+  const ok = writeJsonFile(SETTINGS_FILE, settings);
+  if (ok) console.log(`[SETTINGS] Saqlandi: ${(settings.shops||[]).length} do'kon, ${(settings.productTypes||[]).length} productType.`);
 }
 
 let settingsLoadedFromDisk = false;
+// A: startupda aniq log — nechta do'kon/productType yuklandi, topilmasa OGOHLANTIRISH
 function loadSettings() {
   const settings = readJsonFile(SETTINGS_FILE, null);
-  if (settings) {
+  if (settings && !isSettingsEmpty(settings)) {
     for (const k of SETTINGS_KEYS) {
       if (settings[k] !== undefined) syncedState[k] = settings[k];
     }
     settingsLoadedFromDisk = true;
-    console.log('[DISK] Sozlamalar diskdan yuklandi.');
+    console.log(`[SETTINGS] Diskdan yuklandi: ${(settings.shops||[]).length} do'kon, ${(settings.productTypes||[]).length} productType, ${Object.keys(settings.skuMappings||{}).length} SKU bog'lanish.`);
+  } else if (settings && isSettingsEmpty(settings)) {
+    console.warn('[SETTINGS] OGOHLANTIRISH: settings.json topildi lekin BO\'SH (0 do\'kon, 0 productType) — default ishlatiladi. Zaxiradan tiklash kerak bo\'lishi mumkin.');
   } else {
-    console.log('[DISK] Saqlangan sozlama topilmadi — default ishlatiladi.');
+    console.warn('[SETTINGS] OGOHLANTIRISH: settings.json topilmadi — default ishlatiladi (birinchi ishga tushirish bo\'lishi mumkin).');
   }
 }
 
@@ -441,6 +489,23 @@ function getDailyDelta(shopId) {
 // 1. Service: State sync for Bot calculations
 app.post('/api/sync-state', (req, res) => {
   const { productTypes, skuMappings, costs, shops, activeShop, products, orders, expenses } = req.body;
+
+  // B (server himoya): kelayotgan sozlama BO'SH (0 do'kon, 0 productType) bo'lsa,
+  // va bizda mavjud sozlama bo'lsa — RAD ETAMIZ (bo'sh state saqlangan ma'lumotni o'chirmasin).
+  const incomingHasSettings = productTypes !== undefined || shops !== undefined;
+  if (incomingHasSettings) {
+    const incomingEmpty = (shops !== undefined ? shops.length === 0 : (syncedState.shops||[]).length === 0)
+                       && (productTypes !== undefined ? productTypes.length === 0 : (syncedState.productTypes||[]).length === 0);
+    if (incomingEmpty && !isSettingsEmpty(currentSettings())) {
+      console.warn('[SETTINGS] RAD ETILDI: frontend bo\'sh sozlama yubordi, mavjud sozlama saqlanib qoldi.');
+      // Faqat jonli ma'lumotni yangilaymiz, sozlamaga tegmaymiz
+      if (products) syncedState.products = products;
+      if (orders) syncedState.orders = orders;
+      if (expenses) syncedState.expenses = expenses;
+      return res.json({ success: true, rejected: 'empty-settings', message: "Bo'sh sozlama rad etildi, mavjudi saqlandi." });
+    }
+  }
+
   let settingsChanged = false;
   if (productTypes) { syncedState.productTypes = productTypes; settingsChanged = true; }
   if (skuMappings) { syncedState.skuMappings = skuMappings; settingsChanged = true; }
@@ -453,6 +518,38 @@ app.post('/api/sync-state', (req, res) => {
   // Faqat sozlamalar o'zgarganda diskga yozamiz (2.2) — sotuv/mahsulot ma'lumoti saqlanmaydi
   if (settingsChanged) saveSettings();
   res.json({ success: true, message: "State synced successfully server-side." });
+});
+
+// B: frontend yuklanishda serverdagi sozlamalarni O'QIYDI (bo'sh localStorage ustidan yozmasin)
+app.get('/api/settings', (req, res) => {
+  res.json(currentSettings());
+});
+
+// C: zaxiralar ro'yxati va tiklash
+app.get('/api/settings/backups', (req, res) => {
+  try {
+    const files = fs.existsSync(DATA_DIR)
+      ? fs.readdirSync(DATA_DIR).filter(f => /^settings(\.\d{4}-\d{2}-\d{2})?\.(backup\.)?json$/.test(f) && f !== 'settings.json')
+      : [];
+    res.json({ backups: files });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// C: zaxiradan tiklash — ?file=settings.backup.json yoki settings.2026-07-20.json
+app.post('/api/settings/restore', (req, res) => {
+  const file = (req.query.file || req.body?.file || 'settings.backup.json').toString();
+  if (!/^settings(\.\d{4}-\d{2}-\d{2})?\.(backup\.)?json$/.test(file) || file.includes('/') || file.includes('..')) {
+    return res.status(400).json({ error: "Noto'g'ri fayl nomi" });
+  }
+  const full = path.join(DATA_DIR, file);
+  const data = readJsonFile(full, null);
+  if (!data || isSettingsEmpty(data)) return res.status(404).json({ error: "Zaxira topilmadi yoki bo'sh" });
+  for (const k of SETTINGS_KEYS) if (data[k] !== undefined) syncedState[k] = data[k];
+  saveSettings();
+  console.log(`[SETTINGS] Zaxiradan tiklandi: ${file}`);
+  res.json({ success: true, restored: file, shops: (data.shops||[]).length, productTypes: (data.productTypes||[]).length });
 });
 
 // 2. Proxies / Mimics for Uzum Seller API
