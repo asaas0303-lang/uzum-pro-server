@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import cron from 'node-cron';
@@ -12,6 +13,43 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
+
+// ============ DISK SAQLASH (2.2) ============
+// DATA_DIR — Railway'da Volume ulanadigan yo'l. Default ./data (lokal test uchun).
+// DIQQAT: Railway'da Volume ulanmasa, ./data har redeploy'da o'chadi (efemer).
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const SNAPSHOTS_FILE = path.join(DATA_DIR, 'snapshots.json');
+const SNAPSHOT_RETENTION_DAYS = 60;
+
+function ensureDataDir() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch (err) {
+    console.error('[DISK] DATA_DIR yaratishda xato (davom etamiz):', err.message);
+  }
+}
+
+function readJsonFile(file, fallback) {
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    console.error(`[DISK] ${path.basename(file)} o'qishda xato (fallback ishlatildi):`, err.message);
+    return fallback;
+  }
+}
+
+function writeJsonFile(file, data) {
+  try {
+    ensureDataDir();
+    fs.writeFileSync(file, JSON.stringify(data, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`[DISK] ${path.basename(file)} yozishda xato (crash bo'lmaydi):`, err.message);
+    return false;
+  }
+}
 
 // Diagnostika: joriy deploy qaysi Git commit'dan ekanini va APP_URL qanday sozlanganini ko'rsatadi
 app.get('/version', (req, res) => {
@@ -40,6 +78,27 @@ let syncedState = {
   orders: [], // real Uzum finance orders synced from frontend (dashboard.html state.orders)
   expenses: [] // real Uzum finance expenses synced from frontend (dashboard.html state.expenses)
 };
+
+// Faqat foydalanuvchi sozlamalari diskda saqlanadi (2.1: sotuv/mahsulot ma'lumoti jonli tortiladi, saqlanmaydi)
+const SETTINGS_KEYS = ['productTypes', 'skuMappings', 'costs', 'shops', 'activeShop'];
+
+function saveSettings() {
+  const settings = {};
+  for (const k of SETTINGS_KEYS) settings[k] = syncedState[k];
+  writeJsonFile(SETTINGS_FILE, settings);
+}
+
+function loadSettings() {
+  const settings = readJsonFile(SETTINGS_FILE, null);
+  if (settings) {
+    for (const k of SETTINGS_KEYS) {
+      if (settings[k] !== undefined) syncedState[k] = settings[k];
+    }
+    console.log('[DISK] Sozlamalar diskdan yuklandi.');
+  } else {
+    console.log('[DISK] Saqlangan sozlama topilmadi — default ishlatiladi.');
+  }
+}
 
 // Fallback high-fidelity Uzum Mock Data to allow beautiful demo interaction instantly
 const MOCK_SHOPS = [
@@ -154,16 +213,26 @@ function normalizeUzumProducts(data) {
     title: p.title || p.skuTitle || '',
     status: p.status || { value: 'UNKNOWN' },
     category: typeof p.category === 'string' ? { title: p.category } : (p.category || { title: 'Boshqa' }),
-    photos: [{ photoKey: p.previewImg || p.image || '' }],
+    photos: [{ photoKey: uzumImageUrl(p.previewImg || p.image) }],
     skuList: (p.skuList || []).map(s => ({
       skuId: s.skuId,
       skuTitle: s.skuTitle || s.skuFullTitle || s.productTitle || 'SKU',
       availableAmount: s.quantityAvailable != null ? s.quantityAvailable : 0,
       purchasePrice: s.price != null ? s.price : (s.purchasePrice || 0),
-      skuCode: s.sellerItemCode || s.article || String(s.barcode || s.skuId)
+      skuCode: s.sellerItemCode || s.article || String(s.barcode || s.skuId),
+      image: uzumImageUrl(s.previewImage || s.photo || s.image), // SKU darajasidagi rasm (3.3)
+      quantitySold: s.quantitySold != null ? s.quantitySold : 0, // umriy cumulative — snapshot diff uchun
+      quantityReturned: s.quantityReturned != null ? s.quantityReturned : 0 // umriy cumulative — snapshot diff uchun
     }))
   }));
   return { payload: normalized };
+}
+
+// Uzum rasm kaliti to'liq URL bo'lmasligi mumkin — to'g'ri to'liq URL yasaymiz (3.3)
+function uzumImageUrl(key) {
+  if (!key) return '';
+  if (/^https?:\/\//.test(key)) return key; // allaqachon to'liq URL
+  return `https://images.uzum.uz/${key}/original.jpg`;
 }
 
 // Real Uzum /shop/:id/return javobi mijoz qaytarishi EMAS — bu FBS ombor
@@ -186,6 +255,38 @@ function normalizeUzumReturns(data) {
   };
 }
 
+// Real MIJOZ qaytarishlari — /v1/return (2.4). Bu endpointda returnItems[] bor:
+// skuId, skuTitle, productTitle, purchasePrice. Bare massiv qaytaradi, har yozuvda shopId bor.
+// shopIds filtri server tomonda ishlamaydi — client-side filtrlanadi.
+function normalizeCustomerReturns(data, shopIdFilter) {
+  const list = Array.isArray(data) ? data : (data.payload || data.returnList || []);
+  const rows = [];
+  (Array.isArray(list) ? list : []).forEach(r => {
+    if (shopIdFilter && String(r.shopId) !== String(shopIdFilter)) return; // client-side filter
+    const items = r.returnItems || [];
+    if (items.length === 0) {
+      rows.push({
+        returnId: r.id, skuId: null,
+        productTitle: `Qaytarish #${r.id || ''}`,
+        price: 0, amount: r.totalAmount || 0,
+        returnDate: r.dateCreated ? new Date(r.dateCreated).toISOString() : null,
+        status: r.status || 'UNKNOWN', shopId: r.shopId, shopTitle: r.shopTitle,
+        defectReason: r.type ? `Turi: ${r.type}` : 'Sabab ko\'rsatilmagan'
+      });
+    } else {
+      items.forEach(it => rows.push({
+        returnId: r.id, skuId: it.skuId,
+        productTitle: it.productTitle || it.skuTitle || `Qaytarish #${r.id || ''}`,
+        price: it.purchasePrice || 0, amount: it.amount || 0,
+        returnDate: r.dateCreated ? new Date(r.dateCreated).toISOString() : null,
+        status: r.status || 'UNKNOWN', shopId: r.shopId, shopTitle: r.shopTitle,
+        defectReason: r.type ? `Turi: ${r.type}` : 'Sabab ko\'rsatilmagan'
+      }));
+    }
+  });
+  return { payload: rows };
+}
+
 // Uzum finance endpointlari sanani epoch millisekundda kutadi (YYYY-MM-DD emas).
 // Frontend YYYY-MM-DD yuboradi — shuni millisga aylantiramiz.
 function financeQueryToMillis(query) {
@@ -202,17 +303,136 @@ function financeQueryToMillis(query) {
   return params.toString();
 }
 
+// ============ UMUMIY UZUM FETCH (2.5: rate-limit + xato markazlashtirilgan) ============
+const UZUM_BASE = 'https://api-seller.uzum.uz/api/seller-openapi';
+
+// Server tomonda UZUM_TOKEN bilan so'rov. Rate-limit header'larini loglaydi, 429 ni alohida ushlaydi.
+async function uzumGet(pathAndQuery, token) {
+  token = token || process.env.UZUM_TOKEN;
+  if (!token) return { ok: false, status: 0, error: "UZUM_TOKEN yo'q" };
+  let response;
+  try {
+    response = await fetch(`${UZUM_BASE}${pathAndQuery}`, { headers: { 'Authorization': token } });
+  } catch (err) {
+    return { ok: false, status: 0, error: err.message };
+  }
+  // 2.5: kunlik limit diagnostikasi
+  const remainingDay = response.headers.get('x-ratelimit-remaining-per-day');
+  const limitDay = response.headers.get('x-ratelimit-limit-per-day');
+  if (remainingDay != null) {
+    const rem = Number(remainingDay), lim = Number(limitDay);
+    if (lim > 0 && rem / lim < 0.1) console.warn(`[RATELIMIT] Kunlik limit 10% dan kam: ${rem}/${lim}`);
+  }
+  if (response.status === 429) {
+    console.error('[RATELIMIT] 429 — Uzum limiti tugadi:', pathAndQuery);
+    return { ok: false, status: 429, error: "Rate limit (429) — keyinroq urinib ko'ring" };
+  }
+  const text = await response.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch { /* JSON emas */ }
+  if (!response.ok) {
+    return { ok: false, status: response.status, error: (data?.errors?.[0]?.message) || text.slice(0, 300), data };
+  }
+  return { ok: true, status: 200, data };
+}
+
+// 2.5: mahsulotlar uchun qisqa muddatli kesh (bir xil ma'lumotni qayta-qayta so'ramaslik)
+const productCache = new Map(); // shopId -> { at, value }
+const PRODUCT_CACHE_MS = 5 * 60 * 1000;
+
+async function fetchLiveShopProducts(shopId, token) {
+  const key = String(shopId);
+  const cached = productCache.get(key);
+  if (cached && Date.now() - cached.at < PRODUCT_CACHE_MS) return cached.value;
+  const r = await uzumGet(`/v1/product/shop/${shopId}?page=0&size=100`, token);
+  if (!r.ok && DEMO_MODE) {
+    // Lokal test: token yo'q/xato bo'lsa mock (allaqachon normalizatsiyalangan shakl) bilan oqimni sinash
+    const mock = String(shopId) === '72540' ? MOCK_PRODUCTS_72540 : MOCK_PRODUCTS_61122;
+    return { ok: true, products: mock, source: 'mock' };
+  }
+  const value = r.ok
+    ? { ok: true, products: normalizeUzumProducts(r.data).payload }
+    : { ok: false, status: r.status, error: r.error };
+  if (r.ok) productCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+// ============ KUNLIK SNAPSHOT (sotuv tezligini kuzatish) ============
+// snapshots.json shakli: { "<shopId>": { "YYYY-MM-DD": { "<skuId>": {sold, returned, available} } } }
+function loadSnapshots() { return readJsonFile(SNAPSHOTS_FILE, {}); }
+
+// Asia/Tashkent (UTC+5) bo'yicha bugungi sana YYYY-MM-DD
+function todayTashkent() {
+  return new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+// Har SKU uchun quantitySold/quantityReturned/available ni sana bilan diskka saqlaydi
+async function captureSnapshot() {
+  console.log(`[SNAPSHOT] Boshlandi: ${new Date().toISOString()}`);
+  const snapshots = loadSnapshots();
+  const date = todayTashkent();
+  let savedShops = 0;
+  for (const shop of (syncedState.shops || [])) {
+    const shopId = shop.shopId;
+    const r = await fetchLiveShopProducts(shopId);
+    if (!r.ok) { console.warn(`[SNAPSHOT] Shop ${shopId} olinmadi: ${r.error}`); continue; }
+    const skus = {};
+    r.products.forEach(p => (p.skuList || []).forEach(s => {
+      skus[s.skuId] = { sold: s.quantitySold || 0, returned: s.quantityReturned || 0, available: s.availableAmount || 0 };
+    }));
+    if (!snapshots[shopId]) snapshots[shopId] = {};
+    snapshots[shopId][date] = skus;
+    savedShops++;
+  }
+  // 60 kundan eski snapshotlarni tozalaymiz
+  const cutoff = new Date(Date.now() - SNAPSHOT_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  for (const shopId of Object.keys(snapshots)) {
+    for (const d of Object.keys(snapshots[shopId])) {
+      if (d < cutoff) delete snapshots[shopId][d];
+    }
+  }
+  writeJsonFile(SNAPSHOTS_FILE, snapshots);
+  console.log(`[SNAPSHOT] Tugadi: ${savedShops} do'kon, sana ${date}`);
+  return { date, savedShops };
+}
+
+// Berilgan do'kon uchun oxirgi ikki snapshot farqini "kechagi sotuv/qaytarish" sifatida qaytaradi.
+// Snapshot yetarli bo'lmasa (< 2), null qaytadi — hisobot buni ANIQ belgilaydi.
+function getDailyDelta(shopId) {
+  const snapshots = loadSnapshots();
+  const shopSnaps = snapshots[shopId] || {};
+  const dates = Object.keys(shopSnaps).sort();
+  if (dates.length < 2) return { ready: false, snapshotCount: dates.length };
+  const prev = shopSnaps[dates[dates.length - 2]];
+  const curr = shopSnaps[dates[dates.length - 1]];
+  const perSku = {};
+  let totalSold = 0, totalReturned = 0;
+  for (const skuId of Object.keys(curr)) {
+    const c = curr[skuId], p = prev[skuId] || { sold: 0, returned: 0 };
+    // diff manfiy bo'lmasin (hisoblagich reset bo'lishi mumkin)
+    const soldDelta = Math.max(0, (c.sold || 0) - (p.sold || 0));
+    const returnedDelta = Math.max(0, (c.returned || 0) - (p.returned || 0));
+    perSku[skuId] = { soldDelta, returnedDelta };
+    totalSold += soldDelta;
+    totalReturned += returnedDelta;
+  }
+  return { ready: true, snapshotCount: dates.length, fromDate: dates[dates.length - 2], toDate: dates[dates.length - 1], totalSold, totalReturned, perSku };
+}
+
 // 1. Service: State sync for Bot calculations
 app.post('/api/sync-state', (req, res) => {
   const { productTypes, skuMappings, costs, shops, activeShop, products, orders, expenses } = req.body;
-  if (productTypes) syncedState.productTypes = productTypes;
-  if (skuMappings) syncedState.skuMappings = skuMappings;
-  if (costs) syncedState.costs = costs;
-  if (shops) syncedState.shops = shops;
-  if (activeShop) syncedState.activeShop = activeShop;
+  let settingsChanged = false;
+  if (productTypes) { syncedState.productTypes = productTypes; settingsChanged = true; }
+  if (skuMappings) { syncedState.skuMappings = skuMappings; settingsChanged = true; }
+  if (costs) { syncedState.costs = costs; settingsChanged = true; }
+  if (shops) { syncedState.shops = shops; settingsChanged = true; }
+  if (activeShop) { syncedState.activeShop = activeShop; settingsChanged = true; }
   if (products) syncedState.products = products;
   if (orders) syncedState.orders = orders;
   if (expenses) syncedState.expenses = expenses;
+  // Faqat sozlamalar o'zgarganda diskga yozamiz (2.2) — sotuv/mahsulot ma'lumoti saqlanmaydi
+  if (settingsChanged) saveSettings();
   res.json({ success: true, message: "State synced successfully server-side." });
 });
 
@@ -371,6 +591,24 @@ app.get('/api/uzum/fbs/orders', async (req, res) => {
   }
 });
 
+// 2.4: HAQIQIY mijoz qaytarishlari — /v1/return (returnItems bilan). shopId query bilan client-side filtr.
+app.get('/api/uzum/return', async (req, res) => {
+  const token = getAuthToken(req);
+  if (!token) {
+    if (DEMO_MODE) return res.json({ payload: [], source: 'mock' });
+    return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
+  }
+  const shopId = req.query.shopId;
+  const page = req.query.page || 0;
+  const size = req.query.size || 50;
+  const r = await uzumGet(`/v1/return?page=${page}&size=${size}`, token);
+  if (!r.ok) {
+    if (DEMO_MODE) return res.json({ payload: [], source: 'mock' });
+    return sendUzumError(res, `Uzum ${r.status}: ${r.error}`);
+  }
+  return res.json({ ...normalizeCustomerReturns(r.data, shopId), source: 'live' });
+});
+
 // 3. Gemini Server AI Advice Engine
 app.post('/api/gemini/advice', async (req, res) => {
   const { currentInventory, activeProductTypes, currentSales, activeShopTitle } = req.body;
@@ -479,100 +717,127 @@ async function sendTelegramMessage(token, chatId, text, replyMarkup = null) {
   }
 }
 
-// Real data source: prefer frontend-synced live data, fall back to mock demo data
-function getReportDataSource() {
-  const orders = (syncedState.orders && syncedState.orders.length) ? syncedState.orders : MOCK_ORDERS;
-  const expenses = (syncedState.expenses && syncedState.expenses.length) ? syncedState.expenses : MOCK_EXPENSES;
-  const products = (syncedState.products && syncedState.products.length) ? syncedState.products : [...MOCK_PRODUCTS_61122, ...MOCK_PRODUCTS_72540];
-  return { orders, expenses, products };
+// Per-SKU iqtisod: komissiya % va logistika (qo'lda kiritilgan bo'lsa o'shani, aks holda default)
+function commissionPct(skuId) {
+  const c = syncedState.costs[skuId];
+  if (c && c.commissionPercent != null && c.commissionPercent !== '') return Number(c.commissionPercent);
+  return 18; // default (3.1)
+}
+function logisticsCost(skuId) {
+  const c = syncedState.costs[skuId];
+  if (c && c.logisticsCost != null && c.logisticsCost !== '') return Number(c.logisticsCost);
+  return 5250; // default (3.2)
+}
+function findSkuInProducts(products, skuId) {
+  for (const p of products) {
+    const s = (p.skuList || []).find(x => String(x.skuId) === String(skuId));
+    if (s) return s;
+  }
+  return null;
 }
 
-// Same metric logic used by index.js (bot report) and dashboard.html (simulator) — keep both in sync
-function buildReportMetrics(orders, expenses, productTypes, skuMappings, products) {
-  const ordersCount = orders.length;
-  const soldQty = orders.reduce((acc, o) => acc + (o.quantity || 1), 0);
-  const revenue = orders.reduce((acc, o) => acc + (o.price * (o.quantity || 1)), 0);
-
-  let profitSum = 0;
-  let unmappedCount = 0;
-  orders.forEach(o => {
-    const type = productTypes.find(t => t.id === skuMappings[o.skuId]);
-    if (type) {
-      profitSum += (o.payout || 0) - (type.cost * (o.quantity || 1));
-    } else {
-      unmappedCount++;
-    }
+// 2.3: xarajatlarni SOURCE bo'yicha guruhlaydi (real type=OUTCOME/INCOME). Kategoriya o'ylab topilmaydi.
+async function fetchExpensesGrouped(shopId, token) {
+  const to = Date.now();
+  const from = to - 30 * 24 * 60 * 60 * 1000;
+  const r = await uzumGet(`/v1/finance/expenses?shopIds=${shopId}&dateFrom=${from}&dateTo=${to}&page=0&size=50`, token);
+  if (!r.ok) return { ok: false, error: r.error };
+  const payments = r.data.payload?.payments || [];
+  const bySource = {};
+  let outcomeTotal = 0, incomeTotal = 0;
+  payments.forEach(p => {
+    const amt = (p.amount != null ? p.amount : (p.paymentPrice || 0)) || 0;
+    if (p.type === 'INCOME') { incomeTotal += amt; return; }
+    const src = p.source || p.name || 'Boshqa';
+    bySource[src] = (bySource[src] || 0) + amt;
+    outcomeTotal += amt;
   });
+  return { ok: true, bySource, outcomeTotal, incomeTotal, count: payments.length };
+}
 
-  const withdrawable = orders
-    .filter(o => o.status === 'DELIVERED')
-    .reduce((acc, o) => acc + (o.payout || 0), 0);
+// Global Text Builder for Telegram Daily Report — jonli ma'lumot + snapshot delta (2.1)
+async function generateReportText(shopId) {
+  shopId = shopId || syncedState.activeShop;
+  const shop = (syncedState.shops || []).find(s => String(s.shopId) === String(shopId));
+  const shopTitle = shop ? shop.shopTitle : `Shop ${shopId}`;
+  const todayStr = todayTashkent();
+  const header = `🟣 *Uzum Pro — ${shopTitle} (${shopId})*\n📅 ${todayStr} hisoboti`;
 
-  const expenseByType = { STORAGE: 0, LOGISTICS: 0, MARKETING: 0 };
-  expenses.forEach(x => {
-    if (expenseByType[x.type] !== undefined) expenseByType[x.type] += x.amount;
-  });
-  const totalExpenses = expenseByType.STORAGE + expenseByType.LOGISTICS + expenseByType.MARKETING;
+  // Jonli mahsulotlar (syncedState'ga tayanmaydi — 2.1)
+  const prod = await fetchLiveShopProducts(shopId);
+  if (!prod.ok) {
+    return `${header}\n\n⚠️ Uzum'dan ma'lumot olinmadi: ${prod.error}\nHisobot tuzib bo'lmadi.`;
+  }
+  const products = prod.products;
 
-  let activeCount = products.length;
-  let outOfStockCount = 0;
-  let alertCount = 0;
-  let blockedCount = 0;
+  // Inventar holati (jonli)
+  let activeCount = products.length, outOfStock = 0, low = 0, blocked = 0;
   const urgentItems = [];
-
   products.forEach(p => {
-    if (p.status?.value === 'PERM_BANNED') blockedCount++;
+    if (p.status?.value === 'PERM_BANNED') blocked++;
     (p.skuList || []).forEach(sku => {
       const qty = sku.availableAmount;
-      if (qty === 0) outOfStockCount++;
-      if (qty > 0 && qty < 15) alertCount++;
-
-      const type = productTypes.find(t => t.id === skuMappings[sku.skuId]);
-      if (qty === 0 && type && type.stock > 0) {
-        urgentItems.push(`${type.name}: ${sku.skuTitle} o'rniga uy zaxirasidan yuboring (Hozir Uzum omborida: 0 dona, Uyda: ${type.stock} dona kutilmoqda)`);
+      if (qty <= 0) outOfStock++;
+      else if (qty < 15) low++;
+      const type = syncedState.productTypes.find(t => t.id === syncedState.skuMappings[sku.skuId]);
+      if (qty <= 0 && type && type.stock > 0) {
+        urgentItems.push(`${type.name}: ${sku.skuTitle} tugadi — uyda ${type.stock} dona bor`);
       }
     });
   });
 
-  return { ordersCount, soldQty, revenue, profitSum, unmappedCount, withdrawable, expenseByType, totalExpenses, activeCount, outOfStockCount, alertCount, blockedCount, urgentItems };
-}
+  // Kunlik sotuv — snapshot delta (2.1). Yetarli snapshot bo'lmasa aniq belgilanadi.
+  const delta = getDailyDelta(shopId);
+  let salesSection;
+  if (!delta.ready) {
+    let lifeSold = 0, lifeReturned = 0;
+    products.forEach(p => (p.skuList || []).forEach(s => { lifeSold += s.quantitySold || 0; lifeReturned += s.quantityReturned || 0; }));
+    salesSection = `⏳ Kunlik sotuv ma'lumoti yig'ilmoqda (ertadan boshlab aniq bo'ladi — hozir ${delta.snapshotCount} ta kunlik snapshot bor).\n\n📊 *Boshidan beri jami* (umriy hisoblagich, kunlik emas):\n🛍️ Sotilgan: ${lifeSold.toLocaleString('uz-UZ')} dona\n↩️ Qaytarilgan: ${lifeReturned.toLocaleString('uz-UZ')} dona`;
+  } else {
+    let profit = 0, revenue = 0, unmapped = 0;
+    for (const skuId of Object.keys(delta.perSku)) {
+      const d = delta.perSku[skuId];
+      if (d.soldDelta === 0) continue;
+      const sku = findSkuInProducts(products, skuId);
+      const price = sku ? (sku.purchasePrice || 0) : 0;
+      revenue += price * d.soldDelta;
+      const type = syncedState.productTypes.find(t => t.id === syncedState.skuMappings[skuId]);
+      if (!type || !sku) { unmapped++; continue; }
+      const perUnit = price - price * (commissionPct(skuId) / 100) - logisticsCost(skuId) - type.cost;
+      profit += perUnit * d.soldDelta;
+    }
+    salesSection = `🛍️ Kechagi sotilgan: ${delta.totalSold.toLocaleString('uz-UZ')} dona\n↩️ Kechagi qaytarilgan: ${delta.totalReturned.toLocaleString('uz-UZ')} dona\n🏦 Kechagi daromad: ${revenue.toLocaleString('uz-UZ')} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${profit.toLocaleString('uz-UZ')} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}`;
+  }
 
-// Global Text Builder for Telegram Daily Report
-function generateReportText() {
-  const todayStr = new Date().toISOString().split('T')[0];
-  const { orders, expenses, products } = getReportDataSource();
-  const m = buildReportMetrics(orders, expenses, syncedState.productTypes, syncedState.skuMappings, products);
+  // Xarajatlar — source bo'yicha (2.3)
+  const exp = await fetchExpensesGrouped(shopId, process.env.UZUM_TOKEN);
+  let expenseSection;
+  if (!exp.ok) {
+    expenseSection = `💸 Xarajatlar: olinmadi (${exp.error})`;
+  } else if (exp.count === 0) {
+    expenseSection = `💸 Xarajatlar (oxirgi 30 kun): yozuv yo'q`;
+  } else {
+    const lines = Object.entries(exp.bySource).sort((a, b) => b[1] - a[1]).map(([src, amt]) => `  ➤ ${src}: ${amt.toLocaleString('uz-UZ')} so'm`).join('\n');
+    expenseSection = `💸 Xarajatlar (oxirgi 30 kun, jami ${exp.outcomeTotal.toLocaleString('uz-UZ')} so'm):\n${lines}${exp.incomeTotal ? `\n  ✅ Kirim (INCOME): ${exp.incomeTotal.toLocaleString('uz-UZ')} so'm` : ''}`;
+  }
 
-  const urgentSection = m.urgentItems.length
-    ? `\n🚨 *ZUDLIK BILAN OMBORGA YUBORING:*\n${m.urgentItems.map(t => `• ${t}`).join('\n')}\n`
+  const urgentSection = urgentItems.length
+    ? `\n🚨 *ZUDLIK BILAN OMBORGA YUBORING:*\n${urgentItems.slice(0, 5).map(t => `• ${t}`).join('\n')}${urgentItems.length > 5 ? `\n• …va yana ${urgentItems.length - 5} ta` : ''}\n`
     : '';
 
-  return `🟣 *Uzum Pro Dashboard*
-Assalomu alaykum!
+  return `${header}
 
-📅 *${todayStr}* uchun hisobot
+${salesSection}
 
-📦 Qabul qilingan buyurtmalar: ${m.ordersCount} ta
-🛍️ Sotilgan tovarlar: ${m.soldQty} ta
-🏦 Daromad: ${m.revenue.toLocaleString('uz-UZ')} so'm
-💵 Sof foyda: ${m.profitSum.toLocaleString('uz-UZ')} so'm${m.unmappedCount > 0 ? ` (bog'lanmagan: ${m.unmappedCount} ta buyurtma hisobga kirmadi)` : ''}
-
-💰 Yechib olish mumkin (yetkazilgan buyurtmalar bo'yicha): ${m.withdrawable.toLocaleString('uz-UZ')} so'm
-
-💸 Xarajatlar (jami ${m.totalExpenses.toLocaleString('uz-UZ')} so'm):
-  ➤ Logistika: ${m.expenseByType.LOGISTICS.toLocaleString('uz-UZ')} so'm
-  ➤ Saqlash: ${m.expenseByType.STORAGE.toLocaleString('uz-UZ')} so'm
-  ➤ Marketing: ${m.expenseByType.MARKETING.toLocaleString('uz-UZ')} so'm
+${expenseSection}
 
 📦 Tovarlar holati:
-✅ Sotuvda: ${m.activeCount} ta tovar
-❌ Ogohlantirish (Tugagan): ${m.outOfStockCount} ta SKU
-⚠️ Kam qolgan: ${m.alertCount} ta SKU
-🚫 Bloklangan: ${m.blockedCount} ta
+✅ Sotuvda (e'lonlar): ${activeCount} ta
+❌ Tugagan SKU: ${outOfStock} ta
+⚠️ Kam qolgan SKU: ${low} ta
+🚫 Bloklangan: ${blocked} ta
 ${urgentSection}
-/start — boshlash
-/hisobot — hisobot
-/dashboard — mini app ochish`;
+/start — boshlash | /hisobot — hisobot | /dashboard — mini app`;
 }
 
 // Kunlik hisobotni yuborish — cron va qo'lda diagnostika endpoint ikkalasi ham shu funksiyani ishlatadi
@@ -585,7 +850,7 @@ async function runDailyReport() {
     return { success: false, error: "TELEGRAM_BOT_TOKEN yo'q" };
   }
   try {
-    const reportText = generateReportText();
+    const reportText = await generateReportText();
     const sent = await sendTelegramMessage(token, ADMIN_CHAT_ID, reportText);
     if (!sent) {
       console.error(`[CRON] Kunlik hisobot yuborilmadi — Telegram API rad etdi: ${new Date().toISOString()}`);
@@ -631,7 +896,7 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
       ]]
     });
   } else if (text.startsWith('/hisobot')) {
-    const reportText = generateReportText();
+    const reportText = await generateReportText();
     await sendTelegramMessage(token, chatId, reportText, {
       inline_keyboard: [[
         { text: "📊 Dashboardni ochish (Mini App)", web_app: { url: appUrl } }
@@ -647,9 +912,10 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
 });
 
 // Endpoint to fetch simulated bot report text in the simulator
-app.get('/api/tg-bot/simulate-report', (req, res) => {
+app.get('/api/tg-bot/simulate-report', async (req, res) => {
   // Return the textual report so frontend simulator can demonstrate beautifully
-  const text = generateReportText();
+  const shopId = req.query.shopId || syncedState.activeShop;
+  const text = await generateReportText(shopId);
   res.json({ report: text });
 });
 
@@ -657,6 +923,22 @@ app.get('/api/tg-bot/simulate-report', (req, res) => {
 app.get('/api/tg-bot/trigger-daily-report', async (req, res) => {
   const result = await runDailyReport();
   res.json(result);
+});
+
+// Diagnostika: snapshotni qo'lda darhol oladi (cron kutmasdan sinash uchun)
+app.get('/api/snapshot/capture', async (req, res) => {
+  const result = await captureSnapshot();
+  res.json(result);
+});
+
+// Diagnostika: joriy snapshot holatini ko'rsatadi (nechta kun, oxirgi delta)
+app.get('/api/snapshot/status', (req, res) => {
+  const snapshots = loadSnapshots();
+  const out = {};
+  for (const shopId of Object.keys(snapshots)) {
+    out[shopId] = { dates: Object.keys(snapshots[shopId]).sort(), delta: getDailyDelta(shopId) };
+  }
+  res.json(out);
 });
 
 // Automatic bot registration logic
@@ -672,6 +954,14 @@ if (process.env.TELEGRAM_BOT_TOKEN && process.env.APP_URL) {
     .catch(err => {
       console.error(`Telegram Bot webhook registration failed:`, err);
     });
+}
+
+// Snapshot cron — har kuni 04:50 Asia/Tashkent (hisobotdan oldin, sotuv tezligi uchun)
+if (process.env.UZUM_TOKEN) {
+  cron.schedule('50 4 * * *', () => { captureSnapshot().catch(e => console.error('[SNAPSHOT] cron xato:', e)); }, { timezone: 'Asia/Tashkent' });
+  console.log('[CRON] Kunlik snapshot rejalashtirildi: har kuni 04:50 Asia/Tashkent.');
+} else {
+  console.warn('[CRON] UZUM_TOKEN yo\'q — snapshot rejalashtirilmadi.');
 }
 
 // Scheduled daily report — har kuni 05:00 Toshkent vaqtida (timezone aniq ko'rsatilgan,
@@ -691,6 +981,9 @@ app.get('/', (req, res) => {
 app.get('/dashboard', (req, res) => {
   res.sendFile(path.join(__dirname, 'dashboard.html'));
 });
+
+// Startupda saqlangan sozlamalarni diskdan yuklaymiz (2.2)
+loadSettings();
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Uzum dashboard server running on port ${PORT}`);

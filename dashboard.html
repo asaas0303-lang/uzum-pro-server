@@ -413,7 +413,8 @@ ${urgentSection}
       }
 
       try {
-        const rData = await fetchFromProxy(`/api/uzum/shop/${state.activeShop}/return`);
+        // 2.4: HAQIQIY mijoz qaytarishlari (/v1/return) — client-side shopId filtri
+        const rData = await fetchFromProxy(`/api/uzum/return?shopId=${state.activeShop}`);
         state.returns = rData.payload || [];
       } catch (e) {
         console.error("Qaytarishlarni yuklashda xato:", e);
@@ -1209,7 +1210,6 @@ ${urgentSection}
       let totalPayout = 0;
       let totalComsVal = 0;
       let totalShipping = 0;
-      let totalStorageEstimate = 0;
       let totalMarketingVal = 0;
       let totalMappedCostSum = 0;
 
@@ -1248,13 +1248,19 @@ ${urgentSection}
         }
       });
 
-      // Storage and general expense feeds
+      // 2.3: real Uzum xarajatlarini SOURCE bo'yicha guruhlaymiz (type=OUTCOME/INCOME).
+      // Eski STORAGE/MARKETING tasnifi real ma'lumotda hech qachon ishlamasdi — kategoriya o'ylab topilmaydi.
+      const realExpensesBySource = {};
+      let realExpensesTotal = 0, realIncomeTotal = 0;
       state.expenses.forEach(x => {
-        if (x.type === 'STORAGE') totalStorageEstimate += x.amount;
-        if (x.type === 'MARKETING') totalMarketingVal += x.amount;
+        const amt = (x.amount != null ? x.amount : (x.paymentPrice || 0)) || 0;
+        if (x.type === 'INCOME') { realIncomeTotal += amt; return; }
+        const src = x.source || x.name || 'Boshqa';
+        realExpensesBySource[src] = (realExpensesBySource[src] || 0) + amt;
+        realExpensesTotal += amt;
       });
 
-      const totalProfit = totalPayout - totalShipping - totalStorageEstimate - totalMappedCostSum;
+      const totalProfit = totalPayout - totalShipping - realExpensesTotal - totalMappedCostSum;
       const profitColor = totalProfit >= 0 ? 'text-brand' : 'text-rose-400';
 
       root.innerHTML = `
@@ -1295,12 +1301,20 @@ ${urgentSection}
                 <span class="text-slate-100 font-mono">${totalMappedCostSum.toLocaleString()} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
-                <span class="text-slate-400">FBO Logistika + Saqlash:</span>
-                <span class="text-slate-100 font-mono">${(totalShipping + totalStorageEstimate).toLocaleString()} so'm</span>
-              </div>
-              <div class="flex justify-between text-xs py-1">
-                <span class="text-slate-400">Marketing & Reklama:</span>
+                <span class="text-slate-400">Marketing & Reklama (byudjet):</span>
                 <span class="text-slate-100 font-mono">${totalMarketingVal.toLocaleString()} so'm</span>
+              </div>
+              <!-- 2.3: real Uzum xarajatlari source bo'yicha (kategoriya o'ylab topilmaydi) -->
+              <div class="border-t border-darkBorder/40 pt-2 mt-1">
+                <div class="text-[10px] uppercase text-slate-500 mb-1">Uzum xarajatlari (oxirgi 30 kun):</div>
+                ${Object.keys(realExpensesBySource).length === 0
+                  ? `<div class="text-[10.5px] text-slate-500">Bu davrda xarajat yozuvi yo'q</div>`
+                  : Object.entries(realExpensesBySource).sort((a,b)=>b[1]-a[1]).map(([src,amt])=>`
+                    <div class="flex justify-between text-[10.5px] py-0.5">
+                      <span class="text-slate-400">${src}</span>
+                      <span class="text-slate-300 font-mono">${amt.toLocaleString()} so'm</span>
+                    </div>`).join('')}
+                ${realIncomeTotal ? `<div class="flex justify-between text-[10.5px] py-0.5 text-emerald-400 border-t border-darkBorder/30 mt-1 pt-1"><span>Kirim (INCOME)</span><span class="font-mono">${realIncomeTotal.toLocaleString()} so'm</span></div>` : ''}
               </div>
               ${noSaleAdSpendSkus.length > 0 ? `
                 <div class="flex items-start gap-1.5 text-[10.5px] text-amber-400 bg-amber-950/20 border border-amber-900/40 rounded-lg px-2 py-1.5">
@@ -1318,7 +1332,7 @@ ${urgentSection}
           <!-- Returns Tracker widget -->
           <div class="bg-darkCard border border-darkBorder rounded-2xl p-4">
             <div class="flex items-center justify-between mb-3 border-b border-darkBorder pb-2.5">
-              <span class="text-xs uppercase font-bold text-slate-300 tracking-wider">Ombor Qaytarishlari (Returns)</span>
+              <span class="text-xs uppercase font-bold text-slate-300 tracking-wider">Mijoz Qaytarishlari (Returns)</span>
               <span class="text-[10px] font-mono font-bold text-rose-400">${state.returns.length} ta</span>
             </div>
             <div class="flex flex-col gap-2 max-h-[140px] overflow-y-auto">
