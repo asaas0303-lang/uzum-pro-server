@@ -133,8 +133,9 @@
   <script>
     // State management using elegant LocalStorage bindings
     const defaultShops = [
-      { shopId: 61122, shopTitle: "Uzum Pro Store (A9)" },
-      { shopId: 72540, shopTitle: "Smart Gadgets" }
+      { shopId: 61122, shopTitle: "kamera" },
+      { shopId: 48589, shopTitle: "Jaydari Bozor" },
+      { shopId: 63592, shopTitle: "Nurli" }
     ];
 
     const defaultProductTypes = [
@@ -175,6 +176,7 @@
       expenses: [],
       returns: [],
       dataErrors: { products: null, orders: null, expenses: null, returns: null },
+      unavailableShops: [], // Uzum "Shop is not available" (403) bergan do'kon ID'lari
       activeTab: 'dashboard',
       aiResults: null,
       aiLoading: false
@@ -376,6 +378,8 @@ ${urgentSection}
       try {
         const pData = await fetchFromProxy(`/api/uzum/product/shop/${state.activeShop}`);
         state.cachedUzumProducts = pData.payload || [];
+        // Do'kon ishlaydi — agar avval "mavjud emas" deb belgilangan bo'lsa, olib tashlaymiz
+        state.unavailableShops = state.unavailableShops.filter(id => id !== state.activeShop);
         if (pData.source === 'live') {
           setBadge('Live Connected', 'bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 badge-glow');
         } else {
@@ -385,6 +389,10 @@ ${urgentSection}
         console.error("Mahsulotlarni yuklashda xato:", e);
         state.cachedUzumProducts = null;
         state.dataErrors.products = e.message;
+        // Uzum "Shop is not available" bersa — do'konni "mavjud emas" deb belgilaymiz
+        if (/not available|forbidden|403/i.test(e.message || '') && !state.unavailableShops.includes(state.activeShop)) {
+          state.unavailableShops.push(state.activeShop);
+        }
         setBadge("⚠️ Ma'lumot yo'q", 'bg-rose-950/80 border border-rose-500/50 text-rose-300');
       }
 
@@ -547,15 +555,20 @@ ${urgentSection}
     // Shop functions
     function renderShopPills() {
       const container = document.getElementById('shop-pills');
-      container.innerHTML = state.shops.map(s => `
-        <button onclick="changeActiveShop(${s.shopId})" class="shrink-0 px-3 py-1.5 text-xs font-medium rounded-full transition border font-mono ${
-          state.activeShop === s.shopId 
-            ? 'bg-brand/10 border-brand text-brand badge-glow' 
-            : 'bg-darkBg border-darkBorder text-slate-400 hover:text-slate-200'
+      container.innerHTML = state.shops.map(s => {
+        const unavailable = state.unavailableShops.includes(s.shopId);
+        return `
+        <button onclick="changeActiveShop(${s.shopId})" title="${unavailable ? 'Bu do\'kon Uzum API uchun ochilmagan' : ''}" class="shrink-0 px-3 py-1.5 text-xs font-medium rounded-full transition border font-mono ${
+          unavailable
+            ? 'bg-rose-950/30 border-rose-800 text-rose-300'
+            : state.activeShop === s.shopId
+              ? 'bg-brand/10 border-brand text-brand badge-glow'
+              : 'bg-darkBg border-darkBorder text-slate-400 hover:text-slate-200'
         }">
-          ${s.shopTitle}
+          ${s.shopTitle}${unavailable ? ' ⚠️' : ''}
         </button>
-      `).join('');
+      `;
+      }).join('');
     }
 
     function changeActiveShop(id) {

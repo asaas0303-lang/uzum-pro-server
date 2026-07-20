@@ -70,8 +70,9 @@ let syncedState = {
   },
   costs: {}, // ad spends e.g. { skuId: 10000 }
   shops: [
-    { shopId: 61122, shopTitle: 'Uzum Pro Store' },
-    { shopId: 72540, shopTitle: 'Smart Gadgets Market' }
+    { shopId: 61122, shopTitle: 'kamera' },
+    { shopId: 48589, shopTitle: 'Jaydari Bozor' },
+    { shopId: 63592, shopTitle: 'Nurli' }
   ],
   activeShop: 61122,
   products: [], // real Uzum product cards synced from frontend (dashboard.html state.cachedUzumProducts)
