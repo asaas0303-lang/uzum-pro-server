@@ -89,12 +89,14 @@ function saveSettings() {
   writeJsonFile(SETTINGS_FILE, settings);
 }
 
+let settingsLoadedFromDisk = false;
 function loadSettings() {
   const settings = readJsonFile(SETTINGS_FILE, null);
   if (settings) {
     for (const k of SETTINGS_KEYS) {
       if (settings[k] !== undefined) syncedState[k] = settings[k];
     }
+    settingsLoadedFromDisk = true;
     console.log('[DISK] Sozlamalar diskdan yuklandi.');
   } else {
     console.log('[DISK] Saqlangan sozlama topilmadi — default ishlatiladi.');
@@ -930,6 +932,18 @@ app.get('/api/tg-bot/trigger-daily-report', async (req, res) => {
 app.get('/api/snapshot/capture', async (req, res) => {
   const result = await captureSnapshot();
   res.json(result);
+});
+
+// Diagnostika: joriy sozlamalar (do'konlar) holatini ko'rsatadi — settings.json diskdan yuklandimi
+app.get('/api/settings/status', (req, res) => {
+  res.json({
+    loadedFromDisk: settingsLoadedFromDisk,
+    settingsFileExists: fs.existsSync(SETTINGS_FILE),
+    dataDir: DATA_DIR,
+    shops: syncedState.shops,
+    shopCount: (syncedState.shops || []).length,
+    productTypesCount: (syncedState.productTypes || []).length
+  });
 });
 
 // Diagnostika: joriy snapshot holatini ko'rsatadi (nechta kun, oxirgi delta)
