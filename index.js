@@ -51,6 +51,16 @@ function writeJsonFile(file, data) {
   }
 }
 
+// Catch-up uchun: kunlik hisobot oxirgi qachon muvaffaqiyatli yuborilgani (sana) diskda kuzatiladi
+const REPORT_META_FILE = path.join(DATA_DIR, 'report_meta.json');
+function getLastReportDate() {
+  const meta = readJsonFile(REPORT_META_FILE, null);
+  return meta ? meta.lastReportDate : null;
+}
+function setLastReportDate(date) {
+  writeJsonFile(REPORT_META_FILE, { lastReportDate: date });
+}
+
 // Diagnostika: joriy deploy qaysi Git commit'dan ekanini va APP_URL qanday sozlanganini ko'rsatadi
 app.get('/version', (req, res) => {
   res.json({ commit: process.env.RAILWAY_GIT_COMMIT_SHA || null, appUrl: process.env.APP_URL || null });
@@ -431,6 +441,23 @@ function loadSnapshots() { return readJsonFile(SNAPSHOTS_FILE, {}); }
 // Asia/Tashkent (UTC+5) bo'yicha bugungi sana YYYY-MM-DD
 function todayTashkent() {
   return new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+// Asia/Tashkent bo'yicha joriy sana + soat + daqiqa (catch-up uchun)
+function tashkentTimeParts() {
+  const iso = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString();
+  const [date, time] = iso.split('T');
+  const [hh, mm] = time.split(':');
+  return { date, hour: Number(hh), minute: Number(mm) };
+}
+
+// Bugungi snapshot sozlangan do'konlarning HECH BIRIDA yo'qmi?
+function todaysSnapshotMissing() {
+  const shops = syncedState.shops || [];
+  if (shops.length === 0) return false; // sozlangan do'kon yo'q — tekshiradigan narsa yo'q
+  const snapshots = loadSnapshots();
+  const today = todayTashkent();
+  return !shops.some(s => snapshots[s.shopId] && snapshots[s.shopId][today]);
 }
 
 // Har SKU uchun quantitySold/quantityReturned/available ni sana bilan diskka saqlaydi
@@ -823,13 +850,18 @@ async function sendTelegramMessage(token, chatId, text, replyMarkup = null) {
     });
     const data = await response.json();
     if (!response.ok || !data.ok) {
-      console.error("Telegram sendMessage rejected:", response.status, data);
-      return false;
+      // TO'LIQ xato logi — nima uchun yetkazilmaganini aniq bilamiz
+      console.error(`[TG] YUBORISH RAD ETILDI → HTTP ${response.status}, ok=${data.ok}, error_code=${data.error_code}, description="${data.description}", chat_id=${chatId}`);
+      return { ok: false, status: response.status, errorCode: data.error_code, description: data.description, chatIdSent: chatId };
     }
-    return true;
+    // TO'LIQ muvaffaqiyat logi — xabar QAYERGA ketganini aniq bilamiz
+    const r = data.result || {};
+    const chat = r.chat || {};
+    console.log(`[TG] Yuborildi ✓ → message_id=${r.message_id}, chat.id=${chat.id}, chat.type=${chat.type}, chat.username=${chat.username || '-'}, chat.first_name="${chat.first_name || ''}"`);
+    return { ok: true, messageId: r.message_id, chatId: chat.id, chatType: chat.type, chatUsername: chat.username || null, chatFirstName: chat.first_name || null };
   } catch (err) {
-    console.error("Telegram sendMessage call failed:", err);
-    return false;
+    console.error("[TG] sendMessage exception:", err);
+    return { ok: false, exception: err.message, chatIdSent: chatId };
   }
 }
 
@@ -967,15 +999,23 @@ async function runDailyReport() {
     console.error('[CRON] TELEGRAM_BOT_TOKEN topilmadi — hisobot yuborilmadi.');
     return { success: false, error: "TELEGRAM_BOT_TOKEN yo'q" };
   }
+  // Qaysi chat_id ishlatilmoqda — aniq logga yozamiz
+  if (!ADMIN_CHAT_ID) {
+    console.error('[CRON] OGOHLANTIRISH: ADMIN_CHAT_ID undefined/bo\'sh — hisobot hech kimga ketmaydi!');
+  } else {
+    console.log(`[CRON] Hisobot qabul qiluvchi chat_id: ${ADMIN_CHAT_ID}`);
+  }
   try {
     const reportText = await generateReportText();
     const sent = await sendTelegramMessage(token, ADMIN_CHAT_ID, reportText);
-    if (!sent) {
+    if (!sent.ok) {
       console.error(`[CRON] Kunlik hisobot yuborilmadi — Telegram API rad etdi: ${new Date().toISOString()}`);
-      return { success: false, error: 'Telegram API xabarni rad etdi (loglarga qarang)' };
+      return { success: false, error: 'Telegram API xabarni rad etdi', chatIdUsed: ADMIN_CHAT_ID, telegram: sent };
     }
     console.log(`[CRON] Kunlik hisobot muvaffaqiyatli yuborildi: ${new Date().toISOString()}`);
-    return { success: true };
+    setLastReportDate(todayTashkent()); // catch-up uchun: bugun yuborilgani belgilanadi
+    // HTTP javobda message_id/chat ma'lumotini qaytaramiz — xabar qayerga ketganini Railway logisiz ko'ramiz
+    return { success: true, chatIdUsed: ADMIN_CHAT_ID, telegram: sent };
   } catch (err) {
     console.error(`[CRON] Kunlik hisobot yuborishda xato: ${new Date().toISOString()}`, err);
     return { success: false, error: err.message };
@@ -1087,8 +1127,15 @@ if (process.env.TELEGRAM_BOT_TOKEN && process.env.APP_URL) {
 }
 
 // Snapshot cron — har kuni 04:50 Asia/Tashkent (hisobotdan oldin, sotuv tezligi uchun)
+// MUHIM: bu callback ham "[CRON]" tegi bilan loglaydi — Railway loglarida "CRON" bo'yicha
+// qidirilganda ko'rinsin (avval faqat "[SNAPSHOT]" tegi bor edi, "CRON" qidiruviga tushmasdi).
 if (process.env.UZUM_TOKEN) {
-  cron.schedule('50 4 * * *', () => { captureSnapshot().catch(e => console.error('[SNAPSHOT] cron xato:', e)); }, { timezone: 'Asia/Tashkent' });
+  cron.schedule('50 4 * * *', () => {
+    console.log(`[CRON] Snapshot cron ishga tushdi: ${new Date().toISOString()}`);
+    captureSnapshot()
+      .then(r => console.log(`[CRON] Snapshot cron tugadi: ${r.savedShops} do'kon saqlandi (${r.date})`))
+      .catch(e => console.error('[CRON] Snapshot cron xato:', e));
+  }, { timezone: 'Asia/Tashkent' });
   console.log('[CRON] Kunlik snapshot rejalashtirildi: har kuni 04:50 Asia/Tashkent.');
 } else {
   console.warn('[CRON] UZUM_TOKEN yo\'q — snapshot rejalashtirilmadi.');
@@ -1112,8 +1159,36 @@ app.get('/dashboard', (req, res) => {
   res.sendFile(path.join(__dirname, 'dashboard.html'));
 });
 
+// Catch-up: cron faqat server AYNI shu daqiqada ishlab turgandagina ishga tushadi. Agar Railway
+// qayta ishga tushishi (deploy, crash, restart) 04:50/05:00 oynasini o'tkazib yuborgan bo'lsa,
+// cron shu kuni umuman ishlamay qoladi. Shuning uchun startupda "bugun bajarilganmi?" tekshiramiz —
+// bajarilmagan bo'lsa va vaqt allaqachon o'tgan bo'lsa, bir martalik "quvib yetish" ishga tushiramiz.
+async function runStartupCatchUp() {
+  const { date, hour, minute } = tashkentTimeParts();
+
+  const pastSnapshotTime = hour > 4 || (hour === 4 && minute >= 50);
+  if (process.env.UZUM_TOKEN && pastSnapshotTime && todaysSnapshotMissing()) {
+    console.log(`[CRON] Catch-up: bugungi (${date}) snapshot topilmadi, hozir olinmoqda...`);
+    try {
+      const r = await captureSnapshot();
+      console.log(`[CRON] Catch-up snapshot tugadi: ${r.savedShops} do'kon saqlandi (${r.date})`);
+    } catch (e) {
+      console.error('[CRON] Catch-up snapshot xato:', e);
+    }
+  }
+
+  const pastReportTime = hour >= 5;
+  if (process.env.TELEGRAM_BOT_TOKEN && pastReportTime && getLastReportDate() !== date) {
+    console.log(`[CRON] Catch-up: bugungi (${date}) hisobot hali yuborilmagan, hozir yuborilmoqda...`);
+    runDailyReport().catch(e => console.error('[CRON] Catch-up hisobot xato:', e));
+  }
+}
+
 // Startupda saqlangan sozlamalarni diskdan yuklaymiz (2.2)
 loadSettings();
+
+// Catch-up — server to'liq ishga tushgach, fon rejimida (startupni bloklamaydi)
+runStartupCatchUp().catch(e => console.error('[CRON] Catch-up umumiy xato:', e));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Uzum dashboard server running on port ${PORT}`);
