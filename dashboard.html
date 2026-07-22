@@ -1053,6 +1053,12 @@ ${urgentSection}
 
     function renderAllShopsUnsafe(root) {
       const summary = state.allShopsSummary;
+      const okShops = (summary?.shops || []).filter(s => s.ok);
+      const readyShops = okShops.filter(s => s.turnover?.ready);
+      const turnoverSales = readyShops.reduce((a, s) => a + s.turnover.totalSales, 0);
+      const turnoverProfit = readyShops.reduce((a, s) => a + s.turnover.totalProfit, 0);
+      const turnoverSold = readyShops.reduce((a, s) => a + s.turnover.soldTotal, 0);
+
       root.innerHTML = `
         <div class="flex flex-col gap-4">
           <button onclick="toggleAllShopsView()" class="self-start text-[11px] text-brand hover:underline font-semibold flex items-center gap-1">
@@ -1061,11 +1067,6 @@ ${urgentSection}
           ${state.allShopsLoading ? `
             <div class="p-6 text-center text-slate-500 bg-darkCard border border-darkBorder rounded-2xl">Yuklanmoqda...</div>
           ` : summary?.error ? dataErrorBanner(summary.error) : `
-            <div class="bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20 rounded-3xl p-5">
-              <span class="text-xs text-brand uppercase tracking-wider font-mono">Barcha do'konlar — jami zaxira</span>
-              <div class="text-2xl font-black text-slate-100 mt-2">${fmtMoney(summary?.totalStock || 0)} dona</div>
-              <div class="text-[10px] text-slate-500 mt-1">Jami: ${fmtMoney(summary?.totalStock || 0)} dona (${(summary?.shops || []).filter(s => s.ok).map(s => `${s.shopTitle}: ${s.totalStock}`).join(', ')})</div>
-            </div>
             <div class="grid grid-cols-2 gap-3">
               <div class="bg-darkCard border border-darkBorder rounded-2xl p-3.5 flex flex-col justify-between">
                 <span class="text-[11px] text-slate-400">Faol e'lonlar</span>
@@ -1076,8 +1077,113 @@ ${urgentSection}
                 <span class="text-xl font-bold text-rose-400 mt-1">${summary?.totalOutOfStock || 0} ta</span>
               </div>
             </div>
+
+            <!-- D1/D5: Jami zaxira + do'kon bo'yicha taqsimot -->
+            <div class="bg-darkCard border border-darkBorder rounded-2xl overflow-hidden">
+              <div class="p-4 cursor-pointer" onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('.dash-chevron').classList.toggle('rotate-180')">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <i data-lucide="warehouse" class="w-4.5 h-4.5 text-slate-300"></i>
+                    <span class="text-[11px] text-slate-400 font-medium uppercase tracking-wider">Jami Zaxira</span>
+                  </div>
+                  <i data-lucide="chevron-down" class="dash-chevron w-3.5 h-3.5 text-slate-500 transition-transform"></i>
+                </div>
+                <span class="text-xl font-bold text-slate-100 mt-1 block">${fmtMoney((summary?.homeStockQty || 0) + (summary?.totalStock || 0))} dona</span>
+              </div>
+              <div class="hidden px-4 pb-4 border-t border-darkBorder/40 pt-3 flex flex-col gap-1.5 text-[11px]">
+                <div class="flex justify-between">
+                  <span class="text-slate-400">Uyda (barcha do'konlar uchun umumiy):</span>
+                  <span class="font-semibold text-slate-200">${fmtMoney(summary?.homeStockQty || 0)} dona</span>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-slate-400">Uzum omborida (barchasi):</span>
+                  <span class="font-semibold text-slate-200">${fmtMoney(summary?.totalStock || 0)} dona</span>
+                </div>
+                <div class="mt-1.5 pt-1.5 border-t border-darkBorder/30 flex flex-col gap-1">
+                  ${okShops.map(s => `
+                    <div class="flex justify-between pl-2">
+                      <span class="text-slate-500">├─ ${s.shopTitle}:</span>
+                      <span class="text-slate-300">${fmtMoney(s.totalStock)} dona</span>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+            </div>
+
+            <!-- D2/D5: Zaxira qiymati + do'kon bo'yicha taqsimot -->
+            <div class="bg-darkCard border border-darkBorder rounded-2xl overflow-hidden">
+              <div class="p-4 cursor-pointer" onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('.dash-chevron').classList.toggle('rotate-180')">
+                <div class="flex items-center justify-between mb-1.5">
+                  <div class="flex items-center gap-2">
+                    <i data-lucide="wallet" class="w-4.5 h-4.5 text-slate-300"></i>
+                    <span class="text-[11px] text-slate-400 font-medium uppercase tracking-wider">Zaxira Qiymati</span>
+                  </div>
+                  <i data-lucide="chevron-down" class="dash-chevron w-3.5 h-3.5 text-slate-500 transition-transform"></i>
+                </div>
+                <div class="flex flex-col gap-0.5 text-[11px]">
+                  <div class="flex justify-between"><span class="text-slate-400">Tannarx:</span><span class="font-semibold text-slate-200">${fmtMoney((summary?.homeStockValue || 0) + (summary?.uzumStockValueTannarx || 0))} so'm</span></div>
+                  <div class="flex justify-between"><span class="text-slate-400">Sotilsa:</span><span class="font-semibold text-slate-200">${fmtMoney((summary?.homeSotilsa || 0) + (summary?.uzumStockValueSotilsa || 0))} so'm</span></div>
+                  <div class="flex justify-between"><span class="text-slate-400">Foyda:</span><span class="font-bold text-brand">${fmtMoney((summary?.homeFoyda || 0) + (summary?.uzumStockValueFoyda || 0))} so'm</span></div>
+                </div>
+              </div>
+              <div class="hidden px-4 pb-4 border-t border-darkBorder/40 pt-3 flex flex-col gap-2.5 text-[11px]">
+                <div>
+                  <div class="text-slate-300 font-semibold mb-1">Tannarx: ${fmtMoney((summary?.homeStockValue || 0) + (summary?.uzumStockValueTannarx || 0))} so'm</div>
+                  <div class="flex justify-between pl-2"><span class="text-slate-500">├─ Uyda:</span><span class="text-slate-300">${fmtMoney(summary?.homeStockValue || 0)} so'm</span></div>
+                  <div class="flex justify-between pl-2"><span class="text-slate-500">└─ Uzumda:</span><span class="text-slate-300">${fmtMoney(summary?.uzumStockValueTannarx || 0)} so'm</span></div>
+                </div>
+                <div>
+                  <div class="text-slate-300 font-semibold mb-1">Sotilsa: ${fmtMoney((summary?.homeSotilsa || 0) + (summary?.uzumStockValueSotilsa || 0))} so'm</div>
+                  <div class="flex justify-between pl-2"><span class="text-slate-500">├─ Uyda:</span><span class="text-slate-300">${fmtMoney(summary?.homeSotilsa || 0)} so'm</span></div>
+                  <div class="flex justify-between pl-2"><span class="text-slate-500">└─ Uzumda:</span><span class="text-slate-300">${fmtMoney(summary?.uzumStockValueSotilsa || 0)} so'm</span></div>
+                </div>
+                <div>
+                  <div class="text-slate-300 font-semibold mb-1">Foyda: ${fmtMoney((summary?.homeFoyda || 0) + (summary?.uzumStockValueFoyda || 0))} so'm</div>
+                  <div class="flex justify-between pl-2"><span class="text-slate-500">├─ Uyda:</span><span class="text-slate-300">${fmtMoney(summary?.homeFoyda || 0)} so'm</span></div>
+                  <div class="flex justify-between pl-2"><span class="text-slate-500">└─ Uzumda:</span><span class="text-slate-300">${fmtMoney(summary?.uzumStockValueFoyda || 0)} so'm</span></div>
+                </div>
+                <div class="pt-1.5 border-t border-darkBorder/30">
+                  <div class="text-slate-400 mb-1">Uzumdagi qiymat do'kon bo'yicha (tannarx · sotilsa · foyda):</div>
+                  ${okShops.map(s => `
+                    <div class="flex justify-between pl-2">
+                      <span class="text-slate-500">├─ ${s.shopTitle}:</span>
+                      <span class="text-slate-300">${fmtMoney(s.stockValueTannarx)} · ${fmtMoney(s.stockValueSotilsa)} · ${fmtMoney(s.stockValueFoyda)}</span>
+                    </div>
+                  `).join('')}
+                </div>
+                ${(summary?.typesWithoutPrice || []).length > 0 ? `<div class="text-[9.5px] text-amber-400/80">⚠️ ${summary.typesWithoutPrice.join(', ')} — hozir hech qaysi do'konda jonli narxi yo'q, "sotilsa/foyda" hisobiga kirmadi</div>` : ''}
+                <div class="text-[9.5px] text-slate-500">⚠️ Foyda — to'liq formula bo'yicha (komissiya, logistika, saqlash, tannarx ayirilgan; reklama kiritilmagan)</div>
+              </div>
+            </div>
+
+            <!-- D4/D5: Oxirgi kunlar aylanma + do'kon bo'yicha taqsimot -->
             <div class="bg-darkCard border border-darkBorder rounded-2xl p-4">
-              <div class="text-xs uppercase font-bold text-slate-300 tracking-wider border-b border-darkBorder pb-2.5 mb-3">Do'kon bo'yicha taqsimot</div>
+              <div class="flex items-center gap-2 mb-2">
+                <i data-lucide="trending-up" class="w-4.5 h-4.5 text-slate-300"></i>
+                <span class="text-[11px] text-slate-400 font-medium uppercase tracking-wider">Oxirgi kunlar aylanmasi</span>
+              </div>
+              ${readyShops.length === 0 ? `
+                <div class="text-[11px] text-slate-500 py-1">Ma'lumot yig'ilmoqda — hech bir do'konda hali yetarli snapshot tarixi yo'q</div>
+              ` : `
+                <div class="flex flex-col gap-1 text-[11px] mb-2">
+                  <div class="flex justify-between"><span class="text-slate-400">Aylanma:</span><span class="font-semibold text-slate-200">${fmtMoney(turnoverSales)} so'm</span></div>
+                  <div class="flex justify-between"><span class="text-slate-400">Sof foyda:</span><span class="font-bold text-brand">${fmtMoney(turnoverProfit)} so'm${turnoverSales > 0 ? ` (${fmtPct((turnoverProfit/turnoverSales)*100)}%)` : ''}</span></div>
+                  <div class="flex justify-between"><span class="text-slate-400">Sotilgan:</span><span class="font-semibold text-slate-200">${fmtMoney(turnoverSold)} dona</span></div>
+                </div>
+                <div class="pt-1.5 border-t border-darkBorder/30 flex flex-col gap-1 text-[10.5px]">
+                  ${okShops.map(s => `
+                    <div class="flex justify-between pl-2">
+                      <span class="text-slate-500">├─ ${s.shopTitle}:</span>
+                      <span class="text-slate-300">${s.turnover?.ready ? `${fmtMoney(s.turnover.totalSales)} so'm (${s.turnover.spanDays} kun)` : "ma'lumot yetarli emas"}</span>
+                    </div>
+                  `).join('')}
+                </div>
+              `}
+            </div>
+
+            <!-- Do'kon bo'yicha e'lon/blok holati -->
+            <div class="bg-darkCard border border-darkBorder rounded-2xl p-4">
+              <div class="text-xs uppercase font-bold text-slate-300 tracking-wider border-b border-darkBorder pb-2.5 mb-3">Do'kon bo'yicha holat</div>
               <div class="flex flex-col gap-2.5">
                 ${(summary?.shops || []).map(s => s.ok ? `
                   <div class="flex flex-col gap-1 p-2 px-3 rounded-xl bg-darkBg/60 border border-darkBorder">
@@ -1123,6 +1229,10 @@ ${urgentSection}
         homeStockValue += (t.stock * t.cost);
       });
 
+      // D1/D2: Uzum omboridagi joriy zaxira soni va qiymati (tannarx/sotilsa/foyda)
+      let uzumStockQty = 0, uzumStockTannarx = 0, uzumStockSotilsa = 0, uzumStockFoyda = 0;
+      const typeStats = {}; // typeId -> { sumPrice, sumProfit, count } — uy zaxirasi "sotilsa/foyda" taxmini uchun
+
       // Track mapped inventory to trigger alarms
       const alertItems = [];
       const chinaAlertItems = [];
@@ -1137,10 +1247,29 @@ ${urgentSection}
           p.skuList.forEach(sku => {
             const qty = sku.availableAmount;
             if (qty === 0) outOfStockSkuCount++;
-            
+
+            // D1/D2: joriy Uzum zaxirasi qiymati
+            const price = sku.purchasePrice || 0;
+            const tInfo = resolveTannarx(sku.skuId, p.productId);
+            const com = resolveCommission(sku.skuId, sku, p.productId);
+            const commission = price * (com.pct / 100);
+            const logi = resolveLogistics(sku.skuId, p.productId, sku).val;
+            const stor = resolveStorage(sku.skuId, p.productId, sku).val;
+            const profitPerUnit = price - commission - logi - stor - tInfo.tannarx; // reklama kiritilmagan
+            uzumStockQty += qty;
+            uzumStockTannarx += qty * tInfo.tannarx;
+            uzumStockSotilsa += qty * price;
+            uzumStockFoyda += qty * profitPerUnit;
+
             // Map checks
             const typeId = state.skuMappings[sku.skuId];
             const matchingType = state.productTypes.find(t => t.id === typeId);
+            if (typeId) {
+              if (!typeStats[typeId]) typeStats[typeId] = { sumPrice: 0, sumProfit: 0, count: 0 };
+              typeStats[typeId].sumPrice += price;
+              typeStats[typeId].sumProfit += profitPerUnit;
+              typeStats[typeId].count++;
+            }
 
             if (matchingType && qty === 0 && matchingType.stock > 0) {
               alertItems.push({ skuName: sku.skuTitle, typeName: matchingType.name });
@@ -1153,6 +1282,16 @@ ${urgentSection}
           });
         });
       }
+
+      // D2: uy zaxirasi "sotilsa/foyda" taxmini — shu do'kondagi bog'langan SKU'larning o'rtacha narxi/foydasidan
+      let homeSotilsa = 0, homeFoyda = 0;
+      state.productTypes.forEach(t => {
+        const stats = typeStats[t.id];
+        if (stats && stats.count > 0) {
+          homeSotilsa += t.stock * (stats.sumPrice / stats.count);
+          homeFoyda += t.stock * (stats.sumProfit / stats.count);
+        }
+      });
 
       const alertBadgeCount = alertItems.length + chinaAlertItems.length + blockedSkuCount;
 
@@ -1204,7 +1343,7 @@ ${urgentSection}
             <i data-lucide="layout-grid" class="w-3.5 h-3.5"></i> 📊 Barcha do'konlar
           </button>
 
-          <!-- Quick Metrics Bento Grid -->
+          <!-- Quick Metrics -->
           <div class="grid grid-cols-2 gap-3">
             <div class="bg-darkCard border border-darkBorder rounded-2xl p-3.5 flex flex-col justify-between">
               <i data-lucide="activity" class="w-4.5 h-4.5 text-brand mb-2"></i>
@@ -1216,16 +1355,83 @@ ${urgentSection}
               <span class="text-[11px] text-slate-400">Tugagan SKUs</span>
               <span class="text-xl font-bold text-rose-400 mt-1">${outOfStockSkuCount} ta</span>
             </div>
-            <div class="bg-darkCard border border-darkBorder rounded-2xl p-3.5 flex flex-col justify-between">
-              <i data-lucide="warehouse" class="w-4.5 h-4.5 text-slate-300 mb-2"></i>
-              <span class="text-[11px] text-slate-400 font-medium">Uy Zaxirasi Dona</span>
-              <span class="text-xl font-bold text-slate-100 mt-1">${fmtMoney(homeStockQty)} dona</span>
+          </div>
+
+          <!-- D1: Jami zaxira — yig'ilgan/ochiladigan -->
+          <div class="bg-darkCard border border-darkBorder rounded-2xl overflow-hidden">
+            <div class="p-4 cursor-pointer" onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('.dash-chevron').classList.toggle('rotate-180')">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <i data-lucide="warehouse" class="w-4.5 h-4.5 text-slate-300"></i>
+                  <span class="text-[11px] text-slate-400 font-medium uppercase tracking-wider">Jami Zaxira</span>
+                </div>
+                <i data-lucide="chevron-down" class="dash-chevron w-3.5 h-3.5 text-slate-500 transition-transform"></i>
+              </div>
+              <span class="text-xl font-bold text-slate-100 mt-1 block">${fmtMoney(homeStockQty + uzumStockQty)} dona</span>
             </div>
-            <div class="bg-darkCard border border-darkBorder rounded-2xl p-3.5 flex flex-col justify-between">
-              <i data-lucide="wallet" class="w-4.5 h-4.5 text-slate-300 mb-2"></i>
-              <span class="text-[11px] text-slate-400">Uy Zaxira Qiymati</span>
-              <span class="text-sm font-bold text-brand mt-1.5">${fmtMoney(homeStockValue)} so'm</span>
+            <div class="hidden px-4 pb-4 border-t border-darkBorder/40 pt-3 flex flex-col gap-1.5 text-[11px]">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Uyda (barcha do'konlar uchun umumiy):</span>
+                <span class="font-semibold text-slate-200">${fmtMoney(homeStockQty)} dona</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Uzum omborida (${state.shops.find(s=>s.shopId===state.activeShop)?.shopTitle || state.activeShop}):</span>
+                <span class="font-semibold text-slate-200">${fmtMoney(uzumStockQty)} dona</span>
+              </div>
             </div>
+          </div>
+
+          <!-- D2: Zaxira qiymati — yig'ilgan/ochiladigan -->
+          <div class="bg-darkCard border border-darkBorder rounded-2xl overflow-hidden">
+            <div class="p-4 cursor-pointer" onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('.dash-chevron').classList.toggle('rotate-180')">
+              <div class="flex items-center justify-between mb-1.5">
+                <div class="flex items-center gap-2">
+                  <i data-lucide="wallet" class="w-4.5 h-4.5 text-slate-300"></i>
+                  <span class="text-[11px] text-slate-400 font-medium uppercase tracking-wider">Zaxira Qiymati</span>
+                </div>
+                <i data-lucide="chevron-down" class="dash-chevron w-3.5 h-3.5 text-slate-500 transition-transform"></i>
+              </div>
+              <div class="flex flex-col gap-0.5 text-[11px]">
+                <div class="flex justify-between"><span class="text-slate-400">Tannarx:</span><span class="font-semibold text-slate-200">${fmtMoney(homeStockValue + uzumStockTannarx)} so'm</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">Sotilsa:</span><span class="font-semibold text-slate-200">${fmtMoney(homeSotilsa + uzumStockSotilsa)} so'm</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">Foyda:</span><span class="font-bold text-brand">${fmtMoney(homeFoyda + uzumStockFoyda)} so'm</span></div>
+              </div>
+            </div>
+            <div class="hidden px-4 pb-4 border-t border-darkBorder/40 pt-3 flex flex-col gap-2.5 text-[11px]">
+              <div>
+                <div class="text-slate-300 font-semibold mb-1">Tannarx: ${fmtMoney(homeStockValue + uzumStockTannarx)} so'm</div>
+                <div class="flex justify-between pl-2"><span class="text-slate-500">├─ Uyda:</span><span class="text-slate-300">${fmtMoney(homeStockValue)} so'm</span></div>
+                <div class="flex justify-between pl-2"><span class="text-slate-500">└─ Uzumda:</span><span class="text-slate-300">${fmtMoney(uzumStockTannarx)} so'm</span></div>
+              </div>
+              <div>
+                <div class="text-slate-300 font-semibold mb-1">Sotilsa: ${fmtMoney(homeSotilsa + uzumStockSotilsa)} so'm</div>
+                <div class="flex justify-between pl-2"><span class="text-slate-500">├─ Uyda:</span><span class="text-slate-300">${fmtMoney(homeSotilsa)} so'm</span></div>
+                <div class="flex justify-between pl-2"><span class="text-slate-500">└─ Uzumda:</span><span class="text-slate-300">${fmtMoney(uzumStockSotilsa)} so'm</span></div>
+              </div>
+              <div>
+                <div class="text-slate-300 font-semibold mb-1">Foyda: ${fmtMoney(homeFoyda + uzumStockFoyda)} so'm</div>
+                <div class="flex justify-between pl-2"><span class="text-slate-500">├─ Uyda:</span><span class="text-slate-300">${fmtMoney(homeFoyda)} so'm</span></div>
+                <div class="flex justify-between pl-2"><span class="text-slate-500">└─ Uzumda:</span><span class="text-slate-300">${fmtMoney(uzumStockFoyda)} so'm</span></div>
+              </div>
+              <div class="text-[9.5px] text-slate-500">⚠️ Foyda — to'liq formula bo'yicha (komissiya, logistika, saqlash, tannarx ayirilgan; reklama kiritilmagan)</div>
+            </div>
+          </div>
+
+          <!-- D4: Oxirgi 30 kun aylanma -->
+          <div class="bg-darkCard border border-darkBorder rounded-2xl p-4">
+            <div class="flex items-center gap-2 mb-2">
+              <i data-lucide="trending-up" class="w-4.5 h-4.5 text-slate-300"></i>
+              <span class="text-[11px] text-slate-400 font-medium uppercase tracking-wider">${state.financeSummary?.ready ? `Oxirgi ${state.financeSummary.spanDays} kun` : 'Oxirgi kunlar'}</span>
+            </div>
+            ${!state.financeSummary?.ready ? `
+              <div class="text-[11px] text-slate-500 py-1">Ma'lumot yig'ilmoqda (${state.financeSummary?.snapshotCount || 0} kun)</div>
+            ` : `
+              <div class="flex flex-col gap-1 text-[11px]">
+                <div class="flex justify-between"><span class="text-slate-400">Aylanma:</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.totalSales)} so'm</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">Sof foyda:</span><span class="font-bold text-brand">${fmtMoney(state.financeSummary.totalProfit)} so'm${state.financeSummary.totalSales > 0 ? ` (${fmtPct((state.financeSummary.totalProfit/state.financeSummary.totalSales)*100)}%)` : ''}</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">Sotilgan:</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.soldTotal)} dona</span></div>
+              </div>
+            `}
           </div>
 
           <!-- Product types physical inventory logs -->
@@ -1615,6 +1821,7 @@ ${urgentSection}
             <span class="text-xs text-slate-400 uppercase tracking-widest font-mono">JAMI UY ZAXIRA SARMOYASI:</span>
             <span class="text-2xl font-black text-brand">${fmtMoney(totalStockValue)} so'm</span>
             <span class="text-xs text-slate-500 font-medium font-sans mt-1">Siz uyingizda jami ${totalQty} dona foydalanishga tayyor tovar zaxirasini saqlab turibsiz.</span>
+            <span class="text-[10px] text-amber-400/80 font-medium font-sans mt-0.5">📦 Uy zaxirasi barcha do'konlar uchun umumiy — bitta shoxobcha emas</span>
           </div>
 
           <div class="flex justify-between items-center text-xs px-1">

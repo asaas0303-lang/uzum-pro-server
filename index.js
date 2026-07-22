@@ -1415,28 +1415,82 @@ app.get('/api/finance-summary/:shopId', async (req, res) => {
   res.json(result);
 });
 
-// 6.3: barcha sozlangan do'konlar bo'yicha jamlangan ko'rsatkichlar (Dashboard "Barcha do'konlar" ko'rinishi uchun)
+// D1/D2/D4/D5/6.3: barcha sozlangan do'konlar bo'yicha jamlangan ko'rsatkichlar (Dashboard "Barcha do'konlar" ko'rinishi uchun).
+// Har do'kon uchun: joriy Uzum zaxirasi soni/qiymati (tannarx/sotilsa/foyda) va oxirgi kunlik aylanma (snapshot delta'dan).
+// Uy zaxirasi barcha do'konlar uchun umumiy (D3) — shuning uchun bir marta, barcha do'konlar SKU'laridan yig'ilgan
+// o'rtacha narx/foyda asosida hisoblanadi.
 app.get('/api/all-shops-summary', async (req, res) => {
   const shops = syncedState.shops || [];
   const results = [];
+  const typeStats = {}; // typeId -> { sumPrice, sumProfit, count } — uy zaxirasi "sotilsa/foyda" taxmini uchun
   for (const shop of shops) {
     const prod = await fetchLiveShopProducts(shop.shopId);
     if (!prod.ok) { results.push({ shopId: shop.shopId, shopTitle: shop.shopTitle, ok: false, error: prod.error }); continue; }
     let totalStock = 0, activeCount = 0, outOfStock = 0, blocked = 0;
+    let stockValueTannarx = 0, stockValueSotilsa = 0, stockValueFoyda = 0;
     prod.products.forEach(p => {
       activeCount++;
       if (p.status?.value === 'PERM_BANNED') blocked++;
       (p.skuList || []).forEach(s => {
-        totalStock += s.availableAmount || 0;
-        if ((s.availableAmount || 0) <= 0) outOfStock++;
+        const avail = s.availableAmount || 0;
+        totalStock += avail;
+        if (avail <= 0) outOfStock++;
+
+        const price = s.purchasePrice || 0;
+        const tInfo = resolveTannarx(s.skuId, p.productId);
+        const commission = price * (commissionPct(s.skuId, s, p.productId) / 100);
+        const logi = resolveLogistics(s.skuId, p.productId, s).val;
+        const stor = resolveStorage(s.skuId, p.productId, s).val;
+        const profitPerUnit = price - commission - logi - stor - tInfo.tannarx; // reklama kiritilmagan (dona-darajasida ishonchli emas)
+
+        stockValueTannarx += avail * tInfo.tannarx;
+        stockValueSotilsa += avail * price;
+        stockValueFoyda += avail * profitPerUnit;
+
+        const typeId = syncedState.skuMappings[s.skuId];
+        if (typeId) {
+          if (!typeStats[typeId]) typeStats[typeId] = { sumPrice: 0, sumProfit: 0, count: 0 };
+          typeStats[typeId].sumPrice += price;
+          typeStats[typeId].sumProfit += profitPerUnit;
+          typeStats[typeId].count++;
+        }
       });
     });
-    results.push({ shopId: shop.shopId, shopTitle: shop.shopTitle, ok: true, totalStock, activeCount, outOfStock, blocked });
+    const fin = await computeFinanceSummary(shop.shopId); // D4: oxirgi kunlik aylanma
+    results.push({
+      shopId: shop.shopId, shopTitle: shop.shopTitle, ok: true, totalStock, activeCount, outOfStock, blocked,
+      stockValueTannarx, stockValueSotilsa, stockValueFoyda,
+      turnover: fin.ok && fin.ready ? { ready: true, spanDays: fin.spanDays, totalSales: fin.totalSales, totalProfit: fin.totalProfit, soldTotal: fin.soldTotal } : { ready: false, snapshotCount: fin.ok ? (fin.snapshotCount || 0) : 0 }
+    });
   }
+
+  // D1/D2/D3: uy zaxirasi — barcha do'konlar uchun umumiy, shuning uchun bir marta hisoblanadi
+  let homeStockQty = 0, homeStockValue = 0, homeSotilsa = 0, homeFoyda = 0;
+  const typesWithoutPrice = [];
+  (syncedState.productTypes || []).forEach(t => {
+    homeStockQty += t.stock;
+    homeStockValue += t.stock * t.cost;
+    const stats = typeStats[t.id];
+    if (stats && stats.count > 0) {
+      homeSotilsa += t.stock * (stats.sumPrice / stats.count);
+      homeFoyda += t.stock * (stats.sumProfit / stats.count);
+    } else if (t.stock > 0) {
+      typesWithoutPrice.push(t.name);
+    }
+  });
+
   const totalStock = results.reduce((a, r) => a + (r.totalStock || 0), 0);
   const totalActive = results.reduce((a, r) => a + (r.activeCount || 0), 0);
   const totalOutOfStock = results.reduce((a, r) => a + (r.outOfStock || 0), 0);
-  res.json({ shops: results, totalStock, totalActive, totalOutOfStock });
+  const uzumStockValueTannarx = results.reduce((a, r) => a + (r.stockValueTannarx || 0), 0);
+  const uzumStockValueSotilsa = results.reduce((a, r) => a + (r.stockValueSotilsa || 0), 0);
+  const uzumStockValueFoyda = results.reduce((a, r) => a + (r.stockValueFoyda || 0), 0);
+
+  res.json({
+    shops: results, totalStock, totalActive, totalOutOfStock,
+    homeStockQty, homeStockValue, homeSotilsa, homeFoyda, typesWithoutPrice,
+    uzumStockValueTannarx, uzumStockValueSotilsa, uzumStockValueFoyda
+  });
 });
 
 // Automatic bot registration logic
