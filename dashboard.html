@@ -1355,87 +1355,124 @@ ${urgentSection}
             const metric = state.skuMetrics?.perSku?.[sku.skuId] || null;
             const stockDaysVal = metric && metric.canCompute ? (metric.stockDays30 != null ? metric.stockDays30 : metric.stockDays7) : null;
             const stockDaysColor = stockDaysVal == null ? 'text-slate-500' : stockDaysVal < 7 ? 'text-rose-400' : stockDaysVal < 14 ? 'text-amber-400' : 'text-brand';
-            const stockDaysLabel = stockDaysVal == null ? "hisoblab bo'lmaydi" : `${stockDaysVal.toFixed(1)} kunga yetadi`;
+            // C4: sabab aniq — nega hisoblab bo'lmasligi tushunarli bo'lsin
+            const stockDaysLabel = stockDaysVal == null ? "sotuv tarixi yo'q" : `${stockDaysVal.toFixed(1)} kunga yetadi`;
             const rankBadge = sku.rank === 'A' ? '🟢 A' : sku.rank === 'B' ? '🟠 B' : sku.rank === 'C' ? '🔴 C' : '';
             const needsReorder = metric ? metric.needsReorder : false;
 
+            // C2: "Omborga yuborish tavsiyasi" — uy zaxirasi bog'langan bo'lsa, 30 kunlik zaxiraga yetkazish uchun kerakli miqdor
+            const homeStock = tInfo.tracksStock && tInfo.type ? tInfo.type.stock : null;
+            const avgDailyBest = metric ? (metric.avgDaily30 != null ? metric.avgDaily30 : metric.avgDaily7) : null;
+            let recommendedQty = null;
+            if (homeStock != null && avgDailyBest != null && avgDailyBest > 0) {
+              recommendedQty = Math.min(homeStock, Math.max(0, Math.ceil(30 * avgDailyBest - sku.availableAmount)));
+            }
+
             return `
-              <div class="mt-2.5 p-2.5 rounded-xl bg-darkBg/90 border border-darkBorder">
-                <div class="flex items-start justify-between gap-2">
-                  <div class="flex items-start gap-2 min-w-0">
-                    <!-- 3.3: SKU rasmi (rang/model bo'yicha). Yuklanmasa placeholder -->
-                    ${sku.image ? `<img src="${sku.image}" referrerPolicy="no-referrer" alt="" class="w-9 h-9 rounded-lg object-cover border border-darkBorder bg-darkCard shrink-0" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"><div class="w-9 h-9 rounded-lg border border-darkBorder bg-darkCard shrink-0 items-center justify-center text-slate-600" style="display:none"><i data-lucide="image-off" class="w-4 h-4"></i></div>` : `<div class="w-9 h-9 rounded-lg border border-darkBorder bg-darkCard shrink-0 flex items-center justify-center text-slate-600"><i data-lucide="image-off" class="w-4 h-4"></i></div>`}
-                    <div class="flex flex-col gap-0.5 min-w-0">
-                      <span class="text-[11.5px] font-bold text-brand tracking-tight font-sans truncate">${sku.skuTitle}${rankBadge ? ` <span class="text-[9px]">${rankBadge}</span>` : ''}</span>
-                      <span class="text-[10px] text-slate-500 font-mono">ID: ${sku.skuId} | Code: ${sku.skuCode}</span>
+              <div class="mt-2.5 rounded-xl bg-darkBg/90 border border-darkBorder overflow-hidden">
+                <!-- C2: yig'ilgan holat (default) — faqat eng muhimi -->
+                <div class="p-2.5 cursor-pointer" onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('.sku-chevron').classList.toggle('rotate-180')">
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="flex items-start gap-2 min-w-0">
+                      <!-- 3.3: SKU rasmi (rang/model bo'yicha). Yuklanmasa placeholder -->
+                      ${sku.image ? `<img src="${sku.image}" referrerPolicy="no-referrer" alt="" class="w-9 h-9 rounded-lg object-cover border border-darkBorder bg-darkCard shrink-0" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"><div class="w-9 h-9 rounded-lg border border-darkBorder bg-darkCard shrink-0 items-center justify-center text-slate-600" style="display:none"><i data-lucide="image-off" class="w-4 h-4"></i></div>` : `<div class="w-9 h-9 rounded-lg border border-darkBorder bg-darkCard shrink-0 flex items-center justify-center text-slate-600"><i data-lucide="image-off" class="w-4 h-4"></i></div>`}
+                      <div class="flex flex-col gap-0.5 min-w-0">
+                        <span class="text-[11.5px] font-bold text-brand tracking-tight font-sans truncate">${sku.skuTitle}${rankBadge ? ` <span class="text-[9px]">${rankBadge}</span>` : ''}</span>
+                        <span class="text-[10px] text-slate-400">Uzum: ${sku.availableAmount} dona · ${fmtMoney(sellPrice)} so'm · Foyda: <span class="${profitColor} font-semibold">${fmtMoney(profit)} (${fmtPct(pmMargin)}%)</span></span>
+                        <span class="text-[10px] ${stockDaysColor}">Zaxira: ${stockDaysLabel}</span>
+                      </div>
+                    </div>
+                    <div class="flex items-center gap-1.5 shrink-0">
+                      <button onclick="event.stopPropagation(); toggleModal('mapping-modal', '${sku.skuId}')" class="text-[9.5px] text-darkBg bg-brand px-2 py-0.5 rounded font-bold transition hover:bg-brandDark badge-glow whitespace-nowrap">
+                        Bog'lash / Sozlash
+                      </button>
+                      <i data-lucide="chevron-down" class="sku-chevron w-3.5 h-3.5 text-slate-500 transition-transform"></i>
                     </div>
                   </div>
-                  <!-- Configure button -->
-                  <button onclick="toggleModal('mapping-modal', '${sku.skuId}')" class="text-[9.5px] text-darkBg bg-brand px-2 py-0.5 rounded font-bold transition hover:bg-brandDark badge-glow shrink-0">
-                    Bog'lash / Sozlash
-                  </button>
+                  ${needsReorder ? `
+                    <div class="mt-2 text-[9.5px] bg-slate-900 border border-orange-800 p-1 rounded-md text-center">
+                      <span class="text-orange-400">🚚 Xitoyga buyurtma bering — kelguncha tugaydi</span>
+                    </div>
+                  ` : ''}
                 </div>
 
-                <!-- Mapping Status Display -->
-                <div class="text-[10px] mt-2 flex items-center justify-between border-b border-darkBorder/40 pb-1.5 text-slate-400 gap-1">
-                  <span>Asl tovar turi:</span>
-                  <span class="font-bold text-slate-200">${mappedName}</span>
+                <!-- C2: bosganda ochiladigan qism — qolgan hammasi -->
+                <div class="hidden px-2.5 pb-2.5 border-t border-darkBorder/40 pt-2">
+                  <div class="text-[10px] mb-1.5 font-mono text-slate-500">ID: ${sku.skuId} | Code: ${sku.skuCode}</div>
+
+                  <div class="flex items-center justify-between text-[10px] text-slate-400 gap-1 mb-1">
+                    <span>Asl tovar turi:</span>
+                    <span class="font-bold text-slate-200">${mappedName}</span>
+                  </div>
+                  ${!tInfo.tracksStock && tInfo.source !== 'unmapped' ? `
+                    <div class="text-[9px] text-amber-400/80 mb-1">⚠️ Zaxira kuzatilmaydi — faqat foyda hisobida ishlatiladi</div>
+                  ` : ''}
+
+                  <div class="grid grid-cols-2 gap-y-1.5 gap-x-3 text-[10px] mt-1.5">
+                    <div class="flex justify-between">
+                      <span class="text-slate-400">Tannarx:</span>
+                      <span class="font-semibold text-slate-200">${fmtMoney(tannarx)} so'm</span>
+                    </div>
+                    <div class="flex justify-between">
+                      <span class="text-slate-400">Komissiya (${fmtPct(comPercent)}%${sourceBadge(com.source)}):</span>
+                      <span class="font-semibold text-slate-200">${fmtMoney(commission)} so'm</span>
+                    </div>
+                    <!-- C3: soddalashtirilgan yozuv, hajm izoh sifatida -->
+                    <div class="flex justify-between">
+                      <span class="text-slate-400">Logistika${sourceBadge(logi.source)}:</span>
+                      <span class="font-semibold text-slate-200">${fmtMoney(logistics)} so'm</span>
+                    </div>
+                    <div class="flex justify-between -mt-1 col-span-2 text-[9px] text-slate-500">
+                      <span>${logi.litr != null ? `(hajm ${logi.litr.toFixed(2)} l)` : ''}${logi.source === 'default' ? ' — hajm kiritilmagan' : ''}</span>
+                    </div>
+                    <div class="flex justify-between">
+                      <span class="text-slate-400">Saqlash (${stor.days} kun):</span>
+                      <span class="font-semibold text-slate-200">${fmtMoney(storage)} so'm</span>
+                    </div>
+                    <div class="flex justify-between -mt-1 col-span-2 text-[9px] text-slate-500">
+                      <span>(${stor.litr.toFixed(2)} l × 12 so'm × ${stor.days} kun)</span>
+                    </div>
+                    <div class="flex justify-between">
+                      <span class="text-slate-400">Reklama/dona:</span>
+                      <span class="font-semibold text-slate-200">${fmtMoney(adCostPerUnit)} so'm</span>
+                    </div>
+                    <div class="flex justify-between col-span-2 border-t border-darkBorder/30 pt-1.5">
+                      <span class="text-slate-400 font-semibold text-xs">Sof foyda:</span>
+                      <span class="font-extrabold text-xs font-mono py-0.5 px-2.5 rounded bg-darkBg ${profitColor}">
+                        ${fmtMoney(profit)} so'm (${fmtPct(pmMargin)}%)
+                      </span>
+                    </div>
+                  </div>
+
+                  ${homeStock != null ? `
+                    <div class="mt-2.5 pt-2 border-t border-darkBorder/30 flex flex-col gap-1 text-[10px]">
+                      <div class="flex justify-between">
+                        <span class="text-slate-400">Uy zaxirasi:</span>
+                        <span class="font-semibold text-slate-200">${homeStock} dona</span>
+                      </div>
+                      <div class="flex justify-between">
+                        <span class="text-slate-400">Omborga yuborish tavsiyasi:</span>
+                        <span class="font-semibold text-slate-200">${recommendedQty != null ? `${recommendedQty} dona` : "hisoblab bo'lmaydi"}</span>
+                      </div>
+                      <div class="flex justify-between">
+                        <span class="text-slate-400">Shu tezlikda:</span>
+                        <span class="font-semibold ${stockDaysColor}">${stockDaysLabel}</span>
+                      </div>
+                    </div>
+                  ` : ''}
+
+                  <!-- ROI alerts -->
+                  ${noSalesWithSpend ? `
+                    <div class="mt-2 text-[9.5px] bg-slate-900 border border-amber-800 p-1 rounded-md text-center flex items-center justify-center gap-1.5">
+                      <span class="text-amber-400">⚠️ Reklama ketyapti, sotuv yo'q — to'xtating yoki tekshiring</span>
+                    </div>
+                  ` : dailyBudget > 0 ? `
+                    <div class="mt-2 text-[9.5px] bg-slate-900 border border-slate-800 p-1 rounded-md text-center flex items-center justify-center gap-1.5">
+                      <span class="${profit <= 0 ? 'text-rose-400' : 'text-emerald-400'}">● ROI: ${fmtPct((profit / adCostPerUnit) * 100)}%</span>
+                      ${profit <= 0 ? `<span class="text-amber-400">⚠️ Sarf zarar berdi — kamaytiring!</span>` : ''}
+                    </div>
+                  ` : ''}
                 </div>
-                ${!tInfo.tracksStock && tInfo.source !== 'unmapped' ? `
-                  <div class="text-[9px] text-amber-400/80 -mt-1 mb-1">⚠️ Zaxira kuzatilmaydi — faqat foyda hisobida ishlatiladi</div>
-                ` : ''}
-
-                <div class="grid grid-cols-2 gap-y-1.5 gap-x-3 text-[10px] mt-2">
-                  <div class="flex justify-between">
-                    <span class="text-slate-400">Uzum zaxira:</span>
-                    <span class="font-bold text-slate-200 font-mono">${sku.availableAmount} dona</span>
-                  </div>
-                  <div class="flex justify-between">
-                    <span class="text-slate-400">Sotuv narxi:</span>
-                    <span class="font-bold font-mono text-slate-200">${fmtMoney(sellPrice)} so'm</span>
-                  </div>
-                  <div class="flex justify-between">
-                    <span class="text-slate-400">Komissiya (${fmtPct(comPercent)}%${sourceBadge(com.source)}):</span>
-                    <span class="font-semibold text-slate-200">${fmtMoney(commission)} so'm</span>
-                  </div>
-                  <div class="flex justify-between">
-                    <span class="text-slate-400">Logistika (${logi.litr != null ? logi.litr + ' l' : 'qo\'lda'}${sourceBadge(logi.source)}${logi.source === 'default' ? ' — hajm kiritilmagan' : ''}):</span>
-                    <span class="font-semibold text-slate-200">${fmtMoney(logistics)} so'm</span>
-                  </div>
-                  <div class="flex justify-between">
-                    <span class="text-slate-400">Saqlash (${stor.litr} l × 12 × ${stor.days}k${sourceBadge(stor.source)}):</span>
-                    <span class="font-semibold text-slate-200">${fmtMoney(storage)} so'm</span>
-                  </div>
-                  <div class="flex justify-between col-span-2">
-                    <span class="text-slate-400">Zaxira kunlari:</span>
-                    <span class="font-bold ${stockDaysColor}">${stockDaysLabel}</span>
-                  </div>
-                  <div class="flex justify-between col-span-2 border-t border-darkBorder/30 pt-1.5 flex justify-between">
-                    <span class="text-slate-400 font-semibold text-xs">Kartochka Sof_foydasi:</span>
-                    <span class="font-extrabold text-xs font-mono py-0.5 px-2.5 rounded bg-darkBg ${profitColor}">
-                      ${fmtMoney(profit)} so'm (${fmtPct(pmMargin)}%)
-                    </span>
-                  </div>
-                </div>
-
-                <!-- 5.4: Xitoy buyurtma nuqtasi — yetkazish ~28 kun, zaxira kunlari <= 35 bo'lsa ogohlantirish -->
-                ${needsReorder ? `
-                  <div class="mt-2 text-[9.5px] bg-slate-900 border border-orange-800 p-1 rounded-md text-center flex items-center justify-center gap-1.5">
-                    <span class="text-orange-400">🚚 Xitoyga buyurtma bering — kelguncha tugaydi (zaxira ${stockDaysVal.toFixed(0)} kunga yetadi, yo'l ~28 kun)</span>
-                  </div>
-                ` : ''}
-
-                <!-- ROI alerts -->
-                ${noSalesWithSpend ? `
-                  <div class="mt-2 text-[9.5px] bg-slate-900 border border-amber-800 p-1 rounded-md text-center flex items-center justify-center gap-1.5">
-                    <span class="text-amber-400">⚠️ Reklama ketyapti, sotuv yo'q — to'xtating yoki tekshiring</span>
-                  </div>
-                ` : dailyBudget > 0 ? `
-                  <div class="mt-2 text-[9.5px] bg-slate-900 border border-slate-800 p-1 rounded-md text-center flex items-center justify-center gap-1.5">
-                    <span class="${profit <= 0 ? 'text-rose-400' : 'text-emerald-400'}">● Reklama/dona: ${fmtMoney(adCostPerUnit)} d | ROI: ${fmtPct((profit / adCostPerUnit) * 100)}%</span>
-                    ${profit <= 0 ? `<span class="text-amber-400">⚠️ Sarf zarar berdi — kamaytiring!</span>` : ''}
-                  </div>
-                ` : ''}
               </div>
             `;
           }).join('');
