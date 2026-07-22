@@ -187,12 +187,13 @@
       orders: [],
       expenses: [],
       returns: [],
-      dataErrors: { products: null, orders: null, expenses: null, returns: null },
+      dataErrors: { products: null, orders: null, expenses: null },
       unavailableShops: [], // Uzum "Shop is not available" (403) bergan do'kon ID'lari
       activeTab: 'dashboard',
       aiResults: null,
       aiLoading: false,
       skuMetrics: null, // 5.1/5.2/5.4: /api/metrics/:shopId natijasi (joriy do'kon)
+      financeSummary: null, // B1: /api/finance-summary/:shopId natijasi (joriy do'kon)
       showAllShops: false, // 6.3: Dashboard "Barcha do'konlar" birlashtirilgan ko'rinishi
       allShopsSummary: null,
       allShopsLoading: false
@@ -483,22 +484,6 @@ ${urgentSection}
       return "Kanalga bog'lanmagan ⚠️";
     }
 
-    // Berilgan SKU qaysi mahsulotga (productId) tegishli ekanini topadi (Moliya bo'limida kerak)
-    function findProductIdForSku(skuId) {
-      for (const p of (state.cachedUzumProducts || [])) {
-        if ((p.skuList || []).some(s => String(s.skuId) === String(skuId))) return p.productId;
-      }
-      return null;
-    }
-
-    // Berilgan SKU'ning jonli obyektini topadi (dimensionMm/rank uchun kerak — 4.1/5.2)
-    function findSkuObjForSku(skuId) {
-      for (const p of (state.cachedUzumProducts || [])) {
-        const s = (p.skuList || []).find(s => String(s.skuId) === String(skuId));
-        if (s) return s;
-      }
-      return null;
-    }
 
     // SKU'ning zaxira kunlari metrikasi (5.1) — eng ishonchli mavjud ko'rsatkich (30 kunlik, bo'lmasa 7 kunlik)
     function skuStockDays(skuId) {
@@ -562,7 +547,7 @@ ${urgentSection}
 
     async function refreshData() {
       document.getElementById('api-status-badge').classList.add('animate-pulse');
-      state.dataErrors = { products: null, orders: null, expenses: null, returns: null };
+      state.dataErrors = { products: null, orders: null, expenses: null };
 
       // Sozlamalarni AVVAL, fetch'lardan oldin yuboramiz — Uzum API xato bersa ham saqlanadi (barqarorlik)
       syncSettingsToServer();
@@ -614,21 +599,19 @@ ${urgentSection}
       }
 
       try {
-        // 2.4: HAQIQIY mijoz qaytarishlari (/v1/return) — client-side shopId filtri
-        const rData = await fetchFromProxy(`/api/uzum/return?shopId=${state.activeShop}`);
-        state.returns = rData.payload || [];
-      } catch (e) {
-        console.error("Qaytarishlarni yuklashda xato:", e);
-        state.returns = [];
-        state.dataErrors.returns = e.message;
-      }
-
-      try {
         // 5.1/5.2/5.4: zaxira kunlari, ABC, Xitoy buyurtma nuqtasi — snapshot tarixidan (server hisoblaydi)
         state.skuMetrics = await fetchFromProxy(`/api/metrics/${state.activeShop}`);
       } catch (e) {
         console.error("Metrikalarni yuklashda xato:", e);
         state.skuMetrics = null;
+      }
+
+      try {
+        // B1: Moliya bo'limi — snapshot delta'ga asoslangan xulosa (finance/orders doim bo'sh bo'lgani uchun)
+        state.financeSummary = await fetchFromProxy(`/api/finance-summary/${state.activeShop}`);
+      } catch (e) {
+        console.error("Moliya xulosasini yuklashda xato:", e);
+        state.financeSummary = null;
       }
 
       syncStateToServer();
@@ -1628,52 +1611,11 @@ ${urgentSection}
     }
 
     function renderFinanceUnsafe(root) {
-      // Calculate realistic financial figures
-      let totalSales = 0;
-      let totalPayout = 0;
-      let totalComsVal = 0;
-      let totalShipping = 0;
-      let totalStorage = 0;
-      let totalMarketingVal = 0;
-      let totalMappedCostSum = 0;
+      // B1: Moliya bo'limi endi snapshot delta'ga asoslangan xulosadan (finance/orders doim bo'sh)
+      const fin = state.financeSummary;
+      const finReady = !!(fin && fin.ok && fin.ready);
 
-      // Feed from fallback or real API values
-      const unitsSoldBySku = {};
-      state.orders.forEach(o => {
-        unitsSoldBySku[o.skuId] = (unitsSoldBySku[o.skuId] || 0) + (o.quantity || 1);
-      });
-
-      state.orders.forEach(o => {
-        totalSales += o.price * (o.quantity || 1);
-        totalPayout += o.payout || (o.price * 0.8);
-
-        const productIdForSku = findProductIdForSku(o.skuId);
-        const tInfo = resolveTannarx(o.skuId, productIdForSku); // 3.4/3.5: SKU/mahsulot qo'lda yoki turi
-        if (tInfo.source !== 'unmapped') {
-          totalMappedCostSum += tInfo.tannarx * (o.quantity || 1);
-        } else {
-          totalMappedCostSum += 45000 * (o.quantity || 1); // fallback
-        }
-
-        const skuObjForOrder = findSkuObjForSku(o.skuId);
-        totalShipping += resolveLogistics(o.skuId, productIdForSku, skuObjForOrder).val * (o.quantity || 1); // 3.2/3.4/4.1: qo'lda yoki hajmdan
-        totalStorage += resolveStorage(o.skuId, productIdForSku, skuObjForOrder).val * (o.quantity || 1); // 4.2: saqlash
-      });
-
-      // Reklama: kunlik byudjet * 30 kun, faqat shu SKU oxirgi 30 kunda sotilgan bo'lsa hisoblanadi
-      const noSaleAdSpendSkus = [];
-      Object.keys(state.costs).forEach(skuId => {
-        const dailyBudget = state.costs[skuId].budget || 0;
-        if (dailyBudget <= 0) return;
-        const unitsSold = unitsSoldBySku[skuId] || 0;
-        if (unitsSold > 0) {
-          totalMarketingVal += dailyBudget * 30;
-        } else {
-          noSaleAdSpendSkus.push(skuId);
-        }
-      });
-
-      // 5.3: Nolikvid — oxirgi 30 kunda sotilmagan + hozir zaxirasi bor (server snapshot tarixidan aniqlagan)
+      // B3: Nolikvid — rasm + mahsulot nomi + rang + necha kundan beri sotilmagani
       const deadStockItems = [];
       (state.cachedUzumProducts || []).forEach(p => (p.skuList || []).forEach(sku => {
         const m = state.skuMetrics?.perSku?.[sku.skuId];
@@ -1682,14 +1624,16 @@ ${urgentSection}
           const stor = resolveStorage(sku.skuId, p.productId, sku);
           const tiedCapital = tInfo.tannarx * sku.availableAmount;
           const dailyWaste = (stor.val / stor.days) * sku.availableAmount;
-          deadStockItems.push({ title: sku.skuTitle, qty: sku.availableAmount, tiedCapital, dailyWaste });
+          deadStockItems.push({
+            productTitle: p.title, colorTitle: sku.skuTitle, image: sku.image || p.photos?.[0]?.photoKey,
+            qty: sku.availableAmount, tiedCapital, dailyWaste, daysSinceLastSale: m.daysSinceLastSale
+          });
         }
       }));
       const totalDeadCapital = deadStockItems.reduce((a, i) => a + i.tiedCapital, 0);
       const totalDeadDaily = deadStockItems.reduce((a, i) => a + i.dailyWaste, 0);
 
       // 2.3: real Uzum xarajatlarini SOURCE bo'yicha guruhlaymiz (type=OUTCOME/INCOME).
-      // Eski STORAGE/MARKETING tasnifi real ma'lumotda hech qachon ishlamasdi — kategoriya o'ylab topilmaydi.
       const realExpensesBySource = {};
       let realExpensesTotal = 0, realIncomeTotal = 0;
       state.expenses.forEach(x => {
@@ -1700,16 +1644,14 @@ ${urgentSection}
         realExpensesTotal += amt;
       });
 
-      // 4.3: yagona formula — payout allaqachon komissiyani chegirib bergan, shunga logistika/saqlash/reklama/tannarx qo'shimcha chegiriladi
-      const totalProfit = totalPayout - totalShipping - totalStorage - totalMarketingVal - realExpensesTotal - totalMappedCostSum;
+      const totalProfit = finReady ? fin.totalProfit - realExpensesTotal : 0;
       const profitColor = totalProfit >= 0 ? 'text-brand' : 'text-rose-400';
+      const periodLabel = finReady ? `Oxirgi ${fin.spanDays} kun` : "Ma'lumot yig'ilmoqda";
 
       root.innerHTML = `
         <div class="flex flex-col gap-5">
 
-          ${state.dataErrors?.orders ? dataErrorBanner('Buyurtmalar — ' + state.dataErrors.orders) : ''}
           ${state.dataErrors?.expenses ? dataErrorBanner('Xarajatlar — ' + state.dataErrors.expenses) : ''}
-          ${state.dataErrors?.returns ? dataErrorBanner('Qaytarishlar — ' + state.dataErrors.returns) : ''}
 
           <!-- Balance Widget — Uzum Seller API'da balans/yechib olish endpointi yo'q, shuning uchun bu yerda soxta raqam ko'rsatilmaydi -->
           <div class="bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20 rounded-3xl p-5 relative overflow-hidden accent-glow">
@@ -1718,40 +1660,45 @@ ${urgentSection}
             </div>
             <span class="text-xs text-brand uppercase tracking-wider font-mono">UZUM BANK BALANSI (Shop ID: ${state.activeShop})</span>
             <div class="text-xs text-slate-400 mt-2">⚠️ Bu ma'lumot Uzum API'da mavjud emas (balans endpointi yo'q)</div>
-            <div class="text-[10px] text-slate-500 mt-1">Pastdagi "Kutilayotgan Payout" — buyurtmalar asosida hisoblangan taxmin, Uzum'ning rasmiy balansi emas.</div>
+            <div class="text-[10px] text-slate-500 mt-1">Pastdagi "Kutilayotgan Payout" — snapshot tarixi asosida hisoblangan taxmin, Uzum'ning rasmiy balansi emas.</div>
           </div>
 
           <!-- Sales Profit analysis -->
           <div class="bg-darkCard border border-darkBorder rounded-2xl p-4 flex flex-col gap-3">
             <div class="flex items-center justify-between border-b border-darkBorder pb-2.5">
-              <span class="text-xs uppercase font-bold text-slate-300 tracking-wider">Oylik Sotuv & Moliya Hisobi</span>
-              <span class="text-[10px] text-slate-500 font-mono">Period: 30 kun</span>
+              <span class="text-xs uppercase font-bold text-slate-300 tracking-wider">Sotuv & Moliya Hisobi</span>
+              <span class="text-[10px] text-slate-500 font-mono">${periodLabel}</span>
             </div>
 
+            ${!finReady ? `
+              <div class="text-[11px] text-slate-500 text-center py-3">
+                Ma'lumot yig'ilmoqda (${fin?.snapshotCount || 0} kun). Birinchi hisob kamida 2 kunlik snapshotdan keyin, to'liq oylik ko'rinish 30 kundan keyin tayyor bo'ladi.
+              </div>
+            ` : `
             <div class="flex flex-col gap-2 font-medium">
               <div class="flex justify-between text-xs py-1">
-                <span class="text-slate-400">Jami Buyurtmalar Savdosi:</span>
-                <span class="text-slate-100 font-mono">${fmtMoney(totalSales)} so'm</span>
+                <span class="text-slate-400">Jami Sotuv:</span>
+                <span class="text-slate-100 font-mono">${fmtMoney(fin.totalSales)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Kutilayotgan Payout (Uzumdan):</span>
-                <span class="text-slate-100 font-mono font-bold">${fmtMoney(totalPayout)} so'm</span>
+                <span class="text-slate-100 font-mono font-bold">${fmtMoney(fin.totalPayout)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Hisoblangan Tannarx (Xarid):</span>
-                <span class="text-slate-100 font-mono">${fmtMoney(totalMappedCostSum)} so'm</span>
+                <span class="text-slate-100 font-mono">${fmtMoney(fin.totalMappedCostSum)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
-                <span class="text-slate-400">Logistika (hajm asosida, 4.1):</span>
-                <span class="text-slate-100 font-mono">${fmtMoney(totalShipping)} so'm</span>
+                <span class="text-slate-400">Logistika:</span>
+                <span class="text-slate-100 font-mono">${fmtMoney(fin.totalShipping)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
-                <span class="text-slate-400">Saqlash (hajm × 12 so'm × 30 kun, 4.2):</span>
-                <span class="text-slate-100 font-mono">${fmtMoney(totalStorage)} so'm</span>
+                <span class="text-slate-400">Saqlash:</span>
+                <span class="text-slate-100 font-mono">${fmtMoney(fin.totalStorage)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Marketing & Reklama (byudjet):</span>
-                <span class="text-slate-100 font-mono">${fmtMoney(totalMarketingVal)} so'm</span>
+                <span class="text-slate-100 font-mono">${fmtMoney(fin.totalMarketingVal)} so'm</span>
               </div>
               <!-- 2.3: real Uzum xarajatlari source bo'yicha (kategoriya o'ylab topilmaydi) -->
               <div class="border-t border-darkBorder/40 pt-2 mt-1">
@@ -1765,10 +1712,10 @@ ${urgentSection}
                     </div>`).join('')}
                 ${realIncomeTotal ? `<div class="flex justify-between text-[10.5px] py-0.5 text-emerald-400 border-t border-darkBorder/30 mt-1 pt-1"><span>Kirim (INCOME)</span><span class="font-mono">${fmtMoney(realIncomeTotal)} so'm</span></div>` : ''}
               </div>
-              ${noSaleAdSpendSkus.length > 0 ? `
+              ${fin.unmapped > 0 ? `
                 <div class="flex items-start gap-1.5 text-[10.5px] text-amber-400 bg-amber-950/20 border border-amber-900/40 rounded-lg px-2 py-1.5">
                   <span>⚠️</span>
-                  <span>Reklama ketyapti, sotuv yo'q — to'xtating yoki tekshiring (${noSaleAdSpendSkus.length} ta SKU)</span>
+                  <span>${fin.unmapped} ta SKU bog'lanmagan — tannarx hisobiga kirmadi</span>
                 </div>
               ` : ''}
               <div class="flex justify-between text-sm py-2 border-t border-darkBorder/40 mt-1.5">
@@ -1776,27 +1723,29 @@ ${urgentSection}
                 <span class="font-black font-mono text-xs ${profitColor}">${fmtMoney(totalProfit)} so'm</span>
               </div>
             </div>
+            `}
           </div>
 
-          <!-- 5.3: Nolikvid (muzlagan kapital) widget -->
+          <!-- B3: Nolikvid widget -->
           <div class="bg-darkCard border border-darkBorder rounded-2xl p-4">
-            <div class="flex items-center justify-between mb-3 border-b border-darkBorder pb-2.5">
-              <span class="text-xs uppercase font-bold text-slate-300 tracking-wider">❄️ Nolikvid (muzlagan kapital)</span>
+            <div class="flex items-center justify-between mb-1 border-b border-darkBorder pb-2.5">
+              <span class="text-xs uppercase font-bold text-slate-300 tracking-wider">❄️ Nolikvid</span>
               <span class="text-[10px] font-mono font-bold text-amber-400">${deadStockItems.length} ta SKU</span>
             </div>
+            <div class="text-[10px] text-slate-500 mb-2.5 mt-1.5">Sotilmayotgan tovar — puli qotgan, saqlash xarajati ketyapti</div>
             ${!state.skuMetrics?.ready30 ? `
               <div class="text-[11px] text-slate-500 text-center py-2">Hisoblab bo'lmaydi — snapshot tarixi hali 30 kunlik emas</div>
             ` : deadStockItems.length === 0 ? `
               <div class="text-[11px] text-slate-500 text-center py-2">Nolikvid tovar topilmadi — hammasi oxirgi 30 kunda sotilgan</div>
             ` : `
-              <div class="flex flex-col gap-2 max-h-[160px] overflow-y-auto mb-2.5">
+              <div class="flex flex-col gap-2 max-h-[220px] overflow-y-auto mb-2.5">
                 ${deadStockItems.map(i => `
-                  <div class="p-2 py-1.5 rounded-lg bg-darkBg border border-darkBorder flex items-center justify-between text-[11px] gap-2">
-                    <div class="flex flex-col min-w-0">
-                      <span class="font-semibold text-slate-300 truncate">${i.title}</span>
-                      <span class="text-[9.5px] text-slate-500">${i.qty} dona</span>
+                  <div class="p-2 py-1.5 rounded-lg bg-darkBg border border-darkBorder flex items-center gap-2 text-[11px]">
+                    ${i.image ? `<img src="${i.image}" referrerPolicy="no-referrer" class="w-8 h-8 rounded-lg object-cover border border-darkBorder shrink-0" onerror="this.style.display='none'">` : `<div class="w-8 h-8 rounded-lg bg-darkCard border border-darkBorder shrink-0"></div>`}
+                    <div class="flex flex-col min-w-0 flex-1">
+                      <span class="font-semibold text-slate-300 truncate">${i.productTitle} — ${i.colorTitle}</span>
+                      <span class="text-[9.5px] text-slate-500">${i.qty} dona · ${fmtMoney(i.tiedCapital)} so'm qotgan${i.daysSinceLastSale != null ? ` · ${i.daysSinceLastSale} kundan beri sotilmagan` : ''}</span>
                     </div>
-                    <span class="font-mono text-amber-400 text-right font-bold shrink-0">${fmtMoney(i.tiedCapital)} s.</span>
                   </div>
                 `).join('')}
               </div>
@@ -1805,31 +1754,10 @@ ${urgentSection}
                 <span class="font-bold text-amber-400 font-mono">${fmtMoney(totalDeadCapital)} so'm</span>
               </div>
               <div class="flex justify-between text-[11px] mt-1">
-                <span class="text-slate-400">Kuniga saqlash zarari:</span>
+                <span class="text-slate-400">Kuniga saqlashga:</span>
                 <span class="font-bold text-rose-400 font-mono">${fmtMoney(totalDeadDaily)} so'm</span>
               </div>
             `}
-          </div>
-
-          <!-- Returns Tracker widget -->
-          <div class="bg-darkCard border border-darkBorder rounded-2xl p-4">
-            <div class="flex items-center justify-between mb-3 border-b border-darkBorder pb-2.5">
-              <span class="text-xs uppercase font-bold text-slate-300 tracking-wider">Mijoz Qaytarishlari (Returns)</span>
-              <span class="text-[10px] font-mono font-bold text-rose-400">${state.returns.length} ta</span>
-            </div>
-            <div class="flex flex-col gap-2 max-h-[140px] overflow-y-auto">
-              ${state.returns.length === 0 ? `
-                <div class="text-[11px] text-slate-500 text-center py-2">Qaytarishlar topilmadi</div>
-              ` : state.returns.map(r => `
-                <div class="p-2 py-1.5 rounded-lg bg-darkBg border border-darkBorder flex items-center justify-between text-[11px] gap-2">
-                  <div class="flex flex-col min-w-0">
-                    <span class="font-semibold text-slate-300 truncate">${r.productTitle || 'Nomsiz'}</span>
-                    <span class="text-[9.5px] text-rose-400 italic">${r.defectReason || "Sabab ko'rsatilmagan"}</span>
-                  </div>
-                  <span class="font-mono text-rose-400 text-right font-bold shrink-0">${fmtMoney(r.price || 0)} s.</span>
-                </div>
-              `).join('')}
-            </div>
           </div>
 
         </div>

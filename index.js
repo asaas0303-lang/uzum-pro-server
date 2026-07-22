@@ -583,10 +583,86 @@ async function computeSkuMetrics(shopId) {
       canCompute: stockDaysBest != null,
       needsReorder: stockDaysBest != null && stockDaysBest <= 35, // 5.4: 28 kun yo'l + 7 kun zaxira
       isDeadStock,
+      daysSinceLastSale: isDeadStock ? daysSinceLastSale(shopId, String(sku.skuId)) : null, // B3
       rank: sku.rank || null // 5.2
     };
   }));
   return { ok: true, ready7: avg7.ready, ready30: avg30.ready, spanDays7: avg7.spanDays || 0, spanDays30: avg30.spanDays || 0, perSku };
+}
+
+// B1: Moliya bo'limi uchun 30 kunlik (yoki mavjud snapshot oralig'icha) xulosa.
+// finance/orders bu hisobda doim bo'sh qaytadi — shuning uchun snapshot delta'dan hisoblanadi
+// (kunlik hisobotda ishlatilgan mantiq bilan bir xil, faqat 1 kun o'rniga butun oyna bo'yicha).
+async function computeFinanceSummary(shopId) {
+  const prod = await fetchLiveShopProducts(shopId);
+  if (!prod.ok) return { ok: false, error: prod.error };
+  const snapshots = loadSnapshots();
+  const shopSnaps = snapshots[shopId] || {};
+  const dates = Object.keys(shopSnaps).sort();
+  if (dates.length < 2) return { ok: true, ready: false, snapshotCount: dates.length };
+
+  const window = dates.slice(-31);
+  const first = shopSnaps[window[0]];
+  const last = shopSnaps[window[window.length - 1]];
+  const spanDays = window.length - 1;
+
+  let totalSales = 0, totalPayout = 0, totalMappedCostSum = 0, totalShipping = 0, totalStorage = 0, totalMarketingVal = 0, soldTotal = 0, unmapped = 0;
+  const allSkuIds = new Set([...Object.keys(first), ...Object.keys(last)]);
+  for (const skuId of allSkuIds) {
+    const f = first[skuId] || { sold: 0 };
+    const l = last[skuId] || { sold: 0 };
+    const soldDelta = Math.max(0, (l.sold || 0) - (f.sold || 0));
+    if (soldDelta === 0) continue;
+    const { sku, product } = findSkuInProducts(prod.products, skuId);
+    if (!sku) continue;
+    const price = sku.purchasePrice || 0;
+    const productId = product ? product.productId : null;
+    const commission = price * (commissionPct(skuId, sku, productId) / 100);
+    const logi = resolveLogistics(skuId, productId, sku).val;
+    const stor = resolveStorage(skuId, productId, sku).val;
+    const tInfo = resolveTannarx(skuId, productId);
+
+    totalSales += price * soldDelta;
+    totalPayout += (price - commission) * soldDelta;
+    totalShipping += logi * soldDelta;
+    totalStorage += stor * soldDelta;
+    soldTotal += soldDelta;
+    if (tInfo.source === 'unmapped') { unmapped++; continue; }
+    totalMappedCostSum += tInfo.tannarx * soldDelta;
+  }
+  // Reklama: kunlik byudjet * span kun, faqat shu davrda sotilgan SKU'lar uchun
+  for (const skuId of Object.keys(syncedState.costs)) {
+    const dailyBudget = (syncedState.costs[skuId] || {}).budget || 0;
+    if (dailyBudget <= 0) continue;
+    const f = first[skuId] || { sold: 0 };
+    const l = last[skuId] || { sold: 0 };
+    if (Math.max(0, (l.sold || 0) - (f.sold || 0)) > 0) totalMarketingVal += dailyBudget * spanDays;
+  }
+  const totalProfit = totalPayout - totalShipping - totalStorage - totalMarketingVal - totalMappedCostSum;
+  return {
+    ok: true, ready: true, spanDays, fromDate: window[0], toDate: window[window.length - 1],
+    totalSales, totalPayout, totalMappedCostSum, totalShipping, totalStorage, totalMarketingVal, totalProfit, soldTotal, unmapped
+  };
+}
+
+// B3: berilgan SKU oxirgi marta necha kun oldin sotilgani (snapshot tarixidan). Umuman sotuv
+// ko'rinmasa (butun saqlangan tarix davomida) — null qaytadi, "taxmin qilinmaydi".
+function daysSinceLastSale(shopId, skuId) {
+  const snapshots = loadSnapshots();
+  const shopSnaps = snapshots[shopId] || {};
+  const dates = Object.keys(shopSnaps).sort();
+  if (dates.length < 2) return null;
+  let lastSaleDate = null;
+  for (let i = 1; i < dates.length; i++) {
+    const prev = shopSnaps[dates[i - 1]][skuId];
+    const curr = shopSnaps[dates[i]][skuId];
+    if (!curr) continue;
+    const soldDelta = (curr.sold || 0) - ((prev && prev.sold) || 0);
+    if (soldDelta > 0) lastSaleDate = dates[i];
+  }
+  if (!lastSaleDate) return null;
+  const diffMs = new Date(todayTashkent()) - new Date(lastSaleDate);
+  return Math.round(diffMs / (24 * 60 * 60 * 1000));
 }
 
 // 1. Service: State sync for Bot calculations
@@ -1328,6 +1404,13 @@ app.get('/api/snapshot/status', (req, res) => {
 // 5.1/5.2/5.4: SKU bo'yicha zaxira kunlari, ABC toifa, Xitoy buyurtma nuqtasi — snapshot tarixidan
 app.get('/api/metrics/:shopId', async (req, res) => {
   const result = await computeSkuMetrics(req.params.shopId);
+  if (!result.ok) return sendUzumError(res, result.error);
+  res.json(result);
+});
+
+// B1: Moliya bo'limi uchun snapshot delta'ga asoslangan xulosa (finance/orders o'rniga)
+app.get('/api/finance-summary/:shopId', async (req, res) => {
+  const result = await computeFinanceSummary(req.params.shopId);
   if (!result.ok) return sendUzumError(res, result.error);
   res.json(result);
 });
