@@ -14,6 +14,13 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
+// 12A: pul/son yaxlitlash — YAGONA funksiya. toLocaleString('uz-UZ') kasr sonda vergulni O'NLIK
+// ajratkich sifatida ishlatadi (121.111 -> "121,111"), bu ming ajratkichiga o'xshab noto'g'ri o'qiladi.
+// Shuning uchun HAR DOIM avval Math.round(). Butun serverda FAQAT shu funksiya ishlatilsin.
+function fmtMoney(n) {
+  return Math.round(n || 0).toLocaleString('uz-UZ');
+}
+
 // ============ DISK SAQLASH (2.2) ============
 // DATA_DIR — Railway'da Volume ulanadigan yo'l. Default ./data (lokal test uchun).
 // DIQQAT: Railway'da Volume ulanmasa, ./data har redeploy'da o'chadi (efemer).
@@ -1076,7 +1083,7 @@ async function generateReportText(shopId) {
   if (!delta.ready) {
     let lifeSold = 0, lifeReturned = 0;
     products.forEach(p => (p.skuList || []).forEach(s => { lifeSold += s.quantitySold || 0; lifeReturned += s.quantityReturned || 0; }));
-    salesSection = `⏳ Kunlik sotuv ma'lumoti yig'ilmoqda (ertadan boshlab aniq bo'ladi — hozir ${delta.snapshotCount} ta kunlik snapshot bor).\n\n📊 *Boshidan beri jami* (umriy hisoblagich, kunlik emas):\n🛍️ Sotilgan: ${lifeSold.toLocaleString('uz-UZ')} dona\n↩️ Qaytarilgan: ${lifeReturned.toLocaleString('uz-UZ')} dona`;
+    salesSection = `⏳ Kunlik sotuv ma'lumoti yig'ilmoqda (ertadan boshlab aniq bo'ladi — hozir ${delta.snapshotCount} ta kunlik snapshot bor).\n\n📊 *Boshidan beri jami* (umriy hisoblagich, kunlik emas):\n🛍️ Sotilgan: ${fmtMoney(lifeSold)} dona\n↩️ Qaytarilgan: ${fmtMoney(lifeReturned)} dona`;
   } else {
     let profit = 0, revenue = 0, unmapped = 0, totalStorage = 0;
     for (const skuId of Object.keys(delta.perSku)) {
@@ -1097,7 +1104,7 @@ async function generateReportText(shopId) {
       profit += perUnit * d.soldDelta;
       totalStorage += storage * d.soldDelta;
     }
-    salesSection = `🛍️ Kechagi sotilgan: ${delta.totalSold.toLocaleString('uz-UZ')} dona\n↩️ Kechagi qaytarilgan: ${delta.totalReturned.toLocaleString('uz-UZ')} dona\n🏦 Kechagi daromad: ${revenue.toLocaleString('uz-UZ')} so'm\n📦 Kechagi saqlash xarajati: ${totalStorage.toLocaleString('uz-UZ')} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${profit.toLocaleString('uz-UZ')} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}`;
+    salesSection = `🛍️ Kechagi sotilgan: ${fmtMoney(delta.totalSold)} dona\n↩️ Kechagi qaytarilgan: ${fmtMoney(delta.totalReturned)} dona\n🏦 Kechagi daromad: ${fmtMoney(revenue)} so'm\n📦 Kechagi saqlash xarajati: ${fmtMoney(totalStorage)} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${fmtMoney(profit)} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}`;
   }
 
   // Xarajatlar — source bo'yicha (2.3)
@@ -1108,8 +1115,8 @@ async function generateReportText(shopId) {
   } else if (exp.count === 0) {
     expenseSection = `💸 Xarajatlar (oxirgi 30 kun): yozuv yo'q`;
   } else {
-    const lines = Object.entries(exp.bySource).sort((a, b) => b[1] - a[1]).map(([src, amt]) => `  ➤ ${src}: ${amt.toLocaleString('uz-UZ')} so'm`).join('\n');
-    expenseSection = `💸 Xarajatlar (oxirgi 30 kun, jami ${exp.outcomeTotal.toLocaleString('uz-UZ')} so'm):\n${lines}${exp.incomeTotal ? `\n  ✅ Kirim (INCOME): ${exp.incomeTotal.toLocaleString('uz-UZ')} so'm` : ''}`;
+    const lines = Object.entries(exp.bySource).sort((a, b) => b[1] - a[1]).map(([src, amt]) => `  ➤ ${src}: ${fmtMoney(amt)} so'm`).join('\n');
+    expenseSection = `💸 Xarajatlar (oxirgi 30 kun, jami ${fmtMoney(exp.outcomeTotal)} so'm):\n${lines}${exp.incomeTotal ? `\n  ✅ Kirim (INCOME): ${fmtMoney(exp.incomeTotal)} so'm` : ''}`;
   }
 
   const urgentSection = urgentItems.length

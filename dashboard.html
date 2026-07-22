@@ -164,6 +164,17 @@
       '5702': { budget: 22000, size: 'СГТ' }
     };
 
+    // 12A: pul/son formatlash — YAGONA funksiya. `toLocaleString('uz-UZ')` kasr sonda vergulni O'NLIK
+    // ajratkich sifatida ishlatadi (masalan 121.111 -> "121,111"), bu ming ajratkichiga o'xshab noto'g'ri
+    // o'qiladi (121 emas, 121 ming deb tushunilishi mumkin). Shuning uchun HAR DOIM avval Math.round().
+    // Butun loyihada FAQAT shu funksiya ishlatilsin — xom toLocaleString() qolmasin.
+    function fmtMoney(n) {
+      return Math.round(n || 0).toLocaleString('uz-UZ');
+    }
+    function fmtPct(n) {
+      return (n || 0).toFixed(1);
+    }
+
     let state = {
       shops: JSON.parse(localStorage.getItem('uz_shops')) || defaultShops,
       activeShop: parseInt(localStorage.getItem('uz_active_shop')) || 61122,
@@ -335,15 +346,15 @@ Assalomu alaykum!
 
 📦 Qabul qilingan buyurtmalar: ${m.ordersCount} ta
 🛍️ Sotilgan tovarlar: ${m.soldQty} ta
-🏦 Daromad: ${m.revenue.toLocaleString('uz-UZ')} so'm
-💵 Sof foyda: ${m.profitSum.toLocaleString('uz-UZ')} so'm${m.unmappedCount > 0 ? ` (bog'lanmagan: ${m.unmappedCount} ta buyurtma hisobga kirmadi)` : ''}
+🏦 Daromad: ${fmtMoney(m.revenue)} so'm
+💵 Sof foyda: ${fmtMoney(m.profitSum)} so'm${m.unmappedCount > 0 ? ` (bog'lanmagan: ${m.unmappedCount} ta buyurtma hisobga kirmadi)` : ''}
 
-💰 Yechib olish mumkin (yetkazilgan buyurtmalar bo'yicha): ${m.withdrawable.toLocaleString('uz-UZ')} so'm
+💰 Yechib olish mumkin (yetkazilgan buyurtmalar bo'yicha): ${fmtMoney(m.withdrawable)} so'm
 
-💸 Xarajatlar (jami ${m.totalExpenses.toLocaleString('uz-UZ')} so'm):
-  ➤ Logistika: ${m.expenseByType.LOGISTICS.toLocaleString('uz-UZ')} so'm
-  ➤ Saqlash: ${m.expenseByType.STORAGE.toLocaleString('uz-UZ')} so'm
-  ➤ Marketing: ${m.expenseByType.MARKETING.toLocaleString('uz-UZ')} so'm
+💸 Xarajatlar (jami ${fmtMoney(m.totalExpenses)} so'm):
+  ➤ Logistika: ${fmtMoney(m.expenseByType.LOGISTICS)} so'm
+  ➤ Saqlash: ${fmtMoney(m.expenseByType.STORAGE)} so'm
+  ➤ Marketing: ${fmtMoney(m.expenseByType.MARKETING)} so'm
 
 📦 Tovarlar holati:
 ✅ Sotuvda: ${m.activeCount} ta tovar
@@ -464,7 +475,7 @@ ${urgentSection}
     // "Asl tovar turi" qatorida ko'rsatiladigan matn (3.4/3.5)
     function tannarxLabel(info) {
       if (info.source === 'sku-manual' || info.source === 'product-manual') {
-        return `✍️ Qo'lda: ${info.tannarx.toLocaleString('uz-UZ')} so'm${sourceBadge(info.source)}`;
+        return `✍️ Qo'lda: ${fmtMoney(info.tannarx)} so'm${sourceBadge(info.source)}`;
       }
       if (info.source === 'sku-type' || info.source === 'product-type') {
         return `${info.type.name}${sourceBadge(info.source)}`;
@@ -805,7 +816,7 @@ ${urgentSection}
       const selectValue = isManualMode ? '__manual__' : (currentTypeId || '');
 
       let selectOptions = state.productTypes.map(t => `
-        <option value="${t.id}" ${selectValue === t.id ? 'selected' : ''}>${t.name} (Tannarxi: ${t.cost.toLocaleString('uz-UZ')} so'm)</option>
+        <option value="${t.id}" ${selectValue === t.id ? 'selected' : ''}>${t.name} (Tannarxi: ${fmtMoney(t.cost)} so'm)</option>
       `).join('');
 
       let comHint = '18%';
@@ -1069,8 +1080,8 @@ ${urgentSection}
           ` : summary?.error ? dataErrorBanner(summary.error) : `
             <div class="bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20 rounded-3xl p-5">
               <span class="text-xs text-brand uppercase tracking-wider font-mono">Barcha do'konlar — jami zaxira</span>
-              <div class="text-2xl font-black text-slate-100 mt-2">${(summary?.totalStock || 0).toLocaleString('uz-UZ')} dona</div>
-              <div class="text-[10px] text-slate-500 mt-1">Jami: ${(summary?.totalStock || 0).toLocaleString('uz-UZ')} dona (${(summary?.shops || []).filter(s => s.ok).map(s => `${s.shopTitle}: ${s.totalStock}`).join(', ')})</div>
+              <div class="text-2xl font-black text-slate-100 mt-2">${fmtMoney(summary?.totalStock || 0)} dona</div>
+              <div class="text-[10px] text-slate-500 mt-1">Jami: ${fmtMoney(summary?.totalStock || 0)} dona (${(summary?.shops || []).filter(s => s.ok).map(s => `${s.shopTitle}: ${s.totalStock}`).join(', ')})</div>
             </div>
             <div class="grid grid-cols-2 gap-3">
               <div class="bg-darkCard border border-darkBorder rounded-2xl p-3.5 flex flex-col justify-between">
@@ -1225,12 +1236,12 @@ ${urgentSection}
             <div class="bg-darkCard border border-darkBorder rounded-2xl p-3.5 flex flex-col justify-between">
               <i data-lucide="warehouse" class="w-4.5 h-4.5 text-slate-300 mb-2"></i>
               <span class="text-[11px] text-slate-400 font-medium">Uy Zaxirasi Dona</span>
-              <span class="text-xl font-bold text-slate-100 mt-1">${homeStockQty.toLocaleString()} dona</span>
+              <span class="text-xl font-bold text-slate-100 mt-1">${fmtMoney(homeStockQty)} dona</span>
             </div>
             <div class="bg-darkCard border border-darkBorder rounded-2xl p-3.5 flex flex-col justify-between">
               <i data-lucide="wallet" class="w-4.5 h-4.5 text-slate-300 mb-2"></i>
               <span class="text-[11px] text-slate-400">Uy Zaxira Qiymati</span>
-              <span class="text-sm font-bold text-brand mt-1.5">${homeStockValue.toLocaleString()} so'm</span>
+              <span class="text-sm font-bold text-brand mt-1.5">${fmtMoney(homeStockValue)} so'm</span>
             </div>
           </div>
 
@@ -1354,7 +1365,7 @@ ${urgentSection}
 
             // 4.3: yagona formula — sotuv_narxi − komissiya − logistika − saqlash − reklama/dona − tannarx
             const profit = sellPrice - commission - logistics - storage - adCostPerUnit - tannarx;
-            const pmMargin = sellPrice > 0 ? ((profit / sellPrice) * 100).toFixed(1) : 0;
+            const pmMargin = sellPrice > 0 ? (profit / sellPrice) * 100 : 0;
             const profitColor = profit >= 0 ? "text-brand" : "text-rose-400";
 
             // 5.1/5.2/5.4: zaxira kunlari, ABC toifa, Xitoy buyurtma nuqtasi (server hisoblagan, snapshot tarixidan)
@@ -1398,19 +1409,19 @@ ${urgentSection}
                   </div>
                   <div class="flex justify-between">
                     <span class="text-slate-400">Sotuv narxi:</span>
-                    <span class="font-bold font-mono text-slate-200">${sellPrice.toLocaleString()} so'm</span>
+                    <span class="font-bold font-mono text-slate-200">${fmtMoney(sellPrice)} so'm</span>
                   </div>
                   <div class="flex justify-between">
-                    <span class="text-slate-400">Komissiya (${comPercent}%${sourceBadge(com.source)}):</span>
-                    <span class="font-semibold text-slate-200">${commission.toLocaleString()} so'm</span>
+                    <span class="text-slate-400">Komissiya (${fmtPct(comPercent)}%${sourceBadge(com.source)}):</span>
+                    <span class="font-semibold text-slate-200">${fmtMoney(commission)} so'm</span>
                   </div>
                   <div class="flex justify-between">
                     <span class="text-slate-400">Logistika (${logi.litr != null ? logi.litr + ' l' : 'qo\'lda'}${sourceBadge(logi.source)}${logi.source === 'default' ? ' — hajm kiritilmagan' : ''}):</span>
-                    <span class="font-semibold text-slate-200">${logistics.toLocaleString()} so'm</span>
+                    <span class="font-semibold text-slate-200">${fmtMoney(logistics)} so'm</span>
                   </div>
                   <div class="flex justify-between">
                     <span class="text-slate-400">Saqlash (${stor.litr} l × 12 × ${stor.days}k${sourceBadge(stor.source)}):</span>
-                    <span class="font-semibold text-slate-200">${storage.toLocaleString()} so'm</span>
+                    <span class="font-semibold text-slate-200">${fmtMoney(storage)} so'm</span>
                   </div>
                   <div class="flex justify-between col-span-2">
                     <span class="text-slate-400">Zaxira kunlari:</span>
@@ -1419,7 +1430,7 @@ ${urgentSection}
                   <div class="flex justify-between col-span-2 border-t border-darkBorder/30 pt-1.5 flex justify-between">
                     <span class="text-slate-400 font-semibold text-xs">Kartochka Sof_foydasi:</span>
                     <span class="font-extrabold text-xs font-mono py-0.5 px-2.5 rounded bg-darkBg ${profitColor}">
-                      ${profit.toLocaleString()} so'm (${pmMargin}%)
+                      ${fmtMoney(profit)} so'm (${fmtPct(pmMargin)}%)
                     </span>
                   </div>
                 </div>
@@ -1438,7 +1449,7 @@ ${urgentSection}
                   </div>
                 ` : dailyBudget > 0 ? `
                   <div class="mt-2 text-[9.5px] bg-slate-900 border border-slate-800 p-1 rounded-md text-center flex items-center justify-center gap-1.5">
-                    <span class="${profit <= 0 ? 'text-rose-400' : 'text-emerald-400'}">● Reklama/dona: ${adCostPerUnit.toLocaleString(undefined, {maximumFractionDigits: 0})} d | ROI: ${((profit / adCostPerUnit) * 100).toFixed(0)}%</span>
+                    <span class="${profit <= 0 ? 'text-rose-400' : 'text-emerald-400'}">● Reklama/dona: ${fmtMoney(adCostPerUnit)} d | ROI: ${fmtPct((profit / adCostPerUnit) * 100)}%</span>
                     ${profit <= 0 ? `<span class="text-amber-400">⚠️ Sarf zarar berdi — kamaytiring!</span>` : ''}
                   </div>
                 ` : ''}
@@ -1566,11 +1577,11 @@ ${urgentSection}
               </div>
               <div class="flex flex-col gap-0.5">
                 <span class="text-[10px] uppercase text-slate-500">Haqiqiy Tannarx:</span>
-                <span class="font-bold text-brand">${t.cost.toLocaleString('uz-UZ')} so'm</span>
+                <span class="font-bold text-brand">${fmtMoney(t.cost)} so'm</span>
               </div>
               <div class="flex flex-col gap-0.5 col-span-2 border-t border-darkBorder pt-2 flex justify-between flex-row">
                 <span class="text-[10px] uppercase text-slate-500 font-sans">Jami zaxira pul ko'rinishi:</span>
-                <span class="font-black text-slate-200 font-mono">${itemVal.toLocaleString('uz-UZ')} so'm</span>
+                <span class="font-black text-slate-200 font-mono">${fmtMoney(itemVal)} so'm</span>
               </div>
             </div>
           </div>
@@ -1582,7 +1593,7 @@ ${urgentSection}
           <!-- Stock Header Totals -->
           <div class="p-4 rounded-2xl bg-darkCard border border-darkBorder flex flex-col gap-1 inline-block">
             <span class="text-xs text-slate-400 uppercase tracking-widest font-mono">JAMI UY ZAXIRA SARMOYASI:</span>
-            <span class="text-2xl font-black text-brand">${totalStockValue.toLocaleString('uz-UZ')} so'm</span>
+            <span class="text-2xl font-black text-brand">${fmtMoney(totalStockValue)} so'm</span>
             <span class="text-xs text-slate-500 font-medium font-sans mt-1">Siz uyingizda jami ${totalQty} dona foydalanishga tayyor tovar zaxirasini saqlab turibsiz.</span>
           </div>
 
@@ -1720,27 +1731,27 @@ ${urgentSection}
             <div class="flex flex-col gap-2 font-medium">
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Jami Buyurtmalar Savdosi:</span>
-                <span class="text-slate-100 font-mono">${totalSales.toLocaleString()} so'm</span>
+                <span class="text-slate-100 font-mono">${fmtMoney(totalSales)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Kutilayotgan Payout (Uzumdan):</span>
-                <span class="text-slate-100 font-mono font-bold">${totalPayout.toLocaleString()} so'm</span>
+                <span class="text-slate-100 font-mono font-bold">${fmtMoney(totalPayout)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Hisoblangan Tannarx (Xarid):</span>
-                <span class="text-slate-100 font-mono">${totalMappedCostSum.toLocaleString()} so'm</span>
+                <span class="text-slate-100 font-mono">${fmtMoney(totalMappedCostSum)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Logistika (hajm asosida, 4.1):</span>
-                <span class="text-slate-100 font-mono">${totalShipping.toLocaleString()} so'm</span>
+                <span class="text-slate-100 font-mono">${fmtMoney(totalShipping)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Saqlash (hajm × 12 so'm × 30 kun, 4.2):</span>
-                <span class="text-slate-100 font-mono">${totalStorage.toLocaleString()} so'm</span>
+                <span class="text-slate-100 font-mono">${fmtMoney(totalStorage)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Marketing & Reklama (byudjet):</span>
-                <span class="text-slate-100 font-mono">${totalMarketingVal.toLocaleString()} so'm</span>
+                <span class="text-slate-100 font-mono">${fmtMoney(totalMarketingVal)} so'm</span>
               </div>
               <!-- 2.3: real Uzum xarajatlari source bo'yicha (kategoriya o'ylab topilmaydi) -->
               <div class="border-t border-darkBorder/40 pt-2 mt-1">
@@ -1750,9 +1761,9 @@ ${urgentSection}
                   : Object.entries(realExpensesBySource).sort((a,b)=>b[1]-a[1]).map(([src,amt])=>`
                     <div class="flex justify-between text-[10.5px] py-0.5">
                       <span class="text-slate-400">${src}</span>
-                      <span class="text-slate-300 font-mono">${amt.toLocaleString()} so'm</span>
+                      <span class="text-slate-300 font-mono">${fmtMoney(amt)} so'm</span>
                     </div>`).join('')}
-                ${realIncomeTotal ? `<div class="flex justify-between text-[10.5px] py-0.5 text-emerald-400 border-t border-darkBorder/30 mt-1 pt-1"><span>Kirim (INCOME)</span><span class="font-mono">${realIncomeTotal.toLocaleString()} so'm</span></div>` : ''}
+                ${realIncomeTotal ? `<div class="flex justify-between text-[10.5px] py-0.5 text-emerald-400 border-t border-darkBorder/30 mt-1 pt-1"><span>Kirim (INCOME)</span><span class="font-mono">${fmtMoney(realIncomeTotal)} so'm</span></div>` : ''}
               </div>
               ${noSaleAdSpendSkus.length > 0 ? `
                 <div class="flex items-start gap-1.5 text-[10.5px] text-amber-400 bg-amber-950/20 border border-amber-900/40 rounded-lg px-2 py-1.5">
@@ -1762,7 +1773,7 @@ ${urgentSection}
               ` : ''}
               <div class="flex justify-between text-sm py-2 border-t border-darkBorder/40 mt-1.5">
                 <span class="text-slate-300 font-bold uppercase text-[11px] tracking-wider">Hisoblangan Sof Foyda:</span>
-                <span class="font-black font-mono text-xs ${profitColor}">${totalProfit.toLocaleString()} so'm</span>
+                <span class="font-black font-mono text-xs ${profitColor}">${fmtMoney(totalProfit)} so'm</span>
               </div>
             </div>
           </div>
@@ -1785,17 +1796,17 @@ ${urgentSection}
                       <span class="font-semibold text-slate-300 truncate">${i.title}</span>
                       <span class="text-[9.5px] text-slate-500">${i.qty} dona</span>
                     </div>
-                    <span class="font-mono text-amber-400 text-right font-bold shrink-0">${i.tiedCapital.toLocaleString()} s.</span>
+                    <span class="font-mono text-amber-400 text-right font-bold shrink-0">${fmtMoney(i.tiedCapital)} s.</span>
                   </div>
                 `).join('')}
               </div>
               <div class="flex justify-between text-[11px] pt-2 border-t border-darkBorder/40">
                 <span class="text-slate-400">Jami muzlagan kapital:</span>
-                <span class="font-bold text-amber-400 font-mono">${totalDeadCapital.toLocaleString()} so'm</span>
+                <span class="font-bold text-amber-400 font-mono">${fmtMoney(totalDeadCapital)} so'm</span>
               </div>
               <div class="flex justify-between text-[11px] mt-1">
                 <span class="text-slate-400">Kuniga saqlash zarari:</span>
-                <span class="font-bold text-rose-400 font-mono">${totalDeadDaily.toLocaleString(undefined, {maximumFractionDigits: 0})} so'm</span>
+                <span class="font-bold text-rose-400 font-mono">${fmtMoney(totalDeadDaily)} so'm</span>
               </div>
             `}
           </div>
@@ -1815,7 +1826,7 @@ ${urgentSection}
                     <span class="font-semibold text-slate-300 truncate">${r.productTitle || 'Nomsiz'}</span>
                     <span class="text-[9.5px] text-rose-400 italic">${r.defectReason || "Sabab ko'rsatilmagan"}</span>
                   </div>
-                  <span class="font-mono text-rose-400 text-right font-bold shrink-0">${(r.price || 0).toLocaleString()} s.</span>
+                  <span class="font-mono text-rose-400 text-right font-bold shrink-0">${fmtMoney(r.price || 0)} s.</span>
                 </div>
               `).join('')}
             </div>
