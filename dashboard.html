@@ -485,6 +485,13 @@ ${urgentSection}
       return null;
     }
 
+    // SKU'ning zaxira kunlari metrikasi (5.1) — eng ishonchli mavjud ko'rsatkich (30 kunlik, bo'lmasa 7 kunlik)
+    function skuStockDays(skuId) {
+      const m = state.skuMetrics?.perSku?.[skuId];
+      if (!m || !m.canCompute) return null;
+      return m.stockDays30 != null ? m.stockDays30 : m.stockDays7;
+    }
+
     // Kartochkalar filtri (Uzum ilovasidagidek): mahsulot berilgan filtrga tushadimi?
     function productMatchesFilter(p, filter) {
       const isBanned = p.status?.value === 'PERM_BANNED';
@@ -494,6 +501,10 @@ ${urgentSection}
         case 'active': return !isBanned && anyInStock;   // Sotuvda
         case 'banned': return isBanned;                  // Bloklangan
         case 'depleted': return !isBanned && allOut;     // Tugagan
+        case 'urgent-stock':                              // 5.1: tugash arafasida (<7 kun)
+          return !isBanned && (p.skuList || []).some(s => { const d = skuStockDays(s.skuId); return d != null && d < 7; });
+        case 'rank-a': return (p.skuList || []).some(s => s.rank === 'A'); // 5.2
+        case 'rank-c': return (p.skuList || []).some(s => s.rank === 'C'); // 5.2
         case 'all':
         default: return true;                            // Barcha tovarlar
       }
@@ -595,6 +606,14 @@ ${urgentSection}
         console.error("Qaytarishlarni yuklashda xato:", e);
         state.returns = [];
         state.dataErrors.returns = e.message;
+      }
+
+      try {
+        // 5.1/5.2/5.4: zaxira kunlari, ABC, Xitoy buyurtma nuqtasi — snapshot tarixidan (server hisoblaydi)
+        state.skuMetrics = await fetchFromProxy(`/api/metrics/${state.activeShop}`);
+      } catch (e) {
+        console.error("Metrikalarni yuklashda xato:", e);
+        state.skuMetrics = null;
       }
 
       syncStateToServer();
@@ -1262,6 +1281,14 @@ ${urgentSection}
             const pmMargin = sellPrice > 0 ? ((profit / sellPrice) * 100).toFixed(1) : 0;
             const profitColor = profit >= 0 ? "text-brand" : "text-rose-400";
 
+            // 5.1/5.2/5.4: zaxira kunlari, ABC toifa, Xitoy buyurtma nuqtasi (server hisoblagan, snapshot tarixidan)
+            const metric = state.skuMetrics?.perSku?.[sku.skuId] || null;
+            const stockDaysVal = metric && metric.canCompute ? (metric.stockDays30 != null ? metric.stockDays30 : metric.stockDays7) : null;
+            const stockDaysColor = stockDaysVal == null ? 'text-slate-500' : stockDaysVal < 7 ? 'text-rose-400' : stockDaysVal < 14 ? 'text-amber-400' : 'text-brand';
+            const stockDaysLabel = stockDaysVal == null ? "hisoblab bo'lmaydi" : `${stockDaysVal.toFixed(1)} kunga yetadi`;
+            const rankBadge = sku.rank === 'A' ? '🟢 A' : sku.rank === 'B' ? '🟠 B' : sku.rank === 'C' ? '🔴 C' : '';
+            const needsReorder = metric ? metric.needsReorder : false;
+
             return `
               <div class="mt-2.5 p-2.5 rounded-xl bg-darkBg/90 border border-darkBorder">
                 <div class="flex items-start justify-between gap-2">
@@ -1269,7 +1296,7 @@ ${urgentSection}
                     <!-- 3.3: SKU rasmi (rang/model bo'yicha). Yuklanmasa placeholder -->
                     ${sku.image ? `<img src="${sku.image}" referrerPolicy="no-referrer" alt="" class="w-9 h-9 rounded-lg object-cover border border-darkBorder bg-darkCard shrink-0" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"><div class="w-9 h-9 rounded-lg border border-darkBorder bg-darkCard shrink-0 items-center justify-center text-slate-600" style="display:none"><i data-lucide="image-off" class="w-4 h-4"></i></div>` : `<div class="w-9 h-9 rounded-lg border border-darkBorder bg-darkCard shrink-0 flex items-center justify-center text-slate-600"><i data-lucide="image-off" class="w-4 h-4"></i></div>`}
                     <div class="flex flex-col gap-0.5 min-w-0">
-                      <span class="text-[11.5px] font-bold text-brand tracking-tight font-sans truncate">${sku.skuTitle}</span>
+                      <span class="text-[11.5px] font-bold text-brand tracking-tight font-sans truncate">${sku.skuTitle}${rankBadge ? ` <span class="text-[9px]">${rankBadge}</span>` : ''}</span>
                       <span class="text-[10px] text-slate-500 font-mono">ID: ${sku.skuId} | Code: ${sku.skuCode}</span>
                     </div>
                   </div>
@@ -1309,6 +1336,10 @@ ${urgentSection}
                     <span class="text-slate-400">Saqlash (${stor.litr} l × 12 × ${stor.days}k${sourceBadge(stor.source)}):</span>
                     <span class="font-semibold text-slate-200">${storage.toLocaleString()} so'm</span>
                   </div>
+                  <div class="flex justify-between col-span-2">
+                    <span class="text-slate-400">Zaxira kunlari:</span>
+                    <span class="font-bold ${stockDaysColor}">${stockDaysLabel}</span>
+                  </div>
                   <div class="flex justify-between col-span-2 border-t border-darkBorder/30 pt-1.5 flex justify-between">
                     <span class="text-slate-400 font-semibold text-xs">Kartochka Sof_foydasi:</span>
                     <span class="font-extrabold text-xs font-mono py-0.5 px-2.5 rounded bg-darkBg ${profitColor}">
@@ -1316,6 +1347,13 @@ ${urgentSection}
                     </span>
                   </div>
                 </div>
+
+                <!-- 5.4: Xitoy buyurtma nuqtasi — yetkazish ~28 kun, zaxira kunlari <= 35 bo'lsa ogohlantirish -->
+                ${needsReorder ? `
+                  <div class="mt-2 text-[9.5px] bg-slate-900 border border-orange-800 p-1 rounded-md text-center flex items-center justify-center gap-1.5">
+                    <span class="text-orange-400">🚚 Xitoyga buyurtma bering — kelguncha tugaydi (zaxira ${stockDaysVal.toFixed(0)} kunga yetadi, yo'l ~28 kun)</span>
+                  </div>
+                ` : ''}
 
                 <!-- ROI alerts -->
                 ${noSalesWithSpend ? `
@@ -1373,7 +1411,10 @@ ${urgentSection}
         { key: 'active', label: 'Sotuvda' },
         { key: 'all', label: 'Barcha tovarlar' },
         { key: 'banned', label: 'Bloklangan' },
-        { key: 'depleted', label: 'Tugagan' }
+        { key: 'depleted', label: 'Tugagan' },
+        { key: 'urgent-stock', label: 'Tugash arafasida (<7 kun)' },
+        { key: 'rank-a', label: '🟢 A tovarlar' },
+        { key: 'rank-c', label: '🔴 C tovarlar' }
       ];
       const filterButtons = filterDefs.map(f => {
         const selected = f.key === activeFilter;
@@ -1545,6 +1586,21 @@ ${urgentSection}
         }
       });
 
+      // 5.3: Nolikvid — oxirgi 30 kunda sotilmagan + hozir zaxirasi bor (server snapshot tarixidan aniqlagan)
+      const deadStockItems = [];
+      (state.cachedUzumProducts || []).forEach(p => (p.skuList || []).forEach(sku => {
+        const m = state.skuMetrics?.perSku?.[sku.skuId];
+        if (m && m.isDeadStock) {
+          const tInfo = resolveTannarx(sku.skuId, p.productId);
+          const stor = resolveStorage(sku.skuId, p.productId, sku);
+          const tiedCapital = tInfo.tannarx * sku.availableAmount;
+          const dailyWaste = (stor.val / stor.days) * sku.availableAmount;
+          deadStockItems.push({ title: sku.skuTitle, qty: sku.availableAmount, tiedCapital, dailyWaste });
+        }
+      }));
+      const totalDeadCapital = deadStockItems.reduce((a, i) => a + i.tiedCapital, 0);
+      const totalDeadDaily = deadStockItems.reduce((a, i) => a + i.dailyWaste, 0);
+
       // 2.3: real Uzum xarajatlarini SOURCE bo'yicha guruhlaymiz (type=OUTCOME/INCOME).
       // Eski STORAGE/MARKETING tasnifi real ma'lumotda hech qachon ishlamasdi — kategoriya o'ylab topilmaydi.
       const realExpensesBySource = {};
@@ -1633,6 +1689,39 @@ ${urgentSection}
                 <span class="font-black font-mono text-xs ${profitColor}">${totalProfit.toLocaleString()} so'm</span>
               </div>
             </div>
+          </div>
+
+          <!-- 5.3: Nolikvid (muzlagan kapital) widget -->
+          <div class="bg-darkCard border border-darkBorder rounded-2xl p-4">
+            <div class="flex items-center justify-between mb-3 border-b border-darkBorder pb-2.5">
+              <span class="text-xs uppercase font-bold text-slate-300 tracking-wider">❄️ Nolikvid (muzlagan kapital)</span>
+              <span class="text-[10px] font-mono font-bold text-amber-400">${deadStockItems.length} ta SKU</span>
+            </div>
+            ${!state.skuMetrics?.ready30 ? `
+              <div class="text-[11px] text-slate-500 text-center py-2">Hisoblab bo'lmaydi — snapshot tarixi hali 30 kunlik emas</div>
+            ` : deadStockItems.length === 0 ? `
+              <div class="text-[11px] text-slate-500 text-center py-2">Nolikvid tovar topilmadi — hammasi oxirgi 30 kunda sotilgan</div>
+            ` : `
+              <div class="flex flex-col gap-2 max-h-[160px] overflow-y-auto mb-2.5">
+                ${deadStockItems.map(i => `
+                  <div class="p-2 py-1.5 rounded-lg bg-darkBg border border-darkBorder flex items-center justify-between text-[11px] gap-2">
+                    <div class="flex flex-col min-w-0">
+                      <span class="font-semibold text-slate-300 truncate">${i.title}</span>
+                      <span class="text-[9.5px] text-slate-500">${i.qty} dona</span>
+                    </div>
+                    <span class="font-mono text-amber-400 text-right font-bold shrink-0">${i.tiedCapital.toLocaleString()} s.</span>
+                  </div>
+                `).join('')}
+              </div>
+              <div class="flex justify-between text-[11px] pt-2 border-t border-darkBorder/40">
+                <span class="text-slate-400">Jami muzlagan kapital:</span>
+                <span class="font-bold text-amber-400 font-mono">${totalDeadCapital.toLocaleString()} so'm</span>
+              </div>
+              <div class="flex justify-between text-[11px] mt-1">
+                <span class="text-slate-400">Kuniga saqlash zarari:</span>
+                <span class="font-bold text-rose-400 font-mono">${totalDeadDaily.toLocaleString(undefined, {maximumFractionDigits: 0})} so'm</span>
+              </div>
+            `}
           </div>
 
           <!-- Returns Tracker widget -->

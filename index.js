@@ -527,6 +527,61 @@ function getDailyDelta(shopId) {
   return { ready: true, snapshotCount: dates.length, fromDate: dates[dates.length - 2], toDate: dates[dates.length - 1], totalSold, totalReturned, perSku };
 }
 
+// 5.1: Berilgan do'kon uchun so'nggi N kunlik (yoki mavjud bo'lganicha) SKU bo'yicha o'rtacha kunlik sotuv.
+// Ikkita snapshot yetarli emas — kamida shu bor snapshotlar orasidagi haqiqiy kun oralig'iga bo'linadi.
+function averageDailySales(shopId, days) {
+  const snapshots = loadSnapshots();
+  const shopSnaps = snapshots[shopId] || {};
+  const dates = Object.keys(shopSnaps).sort();
+  if (dates.length < 2) return { ready: false, perSku: {} };
+  const window = dates.slice(-Math.min(days + 1, dates.length));
+  if (window.length < 2) return { ready: false, perSku: {} };
+  const first = shopSnaps[window[0]];
+  const last = shopSnaps[window[window.length - 1]];
+  const spanDays = window.length - 1;
+  const perSku = {};
+  const allSkuIds = new Set([...Object.keys(first), ...Object.keys(last)]);
+  for (const skuId of allSkuIds) {
+    const f = first[skuId] || { sold: 0 };
+    const l = last[skuId] || { sold: 0 };
+    const soldDelta = Math.max(0, (l.sold || 0) - (f.sold || 0));
+    perSku[skuId] = soldDelta / spanDays;
+  }
+  return { ready: true, spanDays, fromDate: window[0], toDate: window[window.length - 1], perSku };
+}
+
+// 5.1/5.2/5.3/5.4: Har SKU uchun zaxira kunlari, ABC toifa, nolikvid va Xitoy buyurtma nuqtasi belgisi.
+// Jonli mahsulot ro'yxati + snapshot tarixidan hisoblanadi. Sotuv tarixi yo'q bo'lsa aniq "hisoblab bo'lmaydi" qaytadi.
+async function computeSkuMetrics(shopId) {
+  const prod = await fetchLiveShopProducts(shopId);
+  if (!prod.ok) return { ok: false, error: prod.error };
+  const avg7 = averageDailySales(shopId, 7);
+  const avg30 = averageDailySales(shopId, 30);
+  const perSku = {};
+  prod.products.forEach(p => (p.skuList || []).forEach(sku => {
+    const avail = sku.availableAmount || 0;
+    const a7 = avg7.ready ? avg7.perSku[sku.skuId] : undefined;
+    const a30 = avg30.ready ? avg30.perSku[sku.skuId] : undefined;
+    const stockDays7 = (a7 != null && a7 > 0) ? avail / a7 : null;
+    const stockDays30 = (a30 != null && a30 > 0) ? avail / a30 : null;
+    // 5.4: Xitoy buyurtma nuqtasi — eng ishonchli mavjud ko'rsatkich (30 kunlik, bo'lmasa 7 kunlik)
+    const stockDaysBest = stockDays30 != null ? stockDays30 : stockDays7;
+    // 5.3: nolikvid — 30 kunlik oyna to'liq va aniq shu SKU uchun ma'lum, oxirgi 30 kunda 0 sotilgan, hozir zaxirasi bor
+    const isDeadStock = avg30.ready && a30 != null && a30 === 0 && avail > 0;
+    perSku[sku.skuId] = {
+      productId: p.productId,
+      avgDaily7: a7 != null ? a7 : null,
+      avgDaily30: a30 != null ? a30 : null,
+      stockDays7, stockDays30,
+      canCompute: stockDaysBest != null,
+      needsReorder: stockDaysBest != null && stockDaysBest <= 35, // 5.4: 28 kun yo'l + 7 kun zaxira
+      isDeadStock,
+      rank: sku.rank || null // 5.2
+    };
+  }));
+  return { ok: true, ready7: avg7.ready, ready30: avg30.ready, spanDays7: avg7.spanDays || 0, spanDays30: avg30.spanDays || 0, perSku };
+}
+
 // 1. Service: State sync for Bot calculations
 app.post('/api/sync-state', (req, res) => {
   const { productTypes, skuMappings, costs, shops, activeShop, productSettings, products, orders, expenses } = req.body;
@@ -1061,6 +1116,24 @@ async function generateReportText(shopId) {
     ? `\n🚨 *ZUDLIK BILAN OMBORGA YUBORING:*\n${urgentItems.slice(0, 5).map(t => `• ${t}`).join('\n')}${urgentItems.length > 5 ? `\n• …va yana ${urgentItems.length - 5} ta` : ''}\n`
     : '';
 
+  // 5.2/5.4: A toifadagi tugash arafasidagi tovarlar va Xitoy buyurtma nuqtasi ogohlantirishi (snapshot tarixidan)
+  const metrics = await computeSkuMetrics(shopId);
+  let riskSection = '';
+  if (metrics.ok) {
+    const aAtRisk = [];
+    const reorderItems = [];
+    products.forEach(p => (p.skuList || []).forEach(sku => {
+      const m = metrics.perSku[sku.skuId];
+      if (!m) return;
+      if (sku.rank === 'A' && m.needsReorder) aAtRisk.push(sku.skuTitle);
+      if (m.needsReorder) reorderItems.push(`${sku.skuTitle} (${(m.stockDays30 != null ? m.stockDays30 : m.stockDays7).toFixed(0)} kun)`);
+    }));
+    const parts = [];
+    if (aAtRisk.length > 0) parts.push(`🟢➡️🚨 *A toifadagi ${aAtRisk.length} ta tovar tugash arafasida:*\n${aAtRisk.slice(0, 5).map(t => `• ${t}`).join('\n')}${aAtRisk.length > 5 ? `\n• …va yana ${aAtRisk.length - 5} ta` : ''}`);
+    if (reorderItems.length > 0) parts.push(`🚚 *Xitoyga buyurtma bering (${reorderItems.length} ta, ~28 kun yo'l):*\n${reorderItems.slice(0, 5).map(t => `• ${t}`).join('\n')}${reorderItems.length > 5 ? `\n• …va yana ${reorderItems.length - 5} ta` : ''}`);
+    if (parts.length > 0) riskSection = `\n${parts.join('\n\n')}\n`;
+  }
+
   return `${header}
 
 ${salesSection}
@@ -1072,7 +1145,7 @@ ${expenseSection}
 ❌ Tugagan SKU: ${outOfStock} ta
 ⚠️ Kam qolgan SKU: ${low} ta
 🚫 Bloklangan: ${blocked} ta
-${urgentSection}
+${urgentSection}${riskSection}
 /start — boshlash | /hisobot — hisobot | /dashboard — mini app`;
 }
 
@@ -1195,6 +1268,13 @@ app.get('/api/snapshot/status', (req, res) => {
     out[shopId] = { dates: Object.keys(snapshots[shopId]).sort(), delta: getDailyDelta(shopId) };
   }
   res.json(out);
+});
+
+// 5.1/5.2/5.4: SKU bo'yicha zaxira kunlari, ABC toifa, Xitoy buyurtma nuqtasi — snapshot tarixidan
+app.get('/api/metrics/:shopId', async (req, res) => {
+  const result = await computeSkuMetrics(req.params.shopId);
+  if (!result.ok) return sendUzumError(res, result.error);
+  res.json(result);
 });
 
 // Automatic bot registration logic
