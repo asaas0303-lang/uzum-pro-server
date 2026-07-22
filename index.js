@@ -877,13 +877,41 @@ function commissionPct(skuId, sku, productId) {
   if (sku && sku.commissionApi != null) return Number(sku.commissionApi);
   return 18; // oxirgi zaxira default (3.1)
 }
-// Logistika (3.2): SKU qo'lda > mahsulot qo'lda (3.4) > default 5250
-function logisticsCost(skuId, productId) {
+// 4.1: Uzum'ning 2026-05-04'dan beri ishlatayotgan hajm-asosli logistika formulasi.
+// 1 litrgacha 5250 so'm, har qo'shimcha litr +250 so'm, maksimal 50000 so'm. Hajm yuqoriga yaxlitlanadi.
+function logisticsFormula(litr) {
+  return Math.min(50000, 5250 + 250 * (Math.ceil(litr) - 1));
+}
+
+// Logistika (3.2/4.1): SKU qo'lda narx > mahsulot qo'lda narx (3.4) > SKU hajm > mahsulot hajm > default (hajm yo'q, 1 litr deb)
+// Qaytaradi: { val, source, litr? }
+function resolveLogistics(skuId, productId) {
   const c = syncedState.costs[skuId];
-  if (c && c.logisticsCost != null && c.logisticsCost !== '') return Number(c.logisticsCost);
+  if (c && c.logisticsCost != null && c.logisticsCost !== '') return { val: Number(c.logisticsCost), source: 'sku-manual' };
   const ps = productId != null ? (syncedState.productSettings || {})[productId] : null;
-  if (ps && ps.logisticsCost != null && ps.logisticsCost !== '') return Number(ps.logisticsCost);
-  return 5250; // default (3.2)
+  if (ps && ps.logisticsCost != null && ps.logisticsCost !== '') return { val: Number(ps.logisticsCost), source: 'product-manual' };
+  if (c && c.volumeL != null && c.volumeL !== '' && Number(c.volumeL) > 0) {
+    const litr = Number(c.volumeL);
+    return { val: logisticsFormula(litr), source: 'sku-volume', litr };
+  }
+  if (ps && ps.volumeL != null && ps.volumeL !== '' && Number(ps.volumeL) > 0) {
+    const litr = Number(ps.volumeL);
+    return { val: logisticsFormula(litr), source: 'product-volume', litr };
+  }
+  return { val: 5250, source: 'default', litr: 1 }; // 4.1: hajm kiritilmagan — 1 litr deb hisoblanadi
+}
+
+// 4.2: Saqlash xarajati — Uzum 1 litr = 12 so'm/kun. Hajm bo'lmasa 1 litr deb hisoblanadi (logistika bilan bir xil default).
+const STORAGE_SOM_PER_LITER_DAY = 12;
+const STORAGE_DEFAULT_DAYS = 30;
+function resolveStorage(skuId, productId) {
+  const c = syncedState.costs[skuId];
+  const ps = productId != null ? (syncedState.productSettings || {})[productId] : null;
+  let litr = 1, source = 'default';
+  if (c && c.volumeL != null && c.volumeL !== '' && Number(c.volumeL) > 0) { litr = Number(c.volumeL); source = 'sku-volume'; }
+  else if (ps && ps.volumeL != null && ps.volumeL !== '' && Number(ps.volumeL) > 0) { litr = Number(ps.volumeL); source = 'product-volume'; }
+  const days = STORAGE_DEFAULT_DAYS;
+  return { val: litr * STORAGE_SOM_PER_LITER_DAY * days, source, litr, days };
 }
 
 // 3.4/3.5: Tannarx manbai ustuvorligi — SKU qo'lda > SKU turi > mahsulot qo'lda > mahsulot turi > bog'lanmagan
@@ -974,7 +1002,7 @@ async function generateReportText(shopId) {
     products.forEach(p => (p.skuList || []).forEach(s => { lifeSold += s.quantitySold || 0; lifeReturned += s.quantityReturned || 0; }));
     salesSection = `⏳ Kunlik sotuv ma'lumoti yig'ilmoqda (ertadan boshlab aniq bo'ladi — hozir ${delta.snapshotCount} ta kunlik snapshot bor).\n\n📊 *Boshidan beri jami* (umriy hisoblagich, kunlik emas):\n🛍️ Sotilgan: ${lifeSold.toLocaleString('uz-UZ')} dona\n↩️ Qaytarilgan: ${lifeReturned.toLocaleString('uz-UZ')} dona`;
   } else {
-    let profit = 0, revenue = 0, unmapped = 0;
+    let profit = 0, revenue = 0, unmapped = 0, totalStorage = 0;
     for (const skuId of Object.keys(delta.perSku)) {
       const d = delta.perSku[skuId];
       if (d.soldDelta === 0) continue;
@@ -984,10 +1012,16 @@ async function generateReportText(shopId) {
       const productId = product ? product.productId : null;
       const tInfo = resolveTannarx(skuId, productId); // 3.4/3.5: SKU/mahsulot qo'lda yoki turi
       if (!sku || tInfo.source === 'unmapped') { unmapped++; continue; }
-      const perUnit = price - price * (commissionPct(skuId, sku, productId) / 100) - logisticsCost(skuId, productId) - tInfo.tannarx;
+      // 4.3: yagona formula — sotuv_narxi − komissiya − logistika − saqlash − reklama/dona − tannarx
+      const logi = resolveLogistics(skuId, productId).val;
+      const storage = resolveStorage(skuId, productId).val;
+      const dailyBudget = (syncedState.costs[skuId] || {}).budget || 0;
+      const adPerUnit = dailyBudget > 0 ? dailyBudget / d.soldDelta : 0; // kunlik byudjet / kunlik sotilgan
+      const perUnit = price - price * (commissionPct(skuId, sku, productId) / 100) - logi - storage - adPerUnit - tInfo.tannarx;
       profit += perUnit * d.soldDelta;
+      totalStorage += storage * d.soldDelta;
     }
-    salesSection = `🛍️ Kechagi sotilgan: ${delta.totalSold.toLocaleString('uz-UZ')} dona\n↩️ Kechagi qaytarilgan: ${delta.totalReturned.toLocaleString('uz-UZ')} dona\n🏦 Kechagi daromad: ${revenue.toLocaleString('uz-UZ')} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${profit.toLocaleString('uz-UZ')} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}`;
+    salesSection = `🛍️ Kechagi sotilgan: ${delta.totalSold.toLocaleString('uz-UZ')} dona\n↩️ Kechagi qaytarilgan: ${delta.totalReturned.toLocaleString('uz-UZ')} dona\n🏦 Kechagi daromad: ${revenue.toLocaleString('uz-UZ')} so'm\n📦 Kechagi saqlash xarajati: ${totalStorage.toLocaleString('uz-UZ')} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${profit.toLocaleString('uz-UZ')} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}`;
   }
 
   // Xarajatlar — source bo'yicha (2.3)

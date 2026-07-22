@@ -380,14 +380,41 @@ ${urgentSection}
       return { pct: 18, source: 'default' };
     }
 
-    // 3.2/3.4: Logistika — SKU qo'lda > mahsulot qo'lda > default 5250 (eski size-based mantiq olib tashlandi).
-    // Qaytaradi: { val, source }
+    // 4.1: Uzum'ning 2026-05-04'dan beri ishlatayotgan hajm-asosli logistika formulasi.
+    // 1 litrgacha 5250 so'm, har qo'shimcha litr +250 so'm, maksimal 50000 so'm. Hajm yuqoriga yaxlitlanadi.
+    function logisticsFormula(litr) {
+      return Math.min(50000, 5250 + 250 * (Math.ceil(litr) - 1));
+    }
+
+    // 3.2/3.4/4.1: Logistika — SKU qo'lda narx > mahsulot qo'lda narx > SKU hajm > mahsulot hajm > default (hajm yo'q, 1 litr).
+    // Qaytaradi: { val, source, litr? }
     function resolveLogistics(skuId, productId) {
       const c = state.costs[skuId];
       if (c && c.logisticsCost != null && c.logisticsCost !== '') return { val: Number(c.logisticsCost), source: 'sku-manual' };
       const ps = productId != null ? state.productSettings[productId] : null;
       if (ps && ps.logisticsCost != null && ps.logisticsCost !== '') return { val: Number(ps.logisticsCost), source: 'product-manual' };
-      return { val: 5250, source: 'default' };
+      if (c && c.volumeL != null && c.volumeL !== '' && Number(c.volumeL) > 0) {
+        const litr = Number(c.volumeL);
+        return { val: logisticsFormula(litr), source: 'sku-volume', litr };
+      }
+      if (ps && ps.volumeL != null && ps.volumeL !== '' && Number(ps.volumeL) > 0) {
+        const litr = Number(ps.volumeL);
+        return { val: logisticsFormula(litr), source: 'product-volume', litr };
+      }
+      return { val: 5250, source: 'default', litr: 1 };
+    }
+
+    // 4.2: Saqlash xarajati — 1 litr = 12 so'm/kun, 30 kun. Hajm bo'lmasa 1 litr deb hisoblanadi.
+    const STORAGE_SOM_PER_LITER_DAY = 12;
+    const STORAGE_DEFAULT_DAYS = 30;
+    function resolveStorage(skuId, productId) {
+      const c = state.costs[skuId];
+      const ps = productId != null ? state.productSettings[productId] : null;
+      let litr = 1, source = 'default';
+      if (c && c.volumeL != null && c.volumeL !== '' && Number(c.volumeL) > 0) { litr = Number(c.volumeL); source = 'sku-volume'; }
+      else if (ps && ps.volumeL != null && ps.volumeL !== '' && Number(ps.volumeL) > 0) { litr = Number(ps.volumeL); source = 'product-volume'; }
+      const days = STORAGE_DEFAULT_DAYS;
+      return { val: litr * STORAGE_SOM_PER_LITER_DAY * days, source, litr, days };
     }
 
     // 3.4/3.5: Tannarx manbai ustuvorligi — SKU qo'lda > SKU turi > mahsulot qo'lda > mahsulot turi > bog'lanmagan
@@ -418,6 +445,7 @@ ${urgentSection}
       if (source === 'sku-manual') return ' ✏️';
       if (source === 'product-manual') return ' 📦✏️';
       if (source === 'product-type') return ' 📦';
+      if (source === 'product-volume') return ' 📦';
       return '';
     }
 
@@ -773,15 +801,36 @@ ${urgentSection}
             <input type="number" step="0.1" id="sku-commission-input" value="${current.commissionPercent != null ? current.commissionPercent : ''}" placeholder="18" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
           </div>
           <div class="flex flex-col gap-1.5">
-            <label class="text-xs text-slate-400 font-medium">Yetkazib berish (so'm/dona) — bo'sh qoldirilsa 5250:</label>
-            <input type="number" id="sku-logistics-input" value="${current.logisticsCost != null ? current.logisticsCost : ''}" placeholder="5250" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+            <label class="text-xs text-slate-400 font-medium">Hajm (litr) — logistika va saqlash shundan hisoblanadi:</label>
+            <input type="number" step="0.01" id="sku-volume-input" value="${current.volumeL != null ? current.volumeL : ''}" placeholder="Masalan: 1.6 (hajm kiritilmasa 1 litr deb hisoblanadi)" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+            <div class="flex items-center gap-1.5 mt-0.5">
+              <input type="number" step="0.1" id="sku-dim-l" placeholder="uz (sm)" class="w-1/3 p-2 rounded-lg bg-darkBg border border-darkBorder text-[11px] text-slate-300">
+              <input type="number" step="0.1" id="sku-dim-w" placeholder="ken (sm)" class="w-1/3 p-2 rounded-lg bg-darkBg border border-darkBorder text-[11px] text-slate-300">
+              <input type="number" step="0.1" id="sku-dim-h" placeholder="bal (sm)" class="w-1/3 p-2 rounded-lg bg-darkBg border border-darkBorder text-[11px] text-slate-300">
+              <button type="button" onclick="calcVolumeFromDims()" class="shrink-0 text-[10px] bg-slate-800 border border-slate-700 text-slate-300 px-2 py-2 rounded-lg hover:text-brand">Hisobla</button>
+            </div>
+            <span class="text-[10px] text-slate-500">Logistika: min(50000, 5250 + 250 × (yaxlitlangan_litr − 1)) | Saqlash: litr × 12 so'm × 30 kun</span>
           </div>
-          ${isProduct ? `<div class="text-[10px] text-slate-500 bg-darkBg/50 rounded-lg p-2 border border-darkBorder">📦 Bu sozlama barcha ranglarga (SKU'larga) tarqaladi. Istalgan rangni "Bog'lash / Sozlash" orqali alohida sozlasangiz, o'sha rang uchun bu sozlama ustidan yoziladi.</div>` : ''}
+          <div class="flex flex-col gap-1.5">
+            <label class="text-xs text-slate-400 font-medium">Yetkazib berish (so'm/dona, qo'lda) — bo'sh qoldirilsa hajmdan hisoblanadi:</label>
+            <input type="number" id="sku-logistics-input" value="${current.logisticsCost != null ? current.logisticsCost : ''}" placeholder="Masalan: 5250" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+          </div>
+          ${isProduct ? `<div class="text-[10px] text-slate-500 bg-darkBg/50 rounded-lg p-2 border border-darkBorder">📦 Bu sozlama barcha ranglarga (SKU'larga) tarqaladi (hajm ham). Istalgan rangni "Bog'lash / Sozlash" orqali alohida sozlasangiz, o'sha rang uchun bu sozlama ustidan yoziladi.</div>` : ''}
           <button onclick="saveCostModal()" class="mt-2 w-full bg-brand text-xs font-bold py-2.5 rounded-xl text-darkBg badge-glow hover:bg-brandDark transition">
             Saqlash va Hisoblash
           </button>
         </div>
       `;
+    }
+
+    // 4.1: uzunlik/kenglik/balandlik (sm) → hajm (litr) avtomatik hisoblash: (u×k×b)/1000
+    function calcVolumeFromDims() {
+      const l = parseFloat(document.getElementById('sku-dim-l').value) || 0;
+      const w = parseFloat(document.getElementById('sku-dim-w').value) || 0;
+      const h = parseFloat(document.getElementById('sku-dim-h').value) || 0;
+      if (l <= 0 || w <= 0 || h <= 0) return alert("Uzunlik, kenglik va balandlikni kiriting (sm).");
+      const litr = (l * w * h) / 1000;
+      document.getElementById('sku-volume-input').value = litr.toFixed(2);
     }
 
     // Tannarx select'ida "Qo'lda kiritish" tanlanganda tannarx maydonini ko'rsatadi/yashiradi
@@ -800,6 +849,7 @@ ${urgentSection}
       const budget = parseInt(document.getElementById('sku-ad-input').value) || 0;
       const comRaw = document.getElementById('sku-commission-input').value.trim();
       const logRaw = document.getElementById('sku-logistics-input').value.trim();
+      const volRaw = document.getElementById('sku-volume-input').value.trim();
       const isManual = selectedValue === '__manual__';
       const manualCostInput = document.getElementById('sku-manual-cost-input');
       const manualCostRaw = (isManual && manualCostInput) ? manualCostInput.value.trim() : '';
@@ -807,6 +857,7 @@ ${urgentSection}
 
       const commissionPercent = comRaw === '' ? null : Number(comRaw);
       const logisticsCost = logRaw === '' ? null : Number(logRaw);
+      const volumeL = volRaw === '' ? null : Number(volRaw);
 
       if (mode === 'sku') {
         if (isManual) {
@@ -816,15 +867,16 @@ ${urgentSection}
         } else {
           delete state.skuMappings[targetId];
         }
-        state.costs[targetId] = { budget, commissionPercent, logisticsCost, manualCost };
+        state.costs[targetId] = { budget, commissionPercent, logisticsCost, manualCost, volumeL };
       } else {
-        // 3.4: mahsulot darajasi — barcha ranglarga tarqaladi
+        // 3.4: mahsulot darajasi — barcha ranglarga tarqaladi (4.1: hajm ham meros bo'ladi)
         state.productSettings[targetId] = {
           mappedTypeId: isManual ? null : (selectedValue || null),
           manualCost,
           budget,
           commissionPercent,
-          logisticsCost
+          logisticsCost,
+          volumeL
         };
       }
       saveState();
@@ -1177,9 +1229,10 @@ ${urgentSection}
             const commission = sellPrice * (comPercent / 100);
 
             const costSetting = state.costs[sku.skuId] || { budget: 0 };
-            const logi = resolveLogistics(sku.skuId, p.productId); // { val, source } (3.2/3.4)
+            const logi = resolveLogistics(sku.skuId, p.productId); // { val, source, litr } (3.2/3.4/4.1)
             const logistics = logi.val;
-            const storage = 2000; // Estimated 2k Storage UZS per item
+            const stor = resolveStorage(sku.skuId, p.productId); // { val, source, litr, days } (4.2)
+            const storage = stor.val;
             const dailyBudget = costSetting.budget; // "Reklama byudjeti (kuniga, so'm)"
             // oxirgi 30 kunda shu SKU necha dona sotilgani
             const unitsSold = state.orders.filter(o => o.skuId === sku.skuId).reduce((acc, o) => acc + (o.quantity || 1), 0);
@@ -1187,6 +1240,7 @@ ${urgentSection}
             const noSalesWithSpend = dailyBudget > 0 && unitsSold === 0;
             const tannarx = tInfo.tannarx;
 
+            // 4.3: yagona formula — sotuv_narxi − komissiya − logistika − saqlash − reklama/dona − tannarx
             const profit = sellPrice - commission - logistics - storage - adCostPerUnit - tannarx;
             const pmMargin = sellPrice > 0 ? ((profit / sellPrice) * 100).toFixed(1) : 0;
             const profitColor = profit >= 0 ? "text-brand" : "text-rose-400";
@@ -1229,6 +1283,14 @@ ${urgentSection}
                   <div class="flex justify-between">
                     <span class="text-slate-400">Komissiya (${comPercent}%${sourceBadge(com.source)}):</span>
                     <span class="font-semibold text-slate-200">${commission.toLocaleString()} so'm</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-slate-400">Logistika (${logi.litr != null ? logi.litr + ' l' : 'qo\'lda'}${sourceBadge(logi.source)}${logi.source === 'default' ? ' — hajm kiritilmagan' : ''}):</span>
+                    <span class="font-semibold text-slate-200">${logistics.toLocaleString()} so'm</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-slate-400">Saqlash (${stor.litr} l × 12 × ${stor.days}k${sourceBadge(stor.source)}):</span>
+                    <span class="font-semibold text-slate-200">${storage.toLocaleString()} so'm</span>
                   </div>
                   <div class="flex justify-between col-span-2 border-t border-darkBorder/30 pt-1.5 flex justify-between">
                     <span class="text-slate-400 font-semibold text-xs">Kartochka Sof_foydasi:</span>
@@ -1426,6 +1488,7 @@ ${urgentSection}
       let totalPayout = 0;
       let totalComsVal = 0;
       let totalShipping = 0;
+      let totalStorage = 0;
       let totalMarketingVal = 0;
       let totalMappedCostSum = 0;
 
@@ -1447,7 +1510,8 @@ ${urgentSection}
           totalMappedCostSum += 45000 * (o.quantity || 1); // fallback
         }
 
-        totalShipping += resolveLogistics(o.skuId, productIdForSku).val * (o.quantity || 1); // 3.2/3.4: qo'lda yoki default
+        totalShipping += resolveLogistics(o.skuId, productIdForSku).val * (o.quantity || 1); // 3.2/3.4/4.1: qo'lda yoki hajmdan
+        totalStorage += resolveStorage(o.skuId, productIdForSku).val * (o.quantity || 1); // 4.2: saqlash
       });
 
       // Reklama: kunlik byudjet * 30 kun, faqat shu SKU oxirgi 30 kunda sotilgan bo'lsa hisoblanadi
@@ -1475,7 +1539,8 @@ ${urgentSection}
         realExpensesTotal += amt;
       });
 
-      const totalProfit = totalPayout - totalShipping - realExpensesTotal - totalMappedCostSum;
+      // 4.3: yagona formula — payout allaqachon komissiyani chegirib bergan, shunga logistika/saqlash/reklama/tannarx qo'shimcha chegiriladi
+      const totalProfit = totalPayout - totalShipping - totalStorage - totalMarketingVal - realExpensesTotal - totalMappedCostSum;
       const profitColor = totalProfit >= 0 ? 'text-brand' : 'text-rose-400';
 
       root.innerHTML = `
@@ -1514,6 +1579,14 @@ ${urgentSection}
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Hisoblangan Tannarx (Xarid):</span>
                 <span class="text-slate-100 font-mono">${totalMappedCostSum.toLocaleString()} so'm</span>
+              </div>
+              <div class="flex justify-between text-xs py-1">
+                <span class="text-slate-400">Logistika (hajm asosida, 4.1):</span>
+                <span class="text-slate-100 font-mono">${totalShipping.toLocaleString()} so'm</span>
+              </div>
+              <div class="flex justify-between text-xs py-1">
+                <span class="text-slate-400">Saqlash (hajm × 12 so'm × 30 kun, 4.2):</span>
+                <span class="text-slate-100 font-mono">${totalStorage.toLocaleString()} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Marketing & Reklama (byudjet):</span>
