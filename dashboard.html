@@ -170,6 +170,7 @@
       productTypes: JSON.parse(localStorage.getItem('uz_product_types')) || defaultProductTypes,
       skuMappings: JSON.parse(localStorage.getItem('uz_sku_mappings')) || defaultSkuMappings,
       costs: JSON.parse(localStorage.getItem('uz_costs')) || defaultCosts,
+      productSettings: JSON.parse(localStorage.getItem('uz_product_settings')) || {}, // 3.4: mahsulot darajasidagi sozlama
       productFilter: localStorage.getItem('uz_product_filter') || 'active', // Kartochkalar filtri: 'active'|'all'|'banned'|'depleted'
       cachedUzumProducts: null,
       orders: [],
@@ -199,6 +200,7 @@
             productTypes: state.productTypes,
             skuMappings: state.skuMappings,
             costs: state.costs,
+            productSettings: state.productSettings,
             shops: state.shops,
             activeShop: state.activeShop
           })
@@ -222,6 +224,7 @@
         if ((srv.productTypes || []).length >= (state.productTypes || []).length && (srv.productTypes || []).length > 0) { state.productTypes = srv.productTypes; changed = true; }
         if (Object.keys(srv.skuMappings || {}).length >= Object.keys(state.skuMappings || {}).length && Object.keys(srv.skuMappings || {}).length > 0) { state.skuMappings = srv.skuMappings; changed = true; }
         if (Object.keys(srv.costs || {}).length >= Object.keys(state.costs || {}).length && Object.keys(srv.costs || {}).length > 0) { state.costs = srv.costs; changed = true; }
+        if (Object.keys(srv.productSettings || {}).length >= Object.keys(state.productSettings || {}).length && Object.keys(srv.productSettings || {}).length > 0) { state.productSettings = srv.productSettings; changed = true; }
         if (srv.activeShop && !state.shops.find(s => s.shopId === state.activeShop)) { state.activeShop = srv.activeShop; changed = true; }
         if (changed) {
           // faqat localStorage'ni yangilaymiz (serverga qayta yubormaymiz — u allaqachon manba)
@@ -230,6 +233,7 @@
           localStorage.setItem('uz_product_types', JSON.stringify(state.productTypes));
           localStorage.setItem('uz_sku_mappings', JSON.stringify(state.skuMappings));
           localStorage.setItem('uz_costs', JSON.stringify(state.costs));
+          localStorage.setItem('uz_product_settings', JSON.stringify(state.productSettings));
           console.log("[SETTINGS] Serverdagi sozlamalar localStorage'ga birlashtirildi (server to'liqroq edi).");
         }
       } catch (e) {
@@ -247,6 +251,7 @@
             productTypes: state.productTypes,
             skuMappings: state.skuMappings,
             costs: state.costs,
+            productSettings: state.productSettings,
             shops: state.shops,
             activeShop: state.activeShop,
             products: state.cachedUzumProducts,
@@ -353,6 +358,7 @@ ${urgentSection}
       localStorage.setItem('uz_product_types', JSON.stringify(state.productTypes));
       localStorage.setItem('uz_sku_mappings', JSON.stringify(state.skuMappings));
       localStorage.setItem('uz_costs', JSON.stringify(state.costs));
+      localStorage.setItem('uz_product_settings', JSON.stringify(state.productSettings));
       syncSettingsToServer(); // sozlamalar — fetch'dan mustaqil, har doim yuboriladi
     }
 
@@ -362,21 +368,76 @@ ${urgentSection}
       return idx ? idx.shopTitle : 'Uzum Store';
     }
 
-    // 3.1: Komissiya ustuvorligi — (a) qo'lda kiritilgan, (b) SKU/API commissionApi, (d) 18% default.
+    // 3.1/3.4: Komissiya ustuvorligi — (a) SKU qo'lda, (b) mahsulot qo'lda, (c) SKU/API commissionApi, (d) 18% default.
     // Eski kategoriya-taxmini (17/20/25%) butunlay olib tashlandi — noto'g'ri edi.
-    // Qaytaradi: { pct, manual } — manual bo'lsa kartochkada belgi ko'rsatiladi.
-    function resolveCommission(skuId, sku) {
+    // Qaytaradi: { pct, source } — source: 'sku-manual'|'product-manual'|'api'|'default'
+    function resolveCommission(skuId, sku, productId) {
       const c = state.costs[skuId];
-      if (c && c.commissionPercent != null && c.commissionPercent !== '') return { pct: Number(c.commissionPercent), manual: true };
-      if (sku && sku.commissionApi != null) return { pct: Number(sku.commissionApi), manual: false };
-      return { pct: 18, manual: false };
+      if (c && c.commissionPercent != null && c.commissionPercent !== '') return { pct: Number(c.commissionPercent), source: 'sku-manual' };
+      const ps = productId != null ? state.productSettings[productId] : null;
+      if (ps && ps.commissionPercent != null && ps.commissionPercent !== '') return { pct: Number(ps.commissionPercent), source: 'product-manual' };
+      if (sku && sku.commissionApi != null) return { pct: Number(sku.commissionApi), source: 'api' };
+      return { pct: 18, source: 'default' };
     }
 
-    // 3.2: Logistika — qo'lda kiritilgan yoki default 5250 (eski size-based mantiq olib tashlandi).
-    function resolveLogistics(skuId) {
+    // 3.2/3.4: Logistika — SKU qo'lda > mahsulot qo'lda > default 5250 (eski size-based mantiq olib tashlandi).
+    // Qaytaradi: { val, source }
+    function resolveLogistics(skuId, productId) {
       const c = state.costs[skuId];
-      if (c && c.logisticsCost != null && c.logisticsCost !== '') return Number(c.logisticsCost);
-      return 5250;
+      if (c && c.logisticsCost != null && c.logisticsCost !== '') return { val: Number(c.logisticsCost), source: 'sku-manual' };
+      const ps = productId != null ? state.productSettings[productId] : null;
+      if (ps && ps.logisticsCost != null && ps.logisticsCost !== '') return { val: Number(ps.logisticsCost), source: 'product-manual' };
+      return { val: 5250, source: 'default' };
+    }
+
+    // 3.4/3.5: Tannarx manbai ustuvorligi — SKU qo'lda > SKU turi > mahsulot qo'lda > mahsulot turi > bog'lanmagan
+    // Qaytaradi: { tannarx, source, type, tracksStock }
+    function resolveTannarx(skuId, productId) {
+      const skuCost = state.costs[skuId];
+      if (skuCost && skuCost.manualCost != null && skuCost.manualCost !== '') {
+        return { tannarx: Number(skuCost.manualCost), source: 'sku-manual', type: null, tracksStock: false };
+      }
+      const skuTypeId = state.skuMappings[skuId];
+      if (skuTypeId) {
+        const type = state.productTypes.find(t => t.id === skuTypeId);
+        if (type) return { tannarx: type.cost, source: 'sku-type', type, tracksStock: true };
+      }
+      const ps = productId != null ? state.productSettings[productId] : null;
+      if (ps) {
+        if (ps.manualCost != null && ps.manualCost !== '') return { tannarx: Number(ps.manualCost), source: 'product-manual', type: null, tracksStock: false };
+        if (ps.mappedTypeId) {
+          const type = state.productTypes.find(t => t.id === ps.mappedTypeId);
+          if (type) return { tannarx: type.cost, source: 'product-type', type, tracksStock: true };
+        }
+      }
+      return { tannarx: 0, source: 'unmapped', type: null, tracksStock: false };
+    }
+
+    // Manba belgisi: 📦 = mahsulot darajasidan meros, ✏️ = qo'lda kiritilgan (shu darajada)
+    function sourceBadge(source) {
+      if (source === 'sku-manual') return ' ✏️';
+      if (source === 'product-manual') return ' 📦✏️';
+      if (source === 'product-type') return ' 📦';
+      return '';
+    }
+
+    // "Asl tovar turi" qatorida ko'rsatiladigan matn (3.4/3.5)
+    function tannarxLabel(info) {
+      if (info.source === 'sku-manual' || info.source === 'product-manual') {
+        return `✍️ Qo'lda: ${info.tannarx.toLocaleString('uz-UZ')} so'm${sourceBadge(info.source)}`;
+      }
+      if (info.source === 'sku-type' || info.source === 'product-type') {
+        return `${info.type.name}${sourceBadge(info.source)}`;
+      }
+      return "Kanalga bog'lanmagan ⚠️";
+    }
+
+    // Berilgan SKU qaysi mahsulotga (productId) tegishli ekanini topadi (Moliya bo'limida kerak)
+    function findProductIdForSku(skuId) {
+      for (const p of (state.cachedUzumProducts || [])) {
+        if ((p.skuList || []).some(s => String(s.skuId) === String(skuId))) return p.productId;
+      }
+      return null;
     }
 
     // Kartochkalar filtri (Uzum ilovasidagidek): mahsulot berilgan filtrga tushadimi?
@@ -547,43 +608,18 @@ ${urgentSection}
       else if (type === 'mapping-modal') {
         const skuId = extraMeta;
         title.textContent = `Kartochkani bog'lash`;
-        
-        let selectOptions = state.productTypes.map(t => `
-          <option value="${t.id}" ${state.skuMappings[skuId] === t.id ? 'selected' : ''}>${t.name} (Tannarxi: ${t.cost.toLocaleString('uz-UZ')} so'm)</option>
-        `).join('');
-
-        const currentCostConfig = state.costs[skuId] || { budget: 0 };
-        // SKU'ning API komissiyasini topamiz (bo'sh qoldirilsa shu ishlatiladi)
-        let apiCom = null;
-        (state.cachedUzumProducts || []).forEach(p => (p.skuList || []).forEach(s => { if (String(s.skuId) === String(skuId) && s.commissionApi != null) apiCom = s.commissionApi; }));
-        const comHint = apiCom != null ? `API: ${apiCom}%` : 'API qiymati yo\'q';
-
-        body.innerHTML = `
-          <div class="flex flex-col gap-4">
-            <div class="flex flex-col gap-1.5">
-              <label class="text-xs text-slate-400 font-medium">Asl Tovar Turi:</label>
-              <select id="sku-map-select" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
-                <option value="">Yaratilmagan / Bog'lanmagan</option>
-                ${selectOptions}
-              </select>
-            </div>
-            <div class="flex flex-col gap-1.5">
-              <label class="text-xs text-slate-400 font-medium">Reklama byudjeti (kuniga, so'm):</label>
-              <input type="number" id="sku-ad-input" value="${currentCostConfig.budget || 0}" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
-            </div>
-            <div class="flex flex-col gap-1.5">
-              <label class="text-xs text-slate-400 font-medium">Komissiya (%) — bo'sh qoldirilsa ${comHint} ishlatiladi:</label>
-              <input type="number" step="0.1" id="sku-commission-input" value="${currentCostConfig.commissionPercent != null ? currentCostConfig.commissionPercent : ''}" placeholder="${apiCom != null ? apiCom : 18}" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
-            </div>
-            <div class="flex flex-col gap-1.5">
-              <label class="text-xs text-slate-400 font-medium">Yetkazib berish (so'm/dona) — bo'sh qoldirilsa 5250:</label>
-              <input type="number" id="sku-logistics-input" value="${currentCostConfig.logisticsCost != null ? currentCostConfig.logisticsCost : ''}" placeholder="5250" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
-            </div>
-            <button onclick="saveSkuMapping('${skuId}')" class="mt-2 w-full bg-brand text-xs font-bold py-2.5 rounded-xl text-darkBg badge-glow hover:bg-brandDark transition">
-              Saqlash va Hisoblash
-            </button>
-          </div>
-        `;
+        body.dataset.mode = 'sku';
+        body.dataset.targetId = skuId;
+        body.innerHTML = renderCostModalBody('sku', skuId);
+      }
+      else if (type === 'product-settings-modal') {
+        const productId = extraMeta;
+        const product = (state.cachedUzumProducts || []).find(p => String(p.productId) === String(productId));
+        const colorCount = product ? (product.skuList || []).length : 0;
+        title.textContent = `Barcha ranglar uchun sozlash (${colorCount} ta rang)`;
+        body.dataset.mode = 'product';
+        body.dataset.targetId = productId;
+        body.innerHTML = renderCostModalBody('product', productId);
       }
       else if (type === 'add-type-modal') {
         const editId = extraMeta;
@@ -691,24 +727,106 @@ ${urgentSection}
     }
 
     // Mapping SKU functions
-    function saveSkuMapping(skuId) {
-      const selectedTypeId = document.getElementById('sku-map-select').value;
+    // 3.4/3.5: SKU va mahsulot darajasidagi sozlash oynasi uchun UMUMIY HTML generator.
+    // mode: 'sku' (bitta rang) yoki 'product' (barcha ranglar, productId bo'yicha).
+    function renderCostModalBody(mode, targetId) {
+      const isProduct = mode === 'product';
+      const current = (isProduct ? state.productSettings[targetId] : state.costs[targetId]) || {};
+      const currentTypeId = isProduct ? current.mappedTypeId : state.skuMappings[targetId];
+      const isManualMode = current.manualCost != null && current.manualCost !== '';
+      const selectValue = isManualMode ? '__manual__' : (currentTypeId || '');
+
+      let selectOptions = state.productTypes.map(t => `
+        <option value="${t.id}" ${selectValue === t.id ? 'selected' : ''}>${t.name} (Tannarxi: ${t.cost.toLocaleString('uz-UZ')} so'm)</option>
+      `).join('');
+
+      let comHint = '18%';
+      if (!isProduct) {
+        let apiCom = null;
+        (state.cachedUzumProducts || []).forEach(p => (p.skuList || []).forEach(s => { if (String(s.skuId) === String(targetId) && s.commissionApi != null) apiCom = s.commissionApi; }));
+        comHint = apiCom != null ? `API: ${apiCom}%` : "API qiymati yo'q, 18%";
+      } else {
+        comHint = "har SKU'ning o'z API qiymati (yoki 18%)";
+      }
+
+      return `
+        <div class="flex flex-col gap-4">
+          <div class="flex flex-col gap-1.5">
+            <label class="text-xs text-slate-400 font-medium">Asl Tovar Turi:</label>
+            <select id="sku-map-select" onchange="onCostModalTypeChange()" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <option value="">Yaratilmagan / Bog'lanmagan</option>
+              ${selectOptions}
+              <option value="__manual__" ${selectValue === '__manual__' ? 'selected' : ''}>✍️ Qo'lda kiritish (zaxirasiz)</option>
+            </select>
+          </div>
+          <div id="sku-manual-cost-wrap" class="flex flex-col gap-1.5" style="${isManualMode ? '' : 'display:none'}">
+            <label class="text-xs text-slate-400 font-medium">Tannarx (so'm/dona):</label>
+            <input type="number" id="sku-manual-cost-input" value="${isManualMode ? current.manualCost : ''}" placeholder="Masalan: 45000" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+            <span class="text-[10px] text-amber-400/80">⚠️ Zaxira kuzatilmaydi — faqat foyda hisobida ishlatiladi.</span>
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <label class="text-xs text-slate-400 font-medium">Reklama byudjeti (kuniga, so'm):</label>
+            <input type="number" id="sku-ad-input" value="${current.budget || 0}" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <label class="text-xs text-slate-400 font-medium">Komissiya (%) — bo'sh qoldirilsa ${comHint} ishlatiladi:</label>
+            <input type="number" step="0.1" id="sku-commission-input" value="${current.commissionPercent != null ? current.commissionPercent : ''}" placeholder="18" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <label class="text-xs text-slate-400 font-medium">Yetkazib berish (so'm/dona) — bo'sh qoldirilsa 5250:</label>
+            <input type="number" id="sku-logistics-input" value="${current.logisticsCost != null ? current.logisticsCost : ''}" placeholder="5250" class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+          </div>
+          ${isProduct ? `<div class="text-[10px] text-slate-500 bg-darkBg/50 rounded-lg p-2 border border-darkBorder">📦 Bu sozlama barcha ranglarga (SKU'larga) tarqaladi. Istalgan rangni "Bog'lash / Sozlash" orqali alohida sozlasangiz, o'sha rang uchun bu sozlama ustidan yoziladi.</div>` : ''}
+          <button onclick="saveCostModal()" class="mt-2 w-full bg-brand text-xs font-bold py-2.5 rounded-xl text-darkBg badge-glow hover:bg-brandDark transition">
+            Saqlash va Hisoblash
+          </button>
+        </div>
+      `;
+    }
+
+    // Tannarx select'ida "Qo'lda kiritish" tanlanganda tannarx maydonini ko'rsatadi/yashiradi
+    function onCostModalTypeChange() {
+      const val = document.getElementById('sku-map-select').value;
+      document.getElementById('sku-manual-cost-wrap').style.display = val === '__manual__' ? '' : 'none';
+    }
+
+    // 3.4/3.5: SKU (mode='sku') yoki mahsulot (mode='product') darajasidagi sozlamani saqlaydi
+    function saveCostModal() {
+      const body = document.getElementById('modal-body');
+      const mode = body.dataset.mode;
+      const targetId = body.dataset.targetId;
+
+      const selectedValue = document.getElementById('sku-map-select').value;
       const budget = parseInt(document.getElementById('sku-ad-input').value) || 0;
       const comRaw = document.getElementById('sku-commission-input').value.trim();
       const logRaw = document.getElementById('sku-logistics-input').value.trim();
+      const isManual = selectedValue === '__manual__';
+      const manualCostInput = document.getElementById('sku-manual-cost-input');
+      const manualCostRaw = (isManual && manualCostInput) ? manualCostInput.value.trim() : '';
+      const manualCost = (isManual && manualCostRaw !== '') ? Number(manualCostRaw) : null;
 
-      if (selectedTypeId) {
-        state.skuMappings[skuId] = selectedTypeId;
+      const commissionPercent = comRaw === '' ? null : Number(comRaw);
+      const logisticsCost = logRaw === '' ? null : Number(logRaw);
+
+      if (mode === 'sku') {
+        if (isManual) {
+          delete state.skuMappings[targetId]; // manual va turga bog'lash bir-birini istisno qiladi
+        } else if (selectedValue) {
+          state.skuMappings[targetId] = selectedValue;
+        } else {
+          delete state.skuMappings[targetId];
+        }
+        state.costs[targetId] = { budget, commissionPercent, logisticsCost, manualCost };
       } else {
-        delete state.skuMappings[skuId];
+        // 3.4: mahsulot darajasi — barcha ranglarga tarqaladi
+        state.productSettings[targetId] = {
+          mappedTypeId: isManual ? null : (selectedValue || null),
+          manualCost,
+          budget,
+          commissionPercent,
+          logisticsCost
+        };
       }
-
-      // Bo'sh qoldirilsa null — resolver API/default qiymatini ishlatadi (3.1/3.2)
-      state.costs[skuId] = {
-        budget,
-        commissionPercent: comRaw === '' ? null : Number(comRaw),
-        logisticsCost: logRaw === '' ? null : Number(logRaw)
-      };
       saveState();
       closeModal();
       refreshData();
@@ -1049,25 +1167,25 @@ ${urgentSection}
           const pImage = p.photos?.[0]?.photoKey || 'https://via.placeholder.com/60';
 
           let skuSection = p.skuList.map(sku => {
-            const mappedTypeId = state.skuMappings[sku.skuId];
-            const mappedType = state.productTypes.find(t => t.id === mappedTypeId);
-            const mappedName = mappedType ? mappedType.name : "Kanalga bog'lanmagan ⚠️";
+            const tInfo = resolveTannarx(sku.skuId, p.productId); // 3.4/3.5: SKU/mahsulot qo'lda yoki turi
+            const mappedName = tannarxLabel(tInfo);
 
             // Analytics
             const sellPrice = sku.purchasePrice;
-            const com = resolveCommission(sku.skuId, sku); // { pct, manual } (3.1)
+            const com = resolveCommission(sku.skuId, sku, p.productId); // { pct, source } (3.1/3.4)
             const comPercent = com.pct;
             const commission = sellPrice * (comPercent / 100);
 
-            const costSetting = state.costs[sku.skuId] || { budget: 0, size: 'МГТ' };
-            const logistics = resolveLogistics(sku.skuId); // 3.2: qo'lda yoki 5250
+            const costSetting = state.costs[sku.skuId] || { budget: 0 };
+            const logi = resolveLogistics(sku.skuId, p.productId); // { val, source } (3.2/3.4)
+            const logistics = logi.val;
             const storage = 2000; // Estimated 2k Storage UZS per item
             const dailyBudget = costSetting.budget; // "Reklama byudjeti (kuniga, so'm)"
             // oxirgi 30 kunda shu SKU necha dona sotilgani
             const unitsSold = state.orders.filter(o => o.skuId === sku.skuId).reduce((acc, o) => acc + (o.quantity || 1), 0);
             const adCostPerUnit = unitsSold > 0 ? (dailyBudget * 30) / unitsSold : 0;
             const noSalesWithSpend = dailyBudget > 0 && unitsSold === 0;
-            const tannarx = mappedType ? mappedType.cost : 0;
+            const tannarx = tInfo.tannarx;
 
             const profit = sellPrice - commission - logistics - storage - adCostPerUnit - tannarx;
             const pmMargin = sellPrice > 0 ? ((profit / sellPrice) * 100).toFixed(1) : 0;
@@ -1095,6 +1213,9 @@ ${urgentSection}
                   <span>Asl tovar turi:</span>
                   <span class="font-bold text-slate-200">${mappedName}</span>
                 </div>
+                ${!tInfo.tracksStock && tInfo.source !== 'unmapped' ? `
+                  <div class="text-[9px] text-amber-400/80 -mt-1 mb-1">⚠️ Zaxira kuzatilmaydi — faqat foyda hisobida ishlatiladi</div>
+                ` : ''}
 
                 <div class="grid grid-cols-2 gap-y-1.5 gap-x-3 text-[10px] mt-2">
                   <div class="flex justify-between">
@@ -1106,7 +1227,7 @@ ${urgentSection}
                     <span class="font-bold font-mono text-slate-200">${sellPrice.toLocaleString()} so'm</span>
                   </div>
                   <div class="flex justify-between">
-                    <span class="text-slate-400">Komissiya (${comPercent}%${com.manual ? ' ✏️' : ''}):</span>
+                    <span class="text-slate-400">Komissiya (${comPercent}%${sourceBadge(com.source)}):</span>
                     <span class="font-semibold text-slate-200">${commission.toLocaleString()} so'm</span>
                   </div>
                   <div class="flex justify-between col-span-2 border-t border-darkBorder/30 pt-1.5 flex justify-between">
@@ -1143,12 +1264,18 @@ ${urgentSection}
               ` : ''}
 
               <!-- Image & Product Details Header -->
-              <div class="flex gap-3">
-                <img src="${pImage}" referrerPolicy="no-referrer" alt="${p.title}" class="w-11 h-11 object-cover rounded-xl border border-darkBorder bg-darkBg inline-block shrink-0">
-                <div class="flex flex-col gap-0.5 min-w-0">
-                  <span class="text-xs font-bold text-slate-100 truncate">${p.title}</span>
-                  <span class="text-[10px] text-slate-500">Category: ${p.category?.title || 'Boshqa'}</span>
+              <div class="flex items-start justify-between gap-2">
+                <div class="flex gap-3 min-w-0">
+                  <img src="${pImage}" referrerPolicy="no-referrer" alt="${p.title}" class="w-11 h-11 object-cover rounded-xl border border-darkBorder bg-darkBg inline-block shrink-0">
+                  <div class="flex flex-col gap-0.5 min-w-0">
+                    <span class="text-xs font-bold text-slate-100 truncate">${p.title}</span>
+                    <span class="text-[10px] text-slate-500">Category: ${p.category?.title || 'Boshqa'}</span>
+                  </div>
                 </div>
+                <!-- 3.4: mahsulot darajasida sozlash — barcha ranglarga tarqaladi -->
+                <button onclick="toggleModal('product-settings-modal', ${p.productId})" class="text-[9px] text-slate-300 bg-slate-800 border border-slate-700 px-2 py-1.5 rounded-lg font-semibold hover:text-brand hover:border-brand transition shrink-0 flex items-center gap-1 whitespace-nowrap">
+                  <i data-lucide="settings-2" class="w-3 h-3"></i> Barcha ranglar
+                </button>
               </div>
 
               <!-- SKU mappings sections list -->
@@ -1312,15 +1439,15 @@ ${urgentSection}
         totalSales += o.price * (o.quantity || 1);
         totalPayout += o.payout || (o.price * 0.8);
 
-        const mappedTypeId = state.skuMappings[o.skuId];
-        const mappedType = state.productTypes.find(t => t.id === mappedTypeId);
-        if (mappedType) {
-          totalMappedCostSum += mappedType.cost * (o.quantity || 1);
+        const productIdForSku = findProductIdForSku(o.skuId);
+        const tInfo = resolveTannarx(o.skuId, productIdForSku); // 3.4/3.5: SKU/mahsulot qo'lda yoki turi
+        if (tInfo.source !== 'unmapped') {
+          totalMappedCostSum += tInfo.tannarx * (o.quantity || 1);
         } else {
           totalMappedCostSum += 45000 * (o.quantity || 1); // fallback
         }
 
-        totalShipping += resolveLogistics(o.skuId) * (o.quantity || 1); // 3.2: qo'lda yoki 5250
+        totalShipping += resolveLogistics(o.skuId, productIdForSku).val * (o.quantity || 1); // 3.2/3.4: qo'lda yoki default
       });
 
       // Reklama: kunlik byudjet * 30 kun, faqat shu SKU oxirgi 30 kunda sotilgan bo'lsa hisoblanadi

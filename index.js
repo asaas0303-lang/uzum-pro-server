@@ -79,6 +79,7 @@ let syncedState = {
     '5701': 't3', '5702': 't3'
   },
   costs: {}, // ad spends e.g. { skuId: 10000 }
+  productSettings: {}, // 3.4: mahsulot (productId) darajasidagi sozlama — barcha ranglarga meros bo'ladi
   shops: [
     { shopId: 61122, shopTitle: 'kamera' },
     { shopId: 48589, shopTitle: 'Jaydari Bozor' },
@@ -91,7 +92,7 @@ let syncedState = {
 };
 
 // Faqat foydalanuvchi sozlamalari diskda saqlanadi (2.1: sotuv/mahsulot ma'lumoti jonli tortiladi, saqlanmaydi)
-const SETTINGS_KEYS = ['productTypes', 'skuMappings', 'costs', 'shops', 'activeShop'];
+const SETTINGS_KEYS = ['productTypes', 'skuMappings', 'costs', 'shops', 'activeShop', 'productSettings'];
 const SETTINGS_BACKUP_FILE = path.join(DATA_DIR, 'settings.backup.json');
 const SETTINGS_BACKUP_RETENTION_DAYS = 7;
 
@@ -515,7 +516,7 @@ function getDailyDelta(shopId) {
 
 // 1. Service: State sync for Bot calculations
 app.post('/api/sync-state', (req, res) => {
-  const { productTypes, skuMappings, costs, shops, activeShop, products, orders, expenses } = req.body;
+  const { productTypes, skuMappings, costs, shops, activeShop, productSettings, products, orders, expenses } = req.body;
 
   // B (server himoya): kelayotgan sozlama BO'SH (0 do'kon, 0 productType) bo'lsa,
   // va bizda mavjud sozlama bo'lsa — RAD ETAMIZ (bo'sh state saqlangan ma'lumotni o'chirmasin).
@@ -539,6 +540,7 @@ app.post('/api/sync-state', (req, res) => {
   if (costs) { syncedState.costs = costs; settingsChanged = true; }
   if (shops) { syncedState.shops = shops; settingsChanged = true; }
   if (activeShop) { syncedState.activeShop = activeShop; settingsChanged = true; }
+  if (productSettings) { syncedState.productSettings = productSettings; settingsChanged = true; }
   if (products) syncedState.products = products;
   if (orders) syncedState.orders = orders;
   if (expenses) syncedState.expenses = expenses;
@@ -865,25 +867,53 @@ async function sendTelegramMessage(token, chatId, text, replyMarkup = null) {
   }
 }
 
-// Per-SKU iqtisod (3.1): komissiya % ustuvorligi — (a) qo'lda, (b) SKU/API, (d) 18% default
-function commissionPct(skuId, sku) {
+// Per-SKU iqtisod (3.1): komissiya % ustuvorligi — (a) SKU qo'lda, (b) mahsulot qo'lda (3.4),
+// (c) SKU/API, (d) 18% default
+function commissionPct(skuId, sku, productId) {
   const c = syncedState.costs[skuId];
   if (c && c.commissionPercent != null && c.commissionPercent !== '') return Number(c.commissionPercent);
+  const ps = productId != null ? (syncedState.productSettings || {})[productId] : null;
+  if (ps && ps.commissionPercent != null && ps.commissionPercent !== '') return Number(ps.commissionPercent);
   if (sku && sku.commissionApi != null) return Number(sku.commissionApi);
   return 18; // oxirgi zaxira default (3.1)
 }
-// Logistika (3.2): qo'lda kiritilgan yoki default 5250
-function logisticsCost(skuId) {
+// Logistika (3.2): SKU qo'lda > mahsulot qo'lda (3.4) > default 5250
+function logisticsCost(skuId, productId) {
   const c = syncedState.costs[skuId];
   if (c && c.logisticsCost != null && c.logisticsCost !== '') return Number(c.logisticsCost);
+  const ps = productId != null ? (syncedState.productSettings || {})[productId] : null;
+  if (ps && ps.logisticsCost != null && ps.logisticsCost !== '') return Number(ps.logisticsCost);
   return 5250; // default (3.2)
 }
+
+// 3.4/3.5: Tannarx manbai ustuvorligi — SKU qo'lda > SKU turi > mahsulot qo'lda > mahsulot turi > bog'lanmagan
+function resolveTannarx(skuId, productId) {
+  const skuCost = syncedState.costs[skuId];
+  if (skuCost && skuCost.manualCost != null && skuCost.manualCost !== '') {
+    return { tannarx: Number(skuCost.manualCost), source: 'sku-manual' };
+  }
+  const skuTypeId = syncedState.skuMappings[skuId];
+  if (skuTypeId) {
+    const type = syncedState.productTypes.find(t => t.id === skuTypeId);
+    if (type) return { tannarx: type.cost, source: 'sku-type' };
+  }
+  const ps = productId != null ? (syncedState.productSettings || {})[productId] : null;
+  if (ps) {
+    if (ps.manualCost != null && ps.manualCost !== '') return { tannarx: Number(ps.manualCost), source: 'product-manual' };
+    if (ps.mappedTypeId) {
+      const type = syncedState.productTypes.find(t => t.id === ps.mappedTypeId);
+      if (type) return { tannarx: type.cost, source: 'product-type' };
+    }
+  }
+  return { tannarx: 0, source: 'unmapped' };
+}
+
 function findSkuInProducts(products, skuId) {
   for (const p of products) {
     const s = (p.skuList || []).find(x => String(x.skuId) === String(skuId));
-    if (s) return s;
+    if (s) return { sku: s, product: p };
   }
-  return null;
+  return { sku: null, product: null };
 }
 
 // 2.3: xarajatlarni SOURCE bo'yicha guruhlaydi (real type=OUTCOME/INCOME). Kategoriya o'ylab topilmaydi.
@@ -948,12 +978,13 @@ async function generateReportText(shopId) {
     for (const skuId of Object.keys(delta.perSku)) {
       const d = delta.perSku[skuId];
       if (d.soldDelta === 0) continue;
-      const sku = findSkuInProducts(products, skuId);
+      const { sku, product } = findSkuInProducts(products, skuId);
       const price = sku ? (sku.purchasePrice || 0) : 0;
       revenue += price * d.soldDelta;
-      const type = syncedState.productTypes.find(t => t.id === syncedState.skuMappings[skuId]);
-      if (!type || !sku) { unmapped++; continue; }
-      const perUnit = price - price * (commissionPct(skuId, sku) / 100) - logisticsCost(skuId) - type.cost;
+      const productId = product ? product.productId : null;
+      const tInfo = resolveTannarx(skuId, productId); // 3.4/3.5: SKU/mahsulot qo'lda yoki turi
+      if (!sku || tInfo.source === 'unmapped') { unmapped++; continue; }
+      const perUnit = price - price * (commissionPct(skuId, sku, productId) / 100) - logisticsCost(skuId, productId) - tInfo.tannarx;
       profit += perUnit * d.soldDelta;
     }
     salesSection = `🛍️ Kechagi sotilgan: ${delta.totalSold.toLocaleString('uz-UZ')} dona\n↩️ Kechagi qaytarilgan: ${delta.totalReturned.toLocaleString('uz-UZ')} dona\n🏦 Kechagi daromad: ${revenue.toLocaleString('uz-UZ')} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${profit.toLocaleString('uz-UZ')} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}`;
