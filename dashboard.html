@@ -194,6 +194,7 @@
       aiLoading: false,
       skuMetrics: null, // 5.1/5.2/5.4: /api/metrics/:shopId natijasi (joriy do'kon)
       financeSummary: null, // B1: /api/finance-summary/:shopId natijasi (joriy do'kon)
+      forecast: null, // E: /api/forecast/:shopId natijasi (joriy do'kon)
       showAllShops: false, // 6.3: Dashboard "Barcha do'konlar" birlashtirilgan ko'rinishi
       allShopsSummary: null,
       allShopsLoading: false
@@ -612,6 +613,14 @@ ${urgentSection}
       } catch (e) {
         console.error("Moliya xulosasini yuklashda xato:", e);
         state.financeSummary = null;
+      }
+
+      try {
+        // E: keyingi 30 kunlik bashorat, ishonch darajasi bilan
+        state.forecast = await fetchFromProxy(`/api/forecast/${state.activeShop}`);
+      } catch (e) {
+        console.error("Bashoratni yuklashda xato:", e);
+        state.forecast = null;
       }
 
       syncStateToServer();
@@ -1431,6 +1440,24 @@ ${urgentSection}
                 <div class="flex justify-between"><span class="text-slate-400">Sof foyda:</span><span class="font-bold text-brand">${fmtMoney(state.financeSummary.totalProfit)} so'm${state.financeSummary.totalSales > 0 ? ` (${fmtPct((state.financeSummary.totalProfit/state.financeSummary.totalSales)*100)}%)` : ''}</span></div>
                 <div class="flex justify-between"><span class="text-slate-400">Sotilgan:</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.soldTotal)} dona</span></div>
               </div>
+            `}
+          </div>
+
+          <!-- E: Keyingi 30 kunlik bashorat, ishonch darajasi bilan (MAJBURIY) -->
+          <div class="bg-darkCard border border-darkBorder rounded-2xl p-4">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-base">🔮</span>
+              <span class="text-[11px] text-slate-400 font-medium uppercase tracking-wider">Keyingi 30 kun (bashorat)</span>
+            </div>
+            ${!state.forecast?.ready ? `
+              <div class="text-[11px] text-slate-500 py-1">Bashorat uchun ma'lumot yetarli emas (${state.forecast?.snapshotDays || 0} kun). Kamida 7 kun kerak.</div>
+            ` : `
+              <div class="flex flex-col gap-1 text-[11px]">
+                <div class="flex justify-between"><span class="text-slate-400">Aylanma:</span><span class="font-semibold text-slate-200">~${fmtMoney(state.forecast.forecastSales)} so'm</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">Sof foyda:</span><span class="font-bold text-brand">~${fmtMoney(state.forecast.forecastProfit)} so'm</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">Ishonch:</span><span class="font-semibold ${state.forecast.confidence === 'low' ? 'text-rose-400' : state.forecast.confidence === 'medium' ? 'text-amber-400' : 'text-brand'}">${state.forecast.confidence === 'low' ? 'past' : state.forecast.confidence === 'medium' ? "o'rtacha" : 'yaxshi'} (±${state.forecast.confidencePct}%, ${state.forecast.snapshotDays} kunlik ma'lumot asosida)</span></div>
+              </div>
+              <div class="text-[9.5px] text-slate-500 mt-2">Hozirgi sotuv tezligi va zaxira asosida. Reklama, mavsum va narx o'zgarishi hisobga olinmagan.</div>
             `}
           </div>
 

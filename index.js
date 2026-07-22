@@ -665,6 +665,59 @@ function daysSinceLastSale(shopId, skuId) {
   return Math.round(diffMs / (24 * 60 * 60 * 1000));
 }
 
+// E: Keyingi 30 kunlik bashorat — 7 va 30 kunlik o'rtacha sotuvning O'RTACHASI (bir kunlik sakrash
+// bashoratni buzmasin), faqat hozir zaxirasi bor SKU'lar hisobga olinadi. Ishonch darajasi umumiy
+// snapshot tarixi uzunligiga qarab belgilanadi (E2, majburiy).
+function forecastConfidence(snapshotDays) {
+  if (snapshotDays < 7) return { level: 'none', pct: null };
+  if (snapshotDays <= 14) return { level: 'low', pct: 40 };
+  if (snapshotDays <= 30) return { level: 'medium', pct: 25 };
+  return { level: 'good', pct: 15 };
+}
+
+async function computeForecast(shopId) {
+  const prod = await fetchLiveShopProducts(shopId);
+  if (!prod.ok) return { ok: false, error: prod.error };
+  const snapshots = loadSnapshots();
+  const shopSnaps = snapshots[shopId] || {};
+  const snapshotDays = Object.keys(shopSnaps).length;
+  const confidence = forecastConfidence(snapshotDays);
+  if (confidence.level === 'none') {
+    return { ok: true, ready: false, snapshotDays, confidence: confidence.level };
+  }
+
+  const avg7 = averageDailySales(shopId, 7);
+  const avg30 = averageDailySales(shopId, 30);
+  let dailySales = 0, dailyProfit = 0;
+  prod.products.forEach(p => (p.skuList || []).forEach(sku => {
+    if ((sku.availableAmount || 0) <= 0) return; // faqat zaxirasi bor SKU'lar
+    const a7 = avg7.ready ? avg7.perSku[sku.skuId] : undefined;
+    const a30 = avg30.ready ? avg30.perSku[sku.skuId] : undefined;
+    let avgDaily;
+    if (a7 != null && a30 != null) avgDaily = (a7 + a30) / 2;
+    else if (a7 != null) avgDaily = a7;
+    else if (a30 != null) avgDaily = a30;
+    else return;
+    if (avgDaily <= 0) return;
+
+    const price = sku.purchasePrice || 0;
+    const productId = p.productId;
+    const commission = price * (commissionPct(sku.skuId, sku, productId) / 100);
+    const logi = resolveLogistics(sku.skuId, productId, sku).val;
+    const stor = resolveStorage(sku.skuId, productId, sku).val;
+    const tInfo = resolveTannarx(sku.skuId, productId);
+    const profitPerUnit = price - commission - logi - stor - tInfo.tannarx;
+
+    dailySales += avgDaily * price;
+    dailyProfit += avgDaily * profitPerUnit;
+  }));
+
+  return {
+    ok: true, ready: true, snapshotDays, confidence: confidence.level, confidencePct: confidence.pct,
+    forecastSales: dailySales * 30, forecastProfit: dailyProfit * 30
+  };
+}
+
 // 1. Service: State sync for Bot calculations
 app.post('/api/sync-state', (req, res) => {
   const { productTypes, skuMappings, costs, shops, activeShop, productSettings, products, orders, expenses } = req.body;
@@ -1411,6 +1464,13 @@ app.get('/api/metrics/:shopId', async (req, res) => {
 // B1: Moliya bo'limi uchun snapshot delta'ga asoslangan xulosa (finance/orders o'rniga)
 app.get('/api/finance-summary/:shopId', async (req, res) => {
   const result = await computeFinanceSummary(req.params.shopId);
+  if (!result.ok) return sendUzumError(res, result.error);
+  res.json(result);
+});
+
+// E: keyingi 30 kunlik bashorat, ishonch darajasi bilan
+app.get('/api/forecast/:shopId', async (req, res) => {
+  const result = await computeForecast(req.params.shopId);
   if (!result.ok) return sendUzumError(res, result.error);
   res.json(result);
 });
