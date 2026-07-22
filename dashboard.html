@@ -180,7 +180,11 @@
       unavailableShops: [], // Uzum "Shop is not available" (403) bergan do'kon ID'lari
       activeTab: 'dashboard',
       aiResults: null,
-      aiLoading: false
+      aiLoading: false,
+      skuMetrics: null, // 5.1/5.2/5.4: /api/metrics/:shopId natijasi (joriy do'kon)
+      showAllShops: false, // 6.3: Dashboard "Barcha do'konlar" birlashtirilgan ko'rinishi
+      allShopsSummary: null,
+      allShopsLoading: false
     };
 
     // FAQAT foydalanuvchi sozlamalarini serverga yuboradi (do'kon/tannarx/bog'lanish).
@@ -1036,7 +1040,79 @@ ${urgentSection}
       }
     }
 
+    // 6.3: "Barcha do'konlar" birlashtirilgan ko'rinishga o'tish/qaytish
+    async function toggleAllShopsView() {
+      state.showAllShops = !state.showAllShops;
+      if (state.showAllShops && !state.allShopsSummary) {
+        state.allShopsLoading = true;
+        renderDashboard(document.getElementById('main-view'));
+        try {
+          state.allShopsSummary = await fetchFromProxy('/api/all-shops-summary');
+        } catch (e) {
+          console.error("Barcha do'konlar xulosasini yuklashda xato:", e);
+          state.allShopsSummary = { error: e.message };
+        }
+        state.allShopsLoading = false;
+      }
+      renderDashboard(document.getElementById('main-view'));
+    }
+
+    function renderAllShopsUnsafe(root) {
+      const summary = state.allShopsSummary;
+      root.innerHTML = `
+        <div class="flex flex-col gap-4">
+          <button onclick="toggleAllShopsView()" class="self-start text-[11px] text-brand hover:underline font-semibold flex items-center gap-1">
+            <i data-lucide="arrow-left" class="w-3.5 h-3.5"></i> Bitta do'konga qaytish
+          </button>
+          ${state.allShopsLoading ? `
+            <div class="p-6 text-center text-slate-500 bg-darkCard border border-darkBorder rounded-2xl">Yuklanmoqda...</div>
+          ` : summary?.error ? dataErrorBanner(summary.error) : `
+            <div class="bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20 rounded-3xl p-5">
+              <span class="text-xs text-brand uppercase tracking-wider font-mono">Barcha do'konlar — jami zaxira</span>
+              <div class="text-2xl font-black text-slate-100 mt-2">${(summary?.totalStock || 0).toLocaleString('uz-UZ')} dona</div>
+              <div class="text-[10px] text-slate-500 mt-1">Jami: ${(summary?.totalStock || 0).toLocaleString('uz-UZ')} dona (${(summary?.shops || []).filter(s => s.ok).map(s => `${s.shopTitle}: ${s.totalStock}`).join(', ')})</div>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="bg-darkCard border border-darkBorder rounded-2xl p-3.5 flex flex-col justify-between">
+                <span class="text-[11px] text-slate-400">Faol e'lonlar</span>
+                <span class="text-xl font-bold text-slate-100 mt-1">${summary?.totalActive || 0} ta</span>
+              </div>
+              <div class="bg-darkCard border border-darkBorder rounded-2xl p-3.5 flex flex-col justify-between">
+                <span class="text-[11px] text-slate-400">Tugagan SKU</span>
+                <span class="text-xl font-bold text-rose-400 mt-1">${summary?.totalOutOfStock || 0} ta</span>
+              </div>
+            </div>
+            <div class="bg-darkCard border border-darkBorder rounded-2xl p-4">
+              <div class="text-xs uppercase font-bold text-slate-300 tracking-wider border-b border-darkBorder pb-2.5 mb-3">Do'kon bo'yicha taqsimot</div>
+              <div class="flex flex-col gap-2.5">
+                ${(summary?.shops || []).map(s => s.ok ? `
+                  <div class="flex flex-col gap-1 p-2 px-3 rounded-xl bg-darkBg/60 border border-darkBorder">
+                    <div class="flex justify-between items-center text-xs">
+                      <span class="font-semibold text-slate-200">${s.shopTitle}</span>
+                      <span class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-brand">${s.totalStock} dona</span>
+                    </div>
+                    <div class="grid grid-cols-3 text-[10.5px] text-slate-500 font-mono mt-0.5">
+                      <div>E'lonlar: <strong class="text-slate-300">${s.activeCount}</strong></div>
+                      <div>Tugagan: <strong class="text-rose-400">${s.outOfStock}</strong></div>
+                      <div class="text-right">Bloklangan: <strong class="text-slate-300">${s.blocked}</strong></div>
+                    </div>
+                  </div>
+                ` : `
+                  <div class="flex justify-between items-center p-2 px-3 rounded-xl bg-rose-950/10 border border-rose-900/30">
+                    <span class="font-semibold text-slate-200 text-xs">${s.shopTitle}</span>
+                    <span class="text-[10px] text-rose-400">⚠️ ${s.error}</span>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          `}
+        </div>
+      `;
+      lucide.createIcons();
+    }
+
     function renderDashboardUnsafe(root) {
+      if (state.showAllShops) { renderAllShopsUnsafe(root); return; } // 6.3
       // Calculate high-fidelity stats
       let activeListings = 0;
       let outOfStockSkuCount = 0;
@@ -1072,18 +1148,13 @@ ${urgentSection}
             const typeId = state.skuMappings[sku.skuId];
             const matchingType = state.productTypes.find(t => t.id === typeId);
 
-            if (matchingType) {
-              const tannarx = matchingType.cost;
-              // Assuming 1 item on average sells e.g., 3 units a day
-              const dailyRate = sku.skuId === 5501 ? 4.5 : sku.skuId === 5601 ? 12 : 1.5;
-              const daysLeft = dailyRate > 0 ? (qty / dailyRate) : 99;
-              
-              if (qty === 0 && matchingType.stock > 0) {
-                alertItems.push({ skuName: sku.skuTitle, typeName: matchingType.name });
-              }
-              if ((qty + matchingType.stock) / dailyRate < 28) {
-                chinaAlertItems.push({ name: matchingType.name });
-              }
+            if (matchingType && qty === 0 && matchingType.stock > 0) {
+              alertItems.push({ skuName: sku.skuTitle, typeName: matchingType.name });
+            }
+            // 5.4: Xitoy buyurtma nuqtasi — real snapshot-based metrikadan (taxminiy dailyRate emas)
+            const metric = state.skuMetrics?.perSku?.[sku.skuId];
+            if (metric && metric.needsReorder) {
+              chinaAlertItems.push({ name: sku.skuTitle });
             }
           });
         });
@@ -1113,7 +1184,7 @@ ${urgentSection}
                 ${chinaAlertItems.map(item => `
                   <div class="flex items-start gap-2 text-xs text-amber-300">
                     <span class="shrink-0 text-amber-400">•</span>
-                    <span><strong>${item.name}</strong> jami zaxirasi (< 28 kunlik sotuv): Xitoydan zudlik bilan buyurtma bering!</span>
+                    <span><strong>${item.name}</strong> zaxirasi ≤35 kunga yetadi (28 kun yo'l + 7 kun zaxira): Xitoydan zudlik bilan buyurtma bering!</span>
                   </div>
                 `).join('')}
                 ${blockedSkuCount > 0 ? `
@@ -1133,6 +1204,11 @@ ${urgentSection}
               </div>
             </div>
           `}
+
+          <!-- 6.3: Barcha do'konlar birlashtirilgan ko'rinishga o'tish -->
+          <button onclick="toggleAllShopsView()" class="w-full text-xs font-semibold bg-darkCard border border-darkBorder text-slate-300 py-2.5 rounded-xl hover:text-brand hover:border-brand transition flex items-center justify-center gap-1.5">
+            <i data-lucide="layout-grid" class="w-3.5 h-3.5"></i> 📊 Barcha do'konlar
+          </button>
 
           <!-- Quick Metrics Bento Grid -->
           <div class="grid grid-cols-2 gap-3">

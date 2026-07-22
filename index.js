@@ -1149,7 +1149,8 @@ ${urgentSection}${riskSection}
 /start — boshlash | /hisobot — hisobot | /dashboard — mini app`;
 }
 
-// Kunlik hisobotni yuborish — cron va qo'lda diagnostika endpoint ikkalasi ham shu funksiyani ishlatadi
+// 6.1: Kunlik hisobotni yuborish — cron va qo'lda diagnostika endpoint ikkalasi ham shu funksiyani ishlatadi.
+// Har bir sozlangan do'kon uchun ALOHIDA xabar yuboriladi (do'konlar aralashib ketmasin).
 const ADMIN_CHAT_ID = '5155194813';
 async function runDailyReport() {
   console.log(`[CRON] Kunlik hisobot boshlandi: ${new Date().toISOString()}`);
@@ -1158,43 +1159,84 @@ async function runDailyReport() {
     console.error('[CRON] TELEGRAM_BOT_TOKEN topilmadi — hisobot yuborilmadi.');
     return { success: false, error: "TELEGRAM_BOT_TOKEN yo'q" };
   }
-  // Qaysi chat_id ishlatilmoqda — aniq logga yozamiz
   if (!ADMIN_CHAT_ID) {
     console.error('[CRON] OGOHLANTIRISH: ADMIN_CHAT_ID undefined/bo\'sh — hisobot hech kimga ketmaydi!');
-  } else {
-    console.log(`[CRON] Hisobot qabul qiluvchi chat_id: ${ADMIN_CHAT_ID}`);
+    return { success: false, error: "ADMIN_CHAT_ID yo'q" };
   }
-  try {
-    const reportText = await generateReportText();
-    const sent = await sendTelegramMessage(token, ADMIN_CHAT_ID, reportText);
-    if (!sent.ok) {
-      console.error(`[CRON] Kunlik hisobot yuborilmadi — Telegram API rad etdi: ${new Date().toISOString()}`);
-      return { success: false, error: 'Telegram API xabarni rad etdi', chatIdUsed: ADMIN_CHAT_ID, telegram: sent };
+  console.log(`[CRON] Hisobot qabul qiluvchi chat_id: ${ADMIN_CHAT_ID}`);
+
+  const shops = (syncedState.shops && syncedState.shops.length > 0) ? syncedState.shops : [{ shopId: syncedState.activeShop, shopTitle: `Shop ${syncedState.activeShop}` }];
+  const results = [];
+  let anyOk = false;
+  for (const shop of shops) {
+    try {
+      const reportText = await generateReportText(shop.shopId);
+      const sent = await sendTelegramMessage(token, ADMIN_CHAT_ID, reportText);
+      if (!sent.ok) {
+        console.error(`[CRON] ${shop.shopTitle} hisoboti yuborilmadi — Telegram API rad etdi: ${new Date().toISOString()}`);
+        results.push({ shopId: shop.shopId, shopTitle: shop.shopTitle, success: false, telegram: sent });
+      } else {
+        console.log(`[CRON] ${shop.shopTitle} hisoboti muvaffaqiyatli yuborildi: ${new Date().toISOString()}`);
+        results.push({ shopId: shop.shopId, shopTitle: shop.shopTitle, success: true, telegram: sent });
+        anyOk = true;
+      }
+    } catch (err) {
+      console.error(`[CRON] ${shop.shopTitle} hisobotida xato: ${new Date().toISOString()}`, err);
+      results.push({ shopId: shop.shopId, shopTitle: shop.shopTitle, success: false, error: err.message });
     }
-    console.log(`[CRON] Kunlik hisobot muvaffaqiyatli yuborildi: ${new Date().toISOString()}`);
-    setLastReportDate(todayTashkent()); // catch-up uchun: bugun yuborilgani belgilanadi
-    // HTTP javobda message_id/chat ma'lumotini qaytaramiz — xabar qayerga ketganini Railway logisiz ko'ramiz
-    return { success: true, chatIdUsed: ADMIN_CHAT_ID, telegram: sent };
-  } catch (err) {
-    console.error(`[CRON] Kunlik hisobot yuborishda xato: ${new Date().toISOString()}`, err);
-    return { success: false, error: err.message };
   }
+  if (anyOk) setLastReportDate(todayTashkent()); // kamida bittasi ketgan bo'lsa ham "bugun bajarildi" deb belgilanadi (catch-up uchun)
+  return { success: anyOk, chatIdUsed: ADMIN_CHAT_ID, shops: results };
 }
 
 // 4. Telegram Bot Webhook Route
+// 6.2: tugma bosilganda Telegram loading spinnerni to'xtatadi (callback_query javobi majburiy emas, lekin UX uchun kerak)
+async function answerCallbackQuery(token, callbackQueryId, text) {
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackQueryId, ...(text ? { text } : {}) })
+    });
+  } catch (err) {
+    console.error('[TG] answerCallbackQuery xato:', err);
+  }
+}
+
 app.post('/api/tg-bot/webhook', async (req, res) => {
   res.sendStatus(200);
+
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return;
+  const appUrl = process.env.APP_URL || '';
+
+  // 6.2: "/hisobot" do'kon tanlash tugmalari bosilganda keladi
+  const cq = req.body.callback_query;
+  if (cq && cq.data) {
+    const chatId = cq.message?.chat?.id;
+    await answerCallbackQuery(token, cq.id);
+    if (!chatId || !cq.data.startsWith('report:')) return;
+    const sel = cq.data.slice('report:'.length);
+    if (sel === 'all') {
+      const shops = syncedState.shops || [];
+      for (const shop of shops) {
+        const reportText = await generateReportText(shop.shopId);
+        await sendTelegramMessage(token, chatId, reportText);
+      }
+    } else {
+      const reportText = await generateReportText(sel);
+      await sendTelegramMessage(token, chatId, reportText, {
+        inline_keyboard: [[{ text: "📊 Dashboardni ochish (Mini App)", web_app: { url: appUrl } }]]
+      });
+    }
+    return;
+  }
 
   const { message } = req.body;
   if (!message || !message.text || !message.chat) return;
 
   const chatId = message.chat.id;
   const text = message.text.trim();
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-
-  if (!token) return;
-
-  const appUrl = process.env.APP_URL || '';
 
   if (text.startsWith('/start')) {
     const replyText = `🟣 *Uzum Pro Dashboard — Telegram Mini App + Bot*
@@ -1213,12 +1255,18 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
       ]]
     });
   } else if (text.startsWith('/hisobot')) {
-    const reportText = await generateReportText();
-    await sendTelegramMessage(token, chatId, reportText, {
-      inline_keyboard: [[
-        { text: "📊 Dashboardni ochish (Mini App)", web_app: { url: appUrl } }
-      ]]
-    });
+    // 6.2: do'kon tanlash tugmalari — har biri alohida qatorda + "Barchasi"
+    const shops = syncedState.shops || [];
+    if (shops.length === 0) {
+      const reportText = await generateReportText();
+      await sendTelegramMessage(token, chatId, reportText, {
+        inline_keyboard: [[{ text: "📊 Dashboardni ochish (Mini App)", web_app: { url: appUrl } }]]
+      });
+    } else {
+      const buttons = shops.map(s => ([{ text: s.shopTitle, callback_data: `report:${s.shopId}` }]));
+      buttons.push([{ text: "📊 Barchasi", callback_data: 'report:all' }]);
+      await sendTelegramMessage(token, chatId, "Qaysi do'kon uchun hisobot kerak?", { inline_keyboard: buttons });
+    }
   } else if (text.startsWith('/dashboard')) {
     await sendTelegramMessage(token, chatId, "Uzum Market sotuvchi hisobotlar panelini ochish uchun quyidagi tugmani bosing:", {
       inline_keyboard: [[
@@ -1275,6 +1323,30 @@ app.get('/api/metrics/:shopId', async (req, res) => {
   const result = await computeSkuMetrics(req.params.shopId);
   if (!result.ok) return sendUzumError(res, result.error);
   res.json(result);
+});
+
+// 6.3: barcha sozlangan do'konlar bo'yicha jamlangan ko'rsatkichlar (Dashboard "Barcha do'konlar" ko'rinishi uchun)
+app.get('/api/all-shops-summary', async (req, res) => {
+  const shops = syncedState.shops || [];
+  const results = [];
+  for (const shop of shops) {
+    const prod = await fetchLiveShopProducts(shop.shopId);
+    if (!prod.ok) { results.push({ shopId: shop.shopId, shopTitle: shop.shopTitle, ok: false, error: prod.error }); continue; }
+    let totalStock = 0, activeCount = 0, outOfStock = 0, blocked = 0;
+    prod.products.forEach(p => {
+      activeCount++;
+      if (p.status?.value === 'PERM_BANNED') blocked++;
+      (p.skuList || []).forEach(s => {
+        totalStock += s.availableAmount || 0;
+        if ((s.availableAmount || 0) <= 0) outOfStock++;
+      });
+    });
+    results.push({ shopId: shop.shopId, shopTitle: shop.shopTitle, ok: true, totalStock, activeCount, outOfStock, blocked });
+  }
+  const totalStock = results.reduce((a, r) => a + (r.totalStock || 0), 0);
+  const totalActive = results.reduce((a, r) => a + (r.activeCount || 0), 0);
+  const totalOutOfStock = results.reduce((a, r) => a + (r.outOfStock || 0), 0);
+  res.json({ shops: results, totalStock, totalActive, totalOutOfStock });
 });
 
 // Automatic bot registration logic
