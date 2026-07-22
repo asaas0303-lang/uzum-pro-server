@@ -386,33 +386,40 @@ ${urgentSection}
       return Math.min(50000, 5250 + 250 * (Math.ceil(litr) - 1));
     }
 
-    // 3.2/3.4/4.1: Logistika — SKU qo'lda narx > mahsulot qo'lda narx > SKU hajm > mahsulot hajm > default (hajm yo'q, 1 litr).
+    // Hajm manbai ustuvorligi (4.1): SKU qo'lda litr > mahsulot qo'lda litr > Uzum API'ning o'z
+    // SKU o'lchami (dimensionMm) > yo'q (chaqiruvchi default 1 litr ishlatadi).
+    function resolveVolumeL(skuId, productId, sku) {
+      const c = state.costs[skuId];
+      if (c && c.volumeL != null && c.volumeL !== '' && Number(c.volumeL) > 0) return { litr: Number(c.volumeL), source: 'sku-volume' };
+      const ps = productId != null ? state.productSettings[productId] : null;
+      if (ps && ps.volumeL != null && ps.volumeL !== '' && Number(ps.volumeL) > 0) return { litr: Number(ps.volumeL), source: 'product-volume' };
+      if (sku && sku.dimensionMm) {
+        const { length, width, height } = sku.dimensionMm;
+        const litr = (length * width * height) / 1000000;
+        if (litr > 0) return { litr, source: 'api-dimension' };
+      }
+      return null;
+    }
+
+    // 3.2/3.4/4.1: Logistika — SKU qo'lda narx > mahsulot qo'lda narx > hajm (qo'lda yoki API) > default (hajm yo'q, 1 litr).
     // Qaytaradi: { val, source, litr? }
-    function resolveLogistics(skuId, productId) {
+    function resolveLogistics(skuId, productId, sku) {
       const c = state.costs[skuId];
       if (c && c.logisticsCost != null && c.logisticsCost !== '') return { val: Number(c.logisticsCost), source: 'sku-manual' };
       const ps = productId != null ? state.productSettings[productId] : null;
       if (ps && ps.logisticsCost != null && ps.logisticsCost !== '') return { val: Number(ps.logisticsCost), source: 'product-manual' };
-      if (c && c.volumeL != null && c.volumeL !== '' && Number(c.volumeL) > 0) {
-        const litr = Number(c.volumeL);
-        return { val: logisticsFormula(litr), source: 'sku-volume', litr };
-      }
-      if (ps && ps.volumeL != null && ps.volumeL !== '' && Number(ps.volumeL) > 0) {
-        const litr = Number(ps.volumeL);
-        return { val: logisticsFormula(litr), source: 'product-volume', litr };
-      }
+      const vol = resolveVolumeL(skuId, productId, sku);
+      if (vol) return { val: logisticsFormula(vol.litr), source: vol.source, litr: vol.litr };
       return { val: 5250, source: 'default', litr: 1 };
     }
 
     // 4.2: Saqlash xarajati — 1 litr = 12 so'm/kun, 30 kun. Hajm bo'lmasa 1 litr deb hisoblanadi.
     const STORAGE_SOM_PER_LITER_DAY = 12;
     const STORAGE_DEFAULT_DAYS = 30;
-    function resolveStorage(skuId, productId) {
-      const c = state.costs[skuId];
-      const ps = productId != null ? state.productSettings[productId] : null;
-      let litr = 1, source = 'default';
-      if (c && c.volumeL != null && c.volumeL !== '' && Number(c.volumeL) > 0) { litr = Number(c.volumeL); source = 'sku-volume'; }
-      else if (ps && ps.volumeL != null && ps.volumeL !== '' && Number(ps.volumeL) > 0) { litr = Number(ps.volumeL); source = 'product-volume'; }
+    function resolveStorage(skuId, productId, sku) {
+      const vol = resolveVolumeL(skuId, productId, sku);
+      const litr = vol ? vol.litr : 1;
+      const source = vol ? vol.source : 'default';
       const days = STORAGE_DEFAULT_DAYS;
       return { val: litr * STORAGE_SOM_PER_LITER_DAY * days, source, litr, days };
     }
@@ -446,6 +453,7 @@ ${urgentSection}
       if (source === 'product-manual') return ' 📦✏️';
       if (source === 'product-type') return ' 📦';
       if (source === 'product-volume') return ' 📦';
+      if (source === 'api-dimension') return ' 📐';
       return '';
     }
 
@@ -464,6 +472,15 @@ ${urgentSection}
     function findProductIdForSku(skuId) {
       for (const p of (state.cachedUzumProducts || [])) {
         if ((p.skuList || []).some(s => String(s.skuId) === String(skuId))) return p.productId;
+      }
+      return null;
+    }
+
+    // Berilgan SKU'ning jonli obyektini topadi (dimensionMm/rank uchun kerak — 4.1/5.2)
+    function findSkuObjForSku(skuId) {
+      for (const p of (state.cachedUzumProducts || [])) {
+        const s = (p.skuList || []).find(s => String(s.skuId) === String(skuId));
+        if (s) return s;
       }
       return null;
     }
@@ -1229,9 +1246,9 @@ ${urgentSection}
             const commission = sellPrice * (comPercent / 100);
 
             const costSetting = state.costs[sku.skuId] || { budget: 0 };
-            const logi = resolveLogistics(sku.skuId, p.productId); // { val, source, litr } (3.2/3.4/4.1)
+            const logi = resolveLogistics(sku.skuId, p.productId, sku); // { val, source, litr } (3.2/3.4/4.1)
             const logistics = logi.val;
-            const stor = resolveStorage(sku.skuId, p.productId); // { val, source, litr, days } (4.2)
+            const stor = resolveStorage(sku.skuId, p.productId, sku); // { val, source, litr, days } (4.2)
             const storage = stor.val;
             const dailyBudget = costSetting.budget; // "Reklama byudjeti (kuniga, so'm)"
             // oxirgi 30 kunda shu SKU necha dona sotilgani
@@ -1510,8 +1527,9 @@ ${urgentSection}
           totalMappedCostSum += 45000 * (o.quantity || 1); // fallback
         }
 
-        totalShipping += resolveLogistics(o.skuId, productIdForSku).val * (o.quantity || 1); // 3.2/3.4/4.1: qo'lda yoki hajmdan
-        totalStorage += resolveStorage(o.skuId, productIdForSku).val * (o.quantity || 1); // 4.2: saqlash
+        const skuObjForOrder = findSkuObjForSku(o.skuId);
+        totalShipping += resolveLogistics(o.skuId, productIdForSku, skuObjForOrder).val * (o.quantity || 1); // 3.2/3.4/4.1: qo'lda yoki hajmdan
+        totalStorage += resolveStorage(o.skuId, productIdForSku, skuObjForOrder).val * (o.quantity || 1); // 4.2: saqlash
       });
 
       // Reklama: kunlik byudjet * 30 kun, faqat shu SKU oxirgi 30 kunda sotilgan bo'lsa hisoblanadi

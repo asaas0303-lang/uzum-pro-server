@@ -286,10 +286,23 @@ function normalizeUzumProducts(data) {
       image: uzumImageUrl(s.previewImage || s.photo || s.image), // SKU darajasidagi rasm (3.3)
       commissionApi: resolveApiCommission(s, p), // API komissiyasi: SKU commission -> commissionDto (3.1)
       quantitySold: s.quantitySold != null ? s.quantitySold : 0, // umriy cumulative — snapshot diff uchun
-      quantityReturned: s.quantityReturned != null ? s.quantityReturned : 0 // umriy cumulative — snapshot diff uchun
+      quantityReturned: s.quantityReturned != null ? s.quantityReturned : 0, // umriy cumulative — snapshot diff uchun
+      quantityMissing: s.quantityMissing != null ? s.quantityMissing : 0, // 8.1: Uzum'ning o'z "yo'qolgan" hisoblagichi
+      quantityDefected: s.quantityDefected != null ? s.quantityDefected : 0, // 8.1: nikohli/brak hisoblagichi
+      dimensionMm: resolveDimensionMm(s.skuDimension), // 4.1: API'dan uzunlik/kenglik/balandlik (mm), bo'lmasa null
+      rank: (s.rankInfo && s.rankInfo.rank) || (p.rankInfo && p.rankInfo.rank) || null // 5.2: ABC toifasi
     }))
   }));
   return { payload: normalized };
+}
+
+// 4.1: Uzum API skuDimension {length,width,height} millimetrda qaytaradi (tasdiqlangan: kichik
+// buyumlarda ~50-110mm oralig'i — santimetr bo'lsa hajm mantiqsiz katta chiqadi). Nol/yo'q bo'lsa null.
+function resolveDimensionMm(dim) {
+  if (!dim) return null;
+  const l = Number(dim.length) || 0, w = Number(dim.width) || 0, h = Number(dim.height) || 0;
+  if (l <= 0 || w <= 0 || h <= 0) return null;
+  return { length: l, width: w, height: h };
 }
 
 // API'dan komissiya foizini oladi: (b) SKU darajasidagi commission, (c) mahsulot commissionDto (min==max). Yo'q bo'lsa null.
@@ -883,33 +896,41 @@ function logisticsFormula(litr) {
   return Math.min(50000, 5250 + 250 * (Math.ceil(litr) - 1));
 }
 
-// Logistika (3.2/4.1): SKU qo'lda narx > mahsulot qo'lda narx (3.4) > SKU hajm > mahsulot hajm > default (hajm yo'q, 1 litr deb)
+// Hajm manbai ustuvorligi (4.1): SKU qo'lda litr > mahsulot qo'lda litr > Uzum API'ning o'z
+// SKU o'lchami (skuDimension, mm) > yo'q (chaqiruvchi default 1 litr ishlatadi).
+// Qaytaradi: { litr, source } yoki null (hech qanday manba yo'q).
+function resolveVolumeL(skuId, productId, sku) {
+  const c = syncedState.costs[skuId];
+  if (c && c.volumeL != null && c.volumeL !== '' && Number(c.volumeL) > 0) return { litr: Number(c.volumeL), source: 'sku-volume' };
+  const ps = productId != null ? (syncedState.productSettings || {})[productId] : null;
+  if (ps && ps.volumeL != null && ps.volumeL !== '' && Number(ps.volumeL) > 0) return { litr: Number(ps.volumeL), source: 'product-volume' };
+  if (sku && sku.dimensionMm) {
+    const { length, width, height } = sku.dimensionMm;
+    const litr = (length * width * height) / 1000000; // mm³ → litr
+    if (litr > 0) return { litr, source: 'api-dimension' };
+  }
+  return null;
+}
+
+// Logistika (3.2/4.1): SKU qo'lda narx > mahsulot qo'lda narx (3.4) > hajm (qo'lda yoki API) > default (hajm yo'q, 1 litr deb)
 // Qaytaradi: { val, source, litr? }
-function resolveLogistics(skuId, productId) {
+function resolveLogistics(skuId, productId, sku) {
   const c = syncedState.costs[skuId];
   if (c && c.logisticsCost != null && c.logisticsCost !== '') return { val: Number(c.logisticsCost), source: 'sku-manual' };
   const ps = productId != null ? (syncedState.productSettings || {})[productId] : null;
   if (ps && ps.logisticsCost != null && ps.logisticsCost !== '') return { val: Number(ps.logisticsCost), source: 'product-manual' };
-  if (c && c.volumeL != null && c.volumeL !== '' && Number(c.volumeL) > 0) {
-    const litr = Number(c.volumeL);
-    return { val: logisticsFormula(litr), source: 'sku-volume', litr };
-  }
-  if (ps && ps.volumeL != null && ps.volumeL !== '' && Number(ps.volumeL) > 0) {
-    const litr = Number(ps.volumeL);
-    return { val: logisticsFormula(litr), source: 'product-volume', litr };
-  }
+  const vol = resolveVolumeL(skuId, productId, sku);
+  if (vol) return { val: logisticsFormula(vol.litr), source: vol.source, litr: vol.litr };
   return { val: 5250, source: 'default', litr: 1 }; // 4.1: hajm kiritilmagan — 1 litr deb hisoblanadi
 }
 
 // 4.2: Saqlash xarajati — Uzum 1 litr = 12 so'm/kun. Hajm bo'lmasa 1 litr deb hisoblanadi (logistika bilan bir xil default).
 const STORAGE_SOM_PER_LITER_DAY = 12;
 const STORAGE_DEFAULT_DAYS = 30;
-function resolveStorage(skuId, productId) {
-  const c = syncedState.costs[skuId];
-  const ps = productId != null ? (syncedState.productSettings || {})[productId] : null;
-  let litr = 1, source = 'default';
-  if (c && c.volumeL != null && c.volumeL !== '' && Number(c.volumeL) > 0) { litr = Number(c.volumeL); source = 'sku-volume'; }
-  else if (ps && ps.volumeL != null && ps.volumeL !== '' && Number(ps.volumeL) > 0) { litr = Number(ps.volumeL); source = 'product-volume'; }
+function resolveStorage(skuId, productId, sku) {
+  const vol = resolveVolumeL(skuId, productId, sku);
+  const litr = vol ? vol.litr : 1;
+  const source = vol ? vol.source : 'default';
   const days = STORAGE_DEFAULT_DAYS;
   return { val: litr * STORAGE_SOM_PER_LITER_DAY * days, source, litr, days };
 }
@@ -1013,8 +1034,8 @@ async function generateReportText(shopId) {
       const tInfo = resolveTannarx(skuId, productId); // 3.4/3.5: SKU/mahsulot qo'lda yoki turi
       if (!sku || tInfo.source === 'unmapped') { unmapped++; continue; }
       // 4.3: yagona formula — sotuv_narxi − komissiya − logistika − saqlash − reklama/dona − tannarx
-      const logi = resolveLogistics(skuId, productId).val;
-      const storage = resolveStorage(skuId, productId).val;
+      const logi = resolveLogistics(skuId, productId, sku).val;
+      const storage = resolveStorage(skuId, productId, sku).val;
       const dailyBudget = (syncedState.costs[skuId] || {}).budget || 0;
       const adPerUnit = dailyBudget > 0 ? dailyBudget / d.soldDelta : 0; // kunlik byudjet / kunlik sotilgan
       const perUnit = price - price * (commissionPct(skuId, sku, productId) / 100) - logi - storage - adPerUnit - tInfo.tannarx;
