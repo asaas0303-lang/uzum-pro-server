@@ -317,7 +317,7 @@
       products.forEach(p => {
         if (p.status?.value === 'PERM_BANNED') blockedCount++;
         (p.skuList || []).forEach(sku => {
-          const qty = sku.availableAmount;
+          const qty = Math.max(0, sku.availableAmount || 0); // 13.1: manfiy zaxira 0
           if (qty === 0) outOfStockCount++;
           if (qty > 0 && qty < 15) alertCount++;
 
@@ -511,9 +511,9 @@ ${urgentSection}
       }
     }
 
-    // Mahsulotning umumiy zaxirasi (barcha SKU'lar yig'indisi)
+    // Mahsulotning umumiy zaxirasi (barcha SKU'lar yig'indisi). 13.1: manfiy zaxira 0 deb olinadi.
     function productTotalStock(p) {
-      return (p.skuList || []).reduce((acc, s) => acc + (s.availableAmount || 0), 0);
+      return (p.skuList || []).reduce((acc, s) => acc + Math.max(0, s.availableAmount || 0), 0);
     }
 
     // Filtrni tanlash: state + localStorage'da saqlanadi, tab almashtirilganda yo'qolmaydi
@@ -1254,7 +1254,7 @@ ${urgentSection}
           activeListings++;
 
           p.skuList.forEach(sku => {
-            const qty = sku.availableAmount;
+            const qty = Math.max(0, sku.availableAmount || 0); // 13.1: manfiy zaxira 0
             if (qty === 0) outOfStockSkuCount++;
 
             // D1/D2: joriy Uzum zaxirasi qiymati
@@ -1475,7 +1475,7 @@ ${urgentSection}
                   state.cachedUzumProducts.forEach(p => {
                     p.skuList.forEach(sku => {
                       if (state.skuMappings[sku.skuId] === t.id) {
-                        totalFbo += sku.availableAmount;
+                        totalFbo += Math.max(0, sku.availableAmount || 0); // 13.1: manfiy zaxira 0
                       }
                     });
                   });
@@ -1558,6 +1558,7 @@ ${urgentSection}
           const pImage = p.photos?.[0]?.photoKey || 'https://via.placeholder.com/60';
 
           let skuSection = p.skuList.map(sku => {
+            const skuAvail = Math.max(0, sku.availableAmount || 0); // 13.1: manfiy zaxira (RUN_OUT) 0 deb olinadi
             const tInfo = resolveTannarx(sku.skuId, p.productId); // 3.4/3.5: SKU/mahsulot qo'lda yoki turi
             const mappedName = tannarxLabel(tInfo);
 
@@ -1598,7 +1599,7 @@ ${urgentSection}
             const avgDailyBest = metric ? (metric.avgDaily30 != null ? metric.avgDaily30 : metric.avgDaily7) : null;
             let recommendedQty = null;
             if (homeStock != null && avgDailyBest != null && avgDailyBest > 0) {
-              recommendedQty = Math.min(homeStock, Math.max(0, Math.ceil(30 * avgDailyBest - sku.availableAmount)));
+              recommendedQty = Math.min(homeStock, Math.max(0, Math.ceil(30 * avgDailyBest - skuAvail)));
             }
 
             return `
@@ -1611,7 +1612,7 @@ ${urgentSection}
                       ${sku.image ? `<img src="${sku.image}" referrerPolicy="no-referrer" alt="" class="w-9 h-9 rounded-lg object-cover border border-darkBorder bg-darkCard shrink-0" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"><div class="w-9 h-9 rounded-lg border border-darkBorder bg-darkCard shrink-0 items-center justify-center text-slate-600" style="display:none"><i data-lucide="image-off" class="w-4 h-4"></i></div>` : `<div class="w-9 h-9 rounded-lg border border-darkBorder bg-darkCard shrink-0 flex items-center justify-center text-slate-600"><i data-lucide="image-off" class="w-4 h-4"></i></div>`}
                       <div class="flex flex-col gap-0.5 min-w-0">
                         <span class="text-[11.5px] font-bold text-brand tracking-tight font-sans truncate">${sku.skuTitle}${rankBadge ? ` <span class="text-[9px]">${rankBadge}</span>` : ''}</span>
-                        <span class="text-[10px] text-slate-400">Uzum: ${sku.availableAmount} dona · ${fmtMoney(sellPrice)} so'm · Foyda: <span class="${profitColor} font-semibold">${fmtMoney(profit)} (${fmtPct(pmMargin)}%)</span></span>
+                        <span class="text-[10px] text-slate-400">Uzum: ${skuAvail} dona · ${fmtMoney(sellPrice)} so'm · Foyda: <span class="${profitColor} font-semibold">${fmtMoney(profit)} (${fmtPct(pmMargin)}%)</span></span>
                         <span class="text-[10px] ${stockDaysColor}">Zaxira: ${stockDaysLabel}</span>
                       </div>
                     </div>
@@ -1891,13 +1892,14 @@ ${urgentSection}
       (state.cachedUzumProducts || []).forEach(p => (p.skuList || []).forEach(sku => {
         const m = state.skuMetrics?.perSku?.[sku.skuId];
         if (m && m.isDeadStock) {
+          const deadAvail = Math.max(0, sku.availableAmount || 0); // 13.1: manfiy zaxira 0
           const tInfo = resolveTannarx(sku.skuId, p.productId);
           const stor = resolveStorage(sku.skuId, p.productId, sku);
-          const tiedCapital = tInfo.tannarx * sku.availableAmount;
-          const dailyWaste = (stor.val / stor.days) * sku.availableAmount;
+          const tiedCapital = tInfo.tannarx * deadAvail;
+          const dailyWaste = (stor.val / stor.days) * deadAvail;
           deadStockItems.push({
             productTitle: p.title, colorTitle: sku.skuTitle, image: sku.image || p.photos?.[0]?.photoKey,
-            qty: sku.availableAmount, tiedCapital, dailyWaste, daysSinceLastSale: m.daysSinceLastSale
+            qty: deadAvail, tiedCapital, dailyWaste, daysSinceLastSale: m.daysSinceLastSale
           });
         }
       }));

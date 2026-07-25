@@ -287,7 +287,10 @@ function normalizeUzumProducts(data) {
     skuList: (p.skuList || []).map(s => ({
       skuId: s.skuId,
       skuTitle: s.skuTitle || s.skuFullTitle || s.productTitle || 'SKU',
-      availableAmount: s.quantityAvailable != null ? s.quantityAvailable : 0,
+      // 13.1: Uzum RUN_OUT holatidagi SKU'larda quantityAvailable manfiy (masalan -1) qaytarishi mumkin.
+      // Bu yagona normalizatsiya nuqtasi — shu yerda 0'ga cheklansak, butun tizim (backend hisob-kitoblari
+      // va frontend, chunki u ham shu javobni iste'mol qiladi) avtomatik to'g'irlanadi.
+      availableAmount: Math.max(0, s.quantityAvailable != null ? s.quantityAvailable : 0),
       purchasePrice: s.price != null ? s.price : (s.purchasePrice || 0),
       skuCode: s.sellerItemCode || s.article || String(s.barcode || s.skuId),
       image: uzumImageUrl(s.previewImage || s.photo || s.image), // SKU darajasidagi rasm (3.3)
@@ -493,7 +496,7 @@ async function captureSnapshot() {
     if (!r.ok) { console.warn(`[SNAPSHOT] Shop ${shopId} olinmadi: ${r.error}`); continue; }
     const skus = {};
     r.products.forEach(p => (p.skuList || []).forEach(s => {
-      skus[s.skuId] = { sold: s.quantitySold || 0, returned: s.quantityReturned || 0, available: s.availableAmount || 0 };
+      skus[s.skuId] = { sold: s.quantitySold || 0, returned: s.quantityReturned || 0, available: Math.max(0, s.availableAmount || 0) }; // 13.1: manfiy zaxira 0
     }));
     if (!snapshots[shopId]) snapshots[shopId] = {};
     snapshots[shopId][date] = skus;
@@ -566,7 +569,7 @@ async function computeSkuMetrics(shopId) {
   const avg30 = averageDailySales(shopId, 30);
   const perSku = {};
   prod.products.forEach(p => (p.skuList || []).forEach(sku => {
-    const avail = sku.availableAmount || 0;
+    const avail = Math.max(0, sku.availableAmount || 0); // 13.1: manfiy zaxira 0
     const a7 = avg7.ready ? avg7.perSku[sku.skuId] : undefined;
     const a30 = avg30.ready ? avg30.perSku[sku.skuId] : undefined;
     const stockDays7 = (a7 != null && a7 > 0) ? avail / a7 : null;
@@ -1492,7 +1495,7 @@ app.get('/api/all-shops-summary', async (req, res) => {
       activeCount++;
       if (p.status?.value === 'PERM_BANNED') blocked++;
       (p.skuList || []).forEach(s => {
-        const avail = s.availableAmount || 0;
+        const avail = Math.max(0, s.availableAmount || 0); // 13.1: manfiy zaxira 0
         totalStock += avail;
         if (avail <= 0) outOfStock++;
 
