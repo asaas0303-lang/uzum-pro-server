@@ -1457,6 +1457,56 @@ app.get('/api/snapshot/status', (req, res) => {
   res.json(out);
 });
 
+// DIAGNOSTIKA (vaqtinchalik): xom snapshot qiymatlarini XECH QANDAY CHEKLOVSIZ ko'rsatadi.
+// Har SKU uchun oxirgi N (default 4) kunlik xom quantitySold/quantityReturned va kunlar orasidagi
+// CHEKLANMAGAN delta (manfiy bo'lishi mumkin) — sotuv sanog'i nomuvofiqligini tekshirish uchun.
+// ?shopId=61122&days=4. Hech narsani o'zgartirmaydi, faqat o'qiydi.
+app.get('/api/diag/raw-snapshots', (req, res) => {
+  const snapshots = loadSnapshots();
+  const days = Math.max(2, Math.min(30, Number(req.query.days) || 4));
+  const shopFilter = req.query.shopId ? [String(req.query.shopId)] : Object.keys(snapshots);
+  const out = {};
+  for (const shopId of shopFilter) {
+    const shopSnaps = snapshots[shopId];
+    if (!shopSnaps) { out[shopId] = { error: 'snapshot yo\'q' }; continue; }
+    const dates = Object.keys(shopSnaps).sort().slice(-days);
+    // Barcha SKU'lar bu oynada
+    const allSkus = new Set();
+    dates.forEach(d => Object.keys(shopSnaps[d]).forEach(s => allSkus.add(s)));
+    const perSku = {};
+    let totalSoldRaw = 0, totalReturnedRaw = 0, negSoldDays = 0, negReturnedDays = 0;
+    for (const skuId of allSkus) {
+      const series = dates.map(d => {
+        const rec = shopSnaps[d][skuId] || null;
+        return rec ? { date: d, sold: rec.sold || 0, returned: rec.returned || 0, available: rec.available } : { date: d, sold: null, returned: null, available: null };
+      });
+      // Ketma-ket kunlar orasidagi CHEKLANMAGAN delta
+      const deltas = [];
+      for (let i = 1; i < series.length; i++) {
+        const prev = series[i - 1], curr = series[i];
+        if (prev.sold == null || curr.sold == null) { deltas.push({ date: curr.date, soldDelta: null, returnedDelta: null }); continue; }
+        const soldDelta = curr.sold - prev.sold;
+        const returnedDelta = curr.returned - prev.returned;
+        deltas.push({ date: curr.date, soldDelta, returnedDelta });
+        if (soldDelta < 0) negSoldDays++;
+        if (returnedDelta < 0) negReturnedDays++;
+      }
+      // Faqat biror o'zgarish bo'lgan SKU'larni chiqaramiz (shovqinni kamaytirish uchun)
+      const anyChange = deltas.some(x => (x.soldDelta && x.soldDelta !== 0) || (x.returnedDelta && x.returnedDelta !== 0));
+      if (anyChange) perSku[skuId] = { series, deltas };
+      const lastDelta = deltas[deltas.length - 1];
+      if (lastDelta && lastDelta.soldDelta != null) { totalSoldRaw += lastDelta.soldDelta; totalReturnedRaw += lastDelta.returnedDelta; }
+    }
+    out[shopId] = {
+      dates,
+      lastDayRawTotals: { soldDeltaRaw: totalSoldRaw, returnedDeltaRaw: totalReturnedRaw, grossEqSoldPlusReturned: totalSoldRaw + totalReturnedRaw },
+      negativeDeltaCounts: { soldDeltaNegativeOccurrences: negSoldDays, returnedDeltaNegativeOccurrences: negReturnedDays },
+      perSku
+    };
+  }
+  res.json(out);
+});
+
 // 5.1/5.2/5.4: SKU bo'yicha zaxira kunlari, ABC toifa, Xitoy buyurtma nuqtasi — snapshot tarixidan
 app.get('/api/metrics/:shopId', async (req, res) => {
   const result = await computeSkuMetrics(req.params.shopId);
