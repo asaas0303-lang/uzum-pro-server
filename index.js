@@ -514,8 +514,17 @@ async function captureSnapshot() {
   return { date, savedShops };
 }
 
-// Berilgan do'kon uchun oxirgi ikki snapshot farqini "kechagi sotuv/qaytarish" sifatida qaytaradi.
+// 14: Berilgan do'kon uchun oxirgi ikki snapshot farqini "kechagi sotuv/qaytarish" sifatida qaytaradi.
 // Snapshot yetarli bo'lmasa (< 2), null qaytadi — hisobot buni ANIQ belgilaydi.
+//
+// quantitySold Uzum'da NET hisoblagich — qaytarish bo'lganda KAMAYADI (tasdiqlangan: production'da
+// bir nechta SKU'da quantityReturned > quantitySold, va kunlik xom delta manfiy chiqishi kuzatildi).
+// Shuning uchun ikkita alohida qiymat hisoblanadi:
+//   - GROSS (soldDelta = max(0, raw_sold_delta + returned_delta)) — SANOQ uchun, Uzum kabinetidagi
+//     "necha dona sotildi" bilan solishtirish uchun (qaytarish shu kuni bo'lsa raw_sold's manfiyligini
+//     returned_delta bekor qiladi — production'da kamera/Jaydari uchun aynan mos tekshirildi).
+//   - NET (netSoldDelta = max(0, raw_sold_delta)) — PUL (daromad/foyda) uchun: qaytarilgan tovar
+//     daromad/foyda bermaydi, shuning uchun faqat "saqlangan" (qaytarilmagan) birliklar hisoblanadi.
 function getDailyDelta(shopId) {
   const snapshots = loadSnapshots();
   const shopSnaps = snapshots[shopId] || {};
@@ -524,17 +533,19 @@ function getDailyDelta(shopId) {
   const prev = shopSnaps[dates[dates.length - 2]];
   const curr = shopSnaps[dates[dates.length - 1]];
   const perSku = {};
-  let totalSold = 0, totalReturned = 0;
+  let totalSold = 0, totalSoldNet = 0, totalReturned = 0;
   for (const skuId of Object.keys(curr)) {
     const c = curr[skuId], p = prev[skuId] || { sold: 0, returned: 0 };
-    // diff manfiy bo'lmasin (hisoblagich reset bo'lishi mumkin)
-    const soldDelta = Math.max(0, (c.sold || 0) - (p.sold || 0));
-    const returnedDelta = Math.max(0, (c.returned || 0) - (p.returned || 0));
-    perSku[skuId] = { soldDelta, returnedDelta };
-    totalSold += soldDelta;
+    const rawSoldDelta = (c.sold || 0) - (p.sold || 0); // manfiy bo'lishi mumkin (qaytarish net'ni kamaytiradi)
+    const returnedDelta = Math.max(0, (c.returned || 0) - (p.returned || 0)); // hisoblagich reset'idan himoya
+    const netSoldDelta = Math.max(0, rawSoldDelta);
+    const grossSoldDelta = Math.max(0, rawSoldDelta + returnedDelta);
+    perSku[skuId] = { soldDelta: grossSoldDelta, netSoldDelta, returnedDelta };
+    totalSold += grossSoldDelta;
+    totalSoldNet += netSoldDelta;
     totalReturned += returnedDelta;
   }
-  return { ready: true, snapshotCount: dates.length, fromDate: dates[dates.length - 2], toDate: dates[dates.length - 1], totalSold, totalReturned, perSku };
+  return { ready: true, snapshotCount: dates.length, fromDate: dates[dates.length - 2], toDate: dates[dates.length - 1], totalSold, totalSoldNet, totalReturned, perSku };
 }
 
 // 5.1: Berilgan do'kon uchun so'nggi N kunlik (yoki mavjud bo'lganicha) SKU bo'yicha o'rtacha kunlik sotuv.
@@ -609,13 +620,24 @@ async function computeFinanceSummary(shopId) {
   const last = shopSnaps[window[window.length - 1]];
   const spanDays = window.length - 1;
 
-  let totalSales = 0, totalPayout = 0, totalMappedCostSum = 0, totalShipping = 0, totalStorage = 0, totalMarketingVal = 0, soldTotal = 0, unmapped = 0;
+  // 14: SANOQ (soldTotal) = GROSS — Uzum bilan solishtirish uchun. PUL (totalSales/Payout/...) = NET —
+  // qaytarilgan tovar daromad/foyda bermaydi. Sabab: quantitySold Uzum'da NET hisoblagich (qaytarishda
+  // kamayadi), shuning uchun sanoq uchun qaytarishni qo'shib qaytarib olamiz: gross = net_delta + returned_delta.
+  let totalSales = 0, totalPayout = 0, totalMappedCostSum = 0, totalShipping = 0, totalStorage = 0, totalMarketingVal = 0;
+  let soldTotal = 0, soldTotalNet = 0, returnedTotal = 0, unmapped = 0;
   const allSkuIds = new Set([...Object.keys(first), ...Object.keys(last)]);
   for (const skuId of allSkuIds) {
-    const f = first[skuId] || { sold: 0 };
-    const l = last[skuId] || { sold: 0 };
-    const soldDelta = Math.max(0, (l.sold || 0) - (f.sold || 0));
-    if (soldDelta === 0) continue;
+    const f = first[skuId] || { sold: 0, returned: 0 };
+    const l = last[skuId] || { sold: 0, returned: 0 };
+    const rawSoldDelta = (l.sold || 0) - (f.sold || 0);
+    const returnedDelta = Math.max(0, (l.returned || 0) - (f.returned || 0));
+    const netSoldDelta = Math.max(0, rawSoldDelta);
+    const grossSoldDelta = Math.max(0, rawSoldDelta + returnedDelta);
+    if (netSoldDelta === 0 && grossSoldDelta === 0) continue;
+    soldTotal += grossSoldDelta;
+    soldTotalNet += netSoldDelta; // 14: to'g'ri "sof" jami — gross-returned taxminidan farqli, aggregatsiyada aniq
+    returnedTotal += returnedDelta;
+    if (netSoldDelta === 0) continue; // pulga ta'siri yo'q (hammasi qaytarilgan)
     const { sku, product } = findSkuInProducts(prod.products, skuId);
     if (!sku) continue;
     const price = sku.purchasePrice || 0;
@@ -625,15 +647,15 @@ async function computeFinanceSummary(shopId) {
     const stor = resolveStorage(skuId, productId, sku).val;
     const tInfo = resolveTannarx(skuId, productId);
 
-    totalSales += price * soldDelta;
-    totalPayout += (price - commission) * soldDelta;
-    totalShipping += logi * soldDelta;
-    totalStorage += stor * soldDelta;
-    soldTotal += soldDelta;
+    totalSales += price * netSoldDelta;
+    totalPayout += (price - commission) * netSoldDelta;
+    totalShipping += logi * netSoldDelta;
+    totalStorage += stor * netSoldDelta;
     if (tInfo.source === 'unmapped') { unmapped++; continue; }
-    totalMappedCostSum += tInfo.tannarx * soldDelta;
+    totalMappedCostSum += tInfo.tannarx * netSoldDelta;
   }
-  // Reklama: kunlik byudjet * span kun, faqat shu davrda sotilgan SKU'lar uchun
+  // Reklama: kunlik byudjet * span kun, faqat shu davrda SOF sotuvi bo'lgan SKU'lar uchun
+  // (qaytarilgan tovar foyda bermagan — reklama shunday hisobda samarasiz hisoblanishi mantiqiy)
   for (const skuId of Object.keys(syncedState.costs)) {
     const dailyBudget = (syncedState.costs[skuId] || {}).budget || 0;
     if (dailyBudget <= 0) continue;
@@ -644,7 +666,8 @@ async function computeFinanceSummary(shopId) {
   const totalProfit = totalPayout - totalShipping - totalStorage - totalMarketingVal - totalMappedCostSum;
   return {
     ok: true, ready: true, spanDays, fromDate: window[0], toDate: window[window.length - 1],
-    totalSales, totalPayout, totalMappedCostSum, totalShipping, totalStorage, totalMarketingVal, totalProfit, soldTotal, unmapped
+    totalSales, totalPayout, totalMappedCostSum, totalShipping, totalStorage, totalMarketingVal, totalProfit,
+    soldTotal, soldTotalNet, returnedTotal, unmapped
   };
 }
 
@@ -1217,13 +1240,15 @@ async function generateReportText(shopId) {
     products.forEach(p => (p.skuList || []).forEach(s => { lifeSold += s.quantitySold || 0; lifeReturned += s.quantityReturned || 0; }));
     salesSection = `⏳ Kunlik sotuv ma'lumoti yig'ilmoqda (ertadan boshlab aniq bo'ladi — hozir ${delta.snapshotCount} ta kunlik snapshot bor).\n\n📊 *Boshidan beri jami* (umriy hisoblagich, kunlik emas):\n🛍️ Sotilgan: ${fmtMoney(lifeSold)} dona\n↩️ Qaytarilgan: ${fmtMoney(lifeReturned)} dona`;
   } else {
+    // 14: SANOQ (nechta sotildi) = GROSS (delta.totalSold, Uzum bilan solishtirish uchun).
+    // PUL (daromad/foyda) = NET (d.netSoldDelta) — qaytarilgan tovar daromad/foyda bermaydi.
     let profit = 0, revenue = 0, unmapped = 0, totalStorage = 0;
     for (const skuId of Object.keys(delta.perSku)) {
       const d = delta.perSku[skuId];
-      if (d.soldDelta === 0) continue;
+      if (d.netSoldDelta === 0) continue;
       const { sku, product } = findSkuInProducts(products, skuId);
       const price = sku ? (sku.purchasePrice || 0) : 0;
-      revenue += price * d.soldDelta;
+      revenue += price * d.netSoldDelta;
       const productId = product ? product.productId : null;
       const tInfo = resolveTannarx(skuId, productId); // 3.4/3.5: SKU/mahsulot qo'lda yoki turi
       if (!sku || tInfo.source === 'unmapped') { unmapped++; continue; }
@@ -1231,12 +1256,12 @@ async function generateReportText(shopId) {
       const logi = resolveLogistics(skuId, productId, sku).val;
       const storage = resolveStorage(skuId, productId, sku).val;
       const dailyBudget = (syncedState.costs[skuId] || {}).budget || 0;
-      const adPerUnit = dailyBudget > 0 ? dailyBudget / d.soldDelta : 0; // kunlik byudjet / kunlik sotilgan
+      const adPerUnit = dailyBudget > 0 ? dailyBudget / d.netSoldDelta : 0; // kunlik byudjet / kunlik sof sotilgan
       const perUnit = price - price * (commissionPct(skuId, sku, productId) / 100) - logi - storage - adPerUnit - tInfo.tannarx;
-      profit += perUnit * d.soldDelta;
-      totalStorage += storage * d.soldDelta;
+      profit += perUnit * d.netSoldDelta;
+      totalStorage += storage * d.netSoldDelta;
     }
-    salesSection = `🛍️ Kechagi sotilgan: ${fmtMoney(delta.totalSold)} dona\n↩️ Kechagi qaytarilgan: ${fmtMoney(delta.totalReturned)} dona\n🏦 Kechagi daromad: ${fmtMoney(revenue)} so'm\n📦 Kechagi saqlash xarajati: ${fmtMoney(totalStorage)} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${fmtMoney(profit)} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}`;
+    salesSection = `🛍️ Kechagi: Sotilgan ${fmtMoney(delta.totalSold)} dona · Qaytarilgan ${fmtMoney(delta.totalReturned)} · Sof ${fmtMoney(delta.totalSoldNet)} dona\n🏦 Kechagi daromad (sof): ${fmtMoney(revenue)} so'm\n📦 Kechagi saqlash xarajati: ${fmtMoney(totalStorage)} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${fmtMoney(profit)} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}`;
   }
 
   // Xarajatlar — source bo'yicha (2.3)
@@ -1453,56 +1478,6 @@ app.get('/api/snapshot/status', (req, res) => {
   const out = {};
   for (const shopId of Object.keys(snapshots)) {
     out[shopId] = { dates: Object.keys(snapshots[shopId]).sort(), delta: getDailyDelta(shopId) };
-  }
-  res.json(out);
-});
-
-// DIAGNOSTIKA (vaqtinchalik): xom snapshot qiymatlarini XECH QANDAY CHEKLOVSIZ ko'rsatadi.
-// Har SKU uchun oxirgi N (default 4) kunlik xom quantitySold/quantityReturned va kunlar orasidagi
-// CHEKLANMAGAN delta (manfiy bo'lishi mumkin) — sotuv sanog'i nomuvofiqligini tekshirish uchun.
-// ?shopId=61122&days=4. Hech narsani o'zgartirmaydi, faqat o'qiydi.
-app.get('/api/diag/raw-snapshots', (req, res) => {
-  const snapshots = loadSnapshots();
-  const days = Math.max(2, Math.min(30, Number(req.query.days) || 4));
-  const shopFilter = req.query.shopId ? [String(req.query.shopId)] : Object.keys(snapshots);
-  const out = {};
-  for (const shopId of shopFilter) {
-    const shopSnaps = snapshots[shopId];
-    if (!shopSnaps) { out[shopId] = { error: 'snapshot yo\'q' }; continue; }
-    const dates = Object.keys(shopSnaps).sort().slice(-days);
-    // Barcha SKU'lar bu oynada
-    const allSkus = new Set();
-    dates.forEach(d => Object.keys(shopSnaps[d]).forEach(s => allSkus.add(s)));
-    const perSku = {};
-    let totalSoldRaw = 0, totalReturnedRaw = 0, negSoldDays = 0, negReturnedDays = 0;
-    for (const skuId of allSkus) {
-      const series = dates.map(d => {
-        const rec = shopSnaps[d][skuId] || null;
-        return rec ? { date: d, sold: rec.sold || 0, returned: rec.returned || 0, available: rec.available } : { date: d, sold: null, returned: null, available: null };
-      });
-      // Ketma-ket kunlar orasidagi CHEKLANMAGAN delta
-      const deltas = [];
-      for (let i = 1; i < series.length; i++) {
-        const prev = series[i - 1], curr = series[i];
-        if (prev.sold == null || curr.sold == null) { deltas.push({ date: curr.date, soldDelta: null, returnedDelta: null }); continue; }
-        const soldDelta = curr.sold - prev.sold;
-        const returnedDelta = curr.returned - prev.returned;
-        deltas.push({ date: curr.date, soldDelta, returnedDelta });
-        if (soldDelta < 0) negSoldDays++;
-        if (returnedDelta < 0) negReturnedDays++;
-      }
-      // Faqat biror o'zgarish bo'lgan SKU'larni chiqaramiz (shovqinni kamaytirish uchun)
-      const anyChange = deltas.some(x => (x.soldDelta && x.soldDelta !== 0) || (x.returnedDelta && x.returnedDelta !== 0));
-      if (anyChange) perSku[skuId] = { series, deltas };
-      const lastDelta = deltas[deltas.length - 1];
-      if (lastDelta && lastDelta.soldDelta != null) { totalSoldRaw += lastDelta.soldDelta; totalReturnedRaw += lastDelta.returnedDelta; }
-    }
-    out[shopId] = {
-      dates,
-      lastDayRawTotals: { soldDeltaRaw: totalSoldRaw, returnedDeltaRaw: totalReturnedRaw, grossEqSoldPlusReturned: totalSoldRaw + totalReturnedRaw },
-      negativeDeltaCounts: { soldDeltaNegativeOccurrences: negSoldDays, returnedDeltaNegativeOccurrences: negReturnedDays },
-      perSku
-    };
   }
   res.json(out);
 });

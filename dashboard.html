@@ -1438,7 +1438,7 @@ ${urgentSection}
               <div class="flex flex-col gap-1 text-[11px]">
                 <div class="flex justify-between"><span class="text-slate-400">Aylanma:</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.totalSales)} so'm</span></div>
                 <div class="flex justify-between"><span class="text-slate-400">Sof foyda:</span><span class="font-bold text-brand">${fmtMoney(state.financeSummary.totalProfit)} so'm${state.financeSummary.totalSales > 0 ? ` (${fmtPct((state.financeSummary.totalProfit/state.financeSummary.totalSales)*100)}%)` : ''}</span></div>
-                <div class="flex justify-between"><span class="text-slate-400">Sotilgan:</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.soldTotal)} dona</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">Sotilgan · Qaytarilgan · Sof:</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.soldTotal)} · ${fmtMoney(state.financeSummary.returnedTotal)} · ${fmtMoney(state.financeSummary.soldTotalNet)} dona</span></div>
               </div>
             `}
           </div>
@@ -1949,8 +1949,13 @@ ${urgentSection}
               </div>
             ` : `
             <div class="flex flex-col gap-2 font-medium">
+              <!-- 14: sanoq (gross, Uzum bilan mos) va pul (sof) alohida ko'rsatiladi -->
               <div class="flex justify-between text-xs py-1">
-                <span class="text-slate-400">Jami Sotuv:</span>
+                <span class="text-slate-400">Sotilgan · Qaytarilgan · Sof:</span>
+                <span class="text-slate-100 font-mono">${fmtMoney(fin.soldTotal)} · ${fmtMoney(fin.returnedTotal)} · ${fmtMoney(fin.soldTotalNet)} dona</span>
+              </div>
+              <div class="flex justify-between text-xs py-1">
+                <span class="text-slate-400">Jami Sotuv (sof):</span>
                 <span class="text-slate-100 font-mono">${fmtMoney(fin.totalSales)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
