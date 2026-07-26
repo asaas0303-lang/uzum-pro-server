@@ -484,13 +484,16 @@ function todaysSnapshotMissing() {
   return !shops.some(s => snapshots[s.shopId] && snapshots[s.shopId][today]);
 }
 
-// Har SKU uchun quantitySold/quantityReturned/available ni sana bilan diskka saqlaydi
-async function captureSnapshot() {
-  console.log(`[SNAPSHOT] Boshlandi: ${new Date().toISOString()}`);
+// Har SKU uchun quantitySold/quantityReturned/available ni sana bilan diskka saqlaydi.
+// 14A2: ixtiyoriy shopId — berilsa faqat o'sha do'kon yangilanadi (masalan "Bugun" so'rovi uchun,
+// boshqa do'konlarga keraksiz Uzum API chaqiruvi qilinmasin).
+async function captureSnapshot(onlyShopId) {
+  console.log(`[SNAPSHOT] Boshlandi: ${new Date().toISOString()}${onlyShopId ? ` (faqat shop ${onlyShopId})` : ''}`);
   const snapshots = loadSnapshots();
   const date = todayTashkent();
   let savedShops = 0;
-  for (const shop of (syncedState.shops || [])) {
+  const shopsToCapture = onlyShopId ? (syncedState.shops || []).filter(s => String(s.shopId) === String(onlyShopId)) : (syncedState.shops || []);
+  for (const shop of shopsToCapture) {
     const shopId = shop.shopId;
     const r = await fetchLiveShopProducts(shopId);
     if (!r.ok) { console.warn(`[SNAPSHOT] Shop ${shopId} olinmadi: ${r.error}`); continue; }
@@ -604,18 +607,20 @@ async function computeSkuMetrics(shopId) {
   return { ok: true, ready7: avg7.ready, ready30: avg30.ready, spanDays7: avg7.spanDays || 0, spanDays30: avg30.spanDays || 0, perSku };
 }
 
-// B1: Moliya bo'limi uchun 30 kunlik (yoki mavjud snapshot oralig'icha) xulosa.
+// B1/14A1: Moliya bo'limi uchun N kunlik (yoki mavjud snapshot oralig'icha) xulosa.
 // finance/orders bu hisobda doim bo'sh qaytadi — shuning uchun snapshot delta'dan hisoblanadi
 // (kunlik hisobotda ishlatilgan mantiq bilan bir xil, faqat 1 kun o'rniga butun oyna bo'yicha).
-async function computeFinanceSummary(shopId) {
+// days — so'ralgan davr uzunligi (masalan 7 = "1 hafta", 30 = "30 kun"). Snapshot tarixi qisqaroq
+// bo'lsa, mavjud bo'lganicha hisoblanadi va requestedDays/actualSpanDays orqali aniq belgilanadi.
+async function computeFinanceSummary(shopId, days = 30) {
   const prod = await fetchLiveShopProducts(shopId);
   if (!prod.ok) return { ok: false, error: prod.error };
   const snapshots = loadSnapshots();
   const shopSnaps = snapshots[shopId] || {};
   const dates = Object.keys(shopSnaps).sort();
-  if (dates.length < 2) return { ok: true, ready: false, snapshotCount: dates.length };
+  if (dates.length < 2) return { ok: true, ready: false, snapshotCount: dates.length, requestedDays: days };
 
-  const window = dates.slice(-31);
+  const window = dates.slice(-(days + 1));
   const first = shopSnaps[window[0]];
   const last = shopSnaps[window[window.length - 1]];
   const spanDays = window.length - 1;
@@ -666,9 +671,38 @@ async function computeFinanceSummary(shopId) {
   const totalProfit = totalPayout - totalShipping - totalStorage - totalMarketingVal - totalMappedCostSum;
   return {
     ok: true, ready: true, spanDays, fromDate: window[0], toDate: window[window.length - 1],
+    requestedDays: days, actualSpanDays: spanDays, partial: spanDays < days, // 14A1: so'ralganidan kam bo'lsa aniq belgilanadi
     totalSales, totalPayout, totalMappedCostSum, totalShipping, totalStorage, totalMarketingVal, totalProfit,
     soldTotal, soldTotalNet, returnedTotal, unmapped
   };
+}
+
+// 14A2: "Bugun" (joriy kun, hozirgacha). Snapshot kuniga bir marta (04:50) olinadi, shuning uchun
+// so'rov kelganda darhol yangi snapshot olinadi (cron kutmasdan), so'ng eng oxirgi ikkita sana
+// (bugun va kecha) orasidagi farq hisoblanadi — bu computeFinanceSummary(shopId, 1) bilan aynan bir
+// xil matematika (oxirgi 2 snapshot orasidagi gross/net/returned), faqat oldindan yangilangan holda.
+// fetchLiveShopProducts'ning 5 daqiqalik keshi tufayli qisqa vaqt ichida qayta so'ralsa ortiqcha
+// Uzum API chaqiruvi bo'lmaydi.
+async function getTodaySoFarDelta(shopId) {
+  const cap = await captureSnapshot(shopId);
+  if (!cap.savedShops) return { ok: false, error: "Do'kon ma'lumoti olinmadi — snapshot yangilanmadi" };
+  const fin = await computeFinanceSummary(shopId, 1);
+  if (!fin.ok) return fin;
+  return { ...fin, asOf: new Date().toISOString() }; // "hozirgacha" belgisi — to'liq kunlik EMAS
+}
+
+// 14A3: barcha davrlar uchun YAGONA javob shakli — bot va dashboard bir xil renderer ishlatsin.
+// period: today | yesterday | week | month
+async function computePeriodReport(shopId, period) {
+  const shop = (syncedState.shops || []).find(s => String(s.shopId) === String(shopId));
+  const shopTitle = shop ? shop.shopTitle : `Shop ${shopId}`;
+  const daysByPeriod = { yesterday: 1, week: 7, month: 30 };
+  let fin;
+  if (period === 'today') fin = await getTodaySoFarDelta(shopId);
+  else if (daysByPeriod[period] != null) fin = await computeFinanceSummary(shopId, daysByPeriod[period]);
+  else return { ok: false, error: `Noma'lum davr: ${period}` };
+  if (!fin.ok) return fin;
+  return { ...fin, period, shopId: shop ? shop.shopId : shopId, shopTitle };
 }
 
 // B3: berilgan SKU oxirgi marta necha kun oldin sotilgani (snapshot tarixidan). Umuman sotuv
@@ -1489,9 +1523,21 @@ app.get('/api/metrics/:shopId', async (req, res) => {
   res.json(result);
 });
 
-// B1: Moliya bo'limi uchun snapshot delta'ga asoslangan xulosa (finance/orders o'rniga)
+// B1/14A1: Moliya bo'limi uchun snapshot delta'ga asoslangan xulosa (finance/orders o'rniga). ?days=N (default 30)
 app.get('/api/finance-summary/:shopId', async (req, res) => {
-  const result = await computeFinanceSummary(req.params.shopId);
+  const days = Math.max(1, Math.min(60, Number(req.query.days) || 30));
+  const result = await computeFinanceSummary(req.params.shopId, days);
+  if (!result.ok) return sendUzumError(res, result.error);
+  res.json(result);
+});
+
+// 14A3: yagona davr endpointi — ?period=today|yesterday|week|month
+app.get('/api/period-report/:shopId', async (req, res) => {
+  const period = req.query.period || 'yesterday';
+  if (!['today', 'yesterday', 'week', 'month'].includes(period)) {
+    return res.status(400).json({ error: "Noto'g'ri davr. period=today|yesterday|week|month bo'lishi kerak" });
+  }
+  const result = await computePeriodReport(req.params.shopId, period);
   if (!result.ok) return sendUzumError(res, result.error);
   res.json(result);
 });
