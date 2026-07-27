@@ -229,57 +229,41 @@
       }
     }
 
-    // B: yuklanishda serverdagi sozlamalarni o'qib, localStorage bilan birlashtiradi.
-    // Qoida: localStorage bo'sh yoki serverdagidan KAM bo'lsa — serverdagini ishlatadi (ustidan yozmaydi).
+    // 15: SERVER HAR DOIM USTUVOR. Hech qanday "ko'proq elementli = to'g'riroq" merge YO'Q — bu
+    // eski mantiq xato edi (14-bosqichdan keyin: brauzerdagi eski localStorage 3 do'konli holatni
+    // "to'liqroq" deb hisoblab, allaqachon o'chirilgan Nurli'ni serverga qaytarib qo'ygan edi).
+    // Endi: server javob bersa — UNING holati ishlatiladi, nuqta (bo'sh bo'lsa ham). localStorage
+    // FAQAT server bilan bog'lanib bo'lmagan holatda (masalan internet yo'q) zaxira sifatida —
+    // bu holatda state allaqachon skript boshida localStorage'dan yuklangan, shu holicha qoladi.
+    // localStorage'ga bu yerda faqat serverni AKS ETTIRISH uchun yoziladi (keyingi safar zaxira
+    // sifatida to'g'ri qiymat tursin) — hech qachon serverga qaytarib yuborilmaydi.
     async function loadServerSettings() {
       try {
         const res = await fetch('/api/settings');
-        if (!res.ok) return;
+        if (!res.ok) throw new Error(`server /api/settings ${res.status} qaytardi`);
         const srv = await res.json();
-        let changed = false;
-        // Server manba: serverdagi ma'lumot local'dan KAM bo'lmasa (>=) serverni ishlatamiz.
-        // Local faqat qat'iy KO'P bo'lsa (hali sync bo'lmagan qo'shimchalar) saqlanadi.
-        if ((srv.shops || []).length >= (state.shops || []).length && (srv.shops || []).length > 0) { state.shops = srv.shops; changed = true; }
-        if ((srv.productTypes || []).length >= (state.productTypes || []).length && (srv.productTypes || []).length > 0) { state.productTypes = srv.productTypes; changed = true; }
-        if (Object.keys(srv.skuMappings || {}).length >= Object.keys(state.skuMappings || {}).length && Object.keys(srv.skuMappings || {}).length > 0) { state.skuMappings = srv.skuMappings; changed = true; }
-        if (Object.keys(srv.costs || {}).length >= Object.keys(state.costs || {}).length && Object.keys(srv.costs || {}).length > 0) { state.costs = srv.costs; changed = true; }
-        if (Object.keys(srv.productSettings || {}).length >= Object.keys(state.productSettings || {}).length && Object.keys(srv.productSettings || {}).length > 0) { state.productSettings = srv.productSettings; changed = true; }
-        if (srv.activeShop && !state.shops.find(s => s.shopId === state.activeShop)) { state.activeShop = srv.activeShop; changed = true; }
-        if (changed) {
-          // faqat localStorage'ni yangilaymiz (serverga qayta yubormaymiz — u allaqachon manba)
-          localStorage.setItem('uz_shops', JSON.stringify(state.shops));
-          localStorage.setItem('uz_active_shop', state.activeShop);
-          localStorage.setItem('uz_product_types', JSON.stringify(state.productTypes));
-          localStorage.setItem('uz_sku_mappings', JSON.stringify(state.skuMappings));
-          localStorage.setItem('uz_costs', JSON.stringify(state.costs));
-          localStorage.setItem('uz_product_settings', JSON.stringify(state.productSettings));
-          console.log("[SETTINGS] Serverdagi sozlamalar localStorage'ga birlashtirildi (server to'liqroq edi).");
-        }
-      } catch (e) {
-        console.error("Server sozlamalarini o'qishda xato:", e);
-      }
-    }
 
-    // To'liq sync — sozlamalar + jonli ma'lumot (refreshData oxirida)
-    async function syncStateToServer() {
-      try {
-        await fetch('/api/sync-state', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            productTypes: state.productTypes,
-            skuMappings: state.skuMappings,
-            costs: state.costs,
-            productSettings: state.productSettings,
-            shops: state.shops,
-            activeShop: state.activeShop,
-            products: state.cachedUzumProducts,
-            orders: state.orders,
-            expenses: state.expenses
-          })
-        });
-      } catch(e) {
-        console.error("Failed to sync client state to Express Server:", e);
+        state.shops = srv.shops || [];
+        state.productTypes = srv.productTypes || [];
+        state.skuMappings = srv.skuMappings || {};
+        state.costs = srv.costs || {};
+        state.productSettings = srv.productSettings || {};
+        if (srv.activeShop && state.shops.find(s => s.shopId === srv.activeShop)) {
+          state.activeShop = srv.activeShop;
+        } else if (state.shops.length > 0 && !state.shops.find(s => s.shopId === state.activeShop)) {
+          state.activeShop = state.shops[0].shopId;
+        }
+
+        localStorage.setItem('uz_shops', JSON.stringify(state.shops));
+        localStorage.setItem('uz_active_shop', state.activeShop);
+        localStorage.setItem('uz_product_types', JSON.stringify(state.productTypes));
+        localStorage.setItem('uz_sku_mappings', JSON.stringify(state.skuMappings));
+        localStorage.setItem('uz_costs', JSON.stringify(state.costs));
+        localStorage.setItem('uz_product_settings', JSON.stringify(state.productSettings));
+        console.log(`[SETTINGS] Serverdan yuklandi (manba sifatida): ${state.shops.length} do'kon, ${state.productTypes.length} tur, ${Object.keys(state.skuMappings).length} SKU bog'lanish.`);
+      } catch (e) {
+        console.error("Server sozlamalarini o'qib bo'lmadi — localStorage zaxira sifatida ishlatiladi (offline holat):", e);
+        // state skript boshida localStorage'dan yuklangan — shu holicha qoladi, qo'shimcha ish kerak emas
       }
     }
 
@@ -552,8 +536,8 @@ ${urgentSection}
       document.getElementById('api-status-badge').classList.add('animate-pulse');
       state.dataErrors = { products: null, orders: null, expenses: null };
 
-      // Sozlamalarni AVVAL, fetch'lardan oldin yuboramiz — Uzum API xato bersa ham saqlanadi (barqarorlik)
-      syncSettingsToServer();
+      // 15: sozlamalar BU YERDA avtomatik serverga yuborilmaydi — refreshData() faqat jonli
+      // ma'lumot o'qiydi. Sozlamalar faqat aniq foydalanuvchi harakati (saveState()) orqali yoziladi.
 
       // Mahsulotlar — badge asosan shu chaqiruvga qarab belgilanadi
       try {
@@ -626,7 +610,9 @@ ${urgentSection}
         state.forecast = null;
       }
 
-      syncStateToServer();
+      // 15: bu yerda avtomatik serverga yozish yo'q (avval syncStateToServer() chaqirilardi —
+      // backend baribir products/orders/expenses'ni hech qayerda ishlatmasdi, faqat xotirada
+      // saqlardi; bekor qilindi, chunki fon merge/sync tamoman yo'q qilinishi kerak edi).
       renderShopPills();
       switchTab(state.activeTab); // Re-renders current active tab with fresh loads
       document.getElementById('api-status-badge').classList.remove('animate-pulse');
