@@ -193,7 +193,9 @@
       aiResults: null,
       aiLoading: false,
       skuMetrics: null, // 5.1/5.2/5.4: /api/metrics/:shopId natijasi (joriy do'kon)
-      financeSummary: null, // B1: /api/finance-summary/:shopId natijasi (joriy do'kon)
+      financeSummary: null, // B1/14C: /api/period-report/:shopId?period=... natijasi (joriy do'kon)
+      financePeriod: localStorage.getItem('uz_finance_period') || 'month', // 14C: Moliya va D4 bir xil davrni ulashadi
+      financeLoading: false, // 14C3: davr almashtirilganda ("Bugun" uzoqroq turishi mumkin)
       forecast: null, // E: /api/forecast/:shopId natijasi (joriy do'kon)
       showAllShops: false, // 6.3: Dashboard "Barcha do'konlar" birlashtirilgan ko'rinishi
       allShopsSummary: null,
@@ -608,8 +610,9 @@ ${urgentSection}
       }
 
       try {
-        // B1: Moliya bo'limi — snapshot delta'ga asoslangan xulosa (finance/orders doim bo'sh bo'lgani uchun)
-        state.financeSummary = await fetchFromProxy(`/api/finance-summary/${state.activeShop}`);
+        // B1/14C: Moliya bo'limi — snapshot delta'ga asoslangan xulosa, tanlangan davr bo'yicha
+        // (finance/orders doim bo'sh bo'lgani uchun). Moliya va D4 shu bitta davr state'ini ulashadi.
+        state.financeSummary = await fetchFromProxy(`/api/period-report/${state.activeShop}?period=${state.financePeriod}`);
       } catch (e) {
         console.error("Moliya xulosasini yuklashda xato:", e);
         state.financeSummary = null;
@@ -1426,19 +1429,26 @@ ${urgentSection}
             </div>
           </div>
 
-          <!-- D4: Oxirgi 30 kun aylanma -->
+          <!-- D4/14C2: Oxirgi davr aylanmasi — Moliya bilan bir xil davr state'ini ulashadi -->
           <div class="bg-darkCard border border-darkBorder rounded-2xl p-4">
-            <div class="flex items-center gap-2 mb-2">
-              <i data-lucide="trending-up" class="w-4.5 h-4.5 text-slate-300"></i>
-              <span class="text-[11px] text-slate-400 font-medium uppercase tracking-wider">${state.financeSummary?.ready ? `Oxirgi ${state.financeSummary.spanDays} kun` : 'Oxirgi kunlar'}</span>
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center gap-2">
+                <i data-lucide="trending-up" class="w-4.5 h-4.5 text-slate-300"></i>
+                <span class="text-[11px] text-slate-400 font-medium uppercase tracking-wider">${financePeriodLabel(state.financeSummary)}</span>
+              </div>
+              <span class="text-[9.5px] text-brand hover:underline font-bold cursor-pointer" onclick="switchTab('finance')">Davrni o'zgartirish →</span>
             </div>
-            ${!state.financeSummary?.ready ? `
+            ${state.financeLoading ? `
+              <div class="text-[11px] text-slate-500 py-1">Yuklanmoqda...</div>
+            ` : !state.financeSummary?.ready ? `
               <div class="text-[11px] text-slate-500 py-1">Ma'lumot yig'ilmoqda (${state.financeSummary?.snapshotCount || 0} kun)</div>
             ` : `
               <div class="flex flex-col gap-1 text-[11px]">
                 <div class="flex justify-between"><span class="text-slate-400">Aylanma:</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.totalSales)} so'm</span></div>
                 <div class="flex justify-between"><span class="text-slate-400">Sof foyda:</span><span class="font-bold text-brand">${fmtMoney(state.financeSummary.totalProfit)} so'm${state.financeSummary.totalSales > 0 ? ` (${fmtPct((state.financeSummary.totalProfit/state.financeSummary.totalSales)*100)}%)` : ''}</span></div>
                 <div class="flex justify-between"><span class="text-slate-400">Sotilgan · Qaytarilgan · Sof:</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.soldTotal)} · ${fmtMoney(state.financeSummary.returnedTotal)} · ${fmtMoney(state.financeSummary.soldTotalNet)} dona</span></div>
+                ${state.financeSummary.period === 'today' ? `<div class="text-[9.5px] text-amber-400/80 mt-0.5">⏳ Bu qisman ma'lumot — kun hali tugamagan</div>` : ''}
+                ${state.financeSummary.partial && state.financeSummary.period !== 'today' ? `<div class="text-[9.5px] text-amber-400/80 mt-0.5">⚠️ Faqat ${state.financeSummary.actualSpanDays} kunlik ma'lumot mavjud</div>` : ''}
               </div>
             `}
           </div>
@@ -1873,6 +1883,37 @@ ${urgentSection}
       lucide.createIcons();
     }
 
+    // 14C: davr nomi — Moliya va D4 bir xil yorliqni ishlatadi
+    function financePeriodLabel(fin) {
+      const names = { today: 'Bugun', yesterday: 'Kecha', week: '1 hafta', month: '30 kun' };
+      const name = names[fin?.period] || 'Davr';
+      if (fin?.period === 'today' && fin?.asOf) {
+        const t = new Date(new Date(fin.asOf).getTime());
+        const hh = String(t.getUTCHours() + 5).padStart(2, '0');
+        const mm = String(t.getUTCMinutes()).padStart(2, '0');
+        return `${name} (soat ${hh}:${mm} holatiga)`;
+      }
+      return name;
+    }
+
+    // 14C1: Moliya/D4 davr tanlovi — faqat tegishli blok qayta render bo'ladi, butun sahifa emas
+    async function setFinancePeriod(period) {
+      if (state.financePeriod === period && state.financeSummary) { return; }
+      state.financePeriod = period;
+      localStorage.setItem('uz_finance_period', period);
+      state.financeLoading = true; // 14C3: "Bugun" uchun yangi snapshot olingani sabab biroz uzoqroq turishi mumkin
+      if (state.activeTab === 'finance') renderFinance(document.getElementById('main-view'));
+      try {
+        state.financeSummary = await fetchFromProxy(`/api/period-report/${state.activeShop}?period=${period}`);
+      } catch (e) {
+        console.error("Moliya xulosasini yuklashda xato:", e);
+        state.financeSummary = null;
+      }
+      state.financeLoading = false;
+      if (state.activeTab === 'finance') renderFinance(document.getElementById('main-view'));
+      else if (state.activeTab === 'dashboard') renderDashboard(document.getElementById('main-view'));
+    }
+
     // UI Panel: FINANCE & ACCOUNTING
     function renderFinance(root) {
       try {
@@ -1919,10 +1960,31 @@ ${urgentSection}
 
       const totalProfit = finReady ? fin.totalProfit - realExpensesTotal : 0;
       const profitColor = totalProfit >= 0 ? 'text-brand' : 'text-rose-400';
-      const periodLabel = finReady ? `Oxirgi ${fin.spanDays} kun` : "Ma'lumot yig'ilmoqda";
+      const periodLabel = financePeriodLabel(fin);
+
+      // 14C1: davr tanlash pill-tugmalari
+      const periodDefs = [
+        { key: 'today', label: 'Bugun' },
+        { key: 'yesterday', label: 'Kecha' },
+        { key: 'week', label: '1 hafta' },
+        { key: 'month', label: '30 kun' }
+      ];
+      const periodButtons = periodDefs.map(p => {
+        const selected = p.key === state.financePeriod;
+        return `
+          <button onclick="setFinancePeriod('${p.key}')" class="shrink-0 text-[11px] font-semibold px-3 py-1.5 rounded-lg border transition ${selected ? 'bg-brand text-darkBg border-brand badge-glow' : 'bg-darkBg text-slate-300 border-darkBorder hover:text-white'}">
+            ${p.label}
+          </button>
+        `;
+      }).join('');
 
       root.innerHTML = `
         <div class="flex flex-col gap-5">
+
+          <!-- 14C1: davr tanlash -->
+          <div class="flex gap-2 overflow-x-auto pb-1 -mb-1">
+            ${periodButtons}
+          </div>
 
           ${state.dataErrors?.expenses ? dataErrorBanner('Xarajatlar — ' + state.dataErrors.expenses) : ''}
 
@@ -1943,9 +2005,11 @@ ${urgentSection}
               <span class="text-[10px] text-slate-500 font-mono">${periodLabel}</span>
             </div>
 
-            ${!finReady ? `
+            ${state.financeLoading ? `
+              <div class="text-[11px] text-slate-500 text-center py-3">Yuklanmoqda...</div>
+            ` : !finReady ? `
               <div class="text-[11px] text-slate-500 text-center py-3">
-                Ma'lumot yig'ilmoqda (${fin?.snapshotCount || 0} kun). Birinchi hisob kamida 2 kunlik snapshotdan keyin, to'liq oylik ko'rinish 30 kundan keyin tayyor bo'ladi.
+                Ma'lumot yig'ilmoqda (${fin?.snapshotCount || 0} kun). Birinchi hisob kamida 2 kunlik snapshotdan keyin tayyor bo'ladi.
               </div>
             ` : `
             <div class="flex flex-col gap-2 font-medium">
@@ -1990,6 +2054,18 @@ ${urgentSection}
                     </div>`).join('')}
                 ${realIncomeTotal ? `<div class="flex justify-between text-[10.5px] py-0.5 text-emerald-400 border-t border-darkBorder/30 mt-1 pt-1"><span>Kirim (INCOME)</span><span class="font-mono">${fmtMoney(realIncomeTotal)} so'm</span></div>` : ''}
               </div>
+              ${fin.period === 'today' ? `
+                <div class="flex items-start gap-1.5 text-[10.5px] text-amber-400 bg-amber-950/20 border border-amber-900/40 rounded-lg px-2 py-1.5">
+                  <span>⏳</span>
+                  <span>Bu qisman ma'lumot — kun hali tugamagan</span>
+                </div>
+              ` : ''}
+              ${fin.partial && fin.period !== 'today' ? `
+                <div class="flex items-start gap-1.5 text-[10.5px] text-amber-400 bg-amber-950/20 border border-amber-900/40 rounded-lg px-2 py-1.5">
+                  <span>⚠️</span>
+                  <span>Faqat ${fin.actualSpanDays} kunlik ma'lumot mavjud (so'ralgan: ${fin.requestedDays} kun)</span>
+                </div>
+              ` : ''}
               ${fin.unmapped > 0 ? `
                 <div class="flex items-start gap-1.5 text-[10.5px] text-amber-400 bg-amber-950/20 border border-amber-900/40 rounded-lg px-2 py-1.5">
                   <span>⚠️</span>
