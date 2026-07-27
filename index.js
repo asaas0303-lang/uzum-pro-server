@@ -1388,6 +1388,49 @@ async function runDailyReport() {
 }
 
 // 4. Telegram Bot Webhook Route
+// 14B2: davr nomi + sana(lar) — hisobot sarlavhasida ko'rsatish uchun.
+// "Bugun" uchun soat:daqiqa (asOf, Toshkent vaqti) qo'shiladi — bu HECH QACHON to'liq kunlik
+// ma'lumot emasligini har doim aniq ko'rsatish uchun (14-bosqich eslatmasi).
+function formatPeriodLabel(result) {
+  const periodNames = { today: 'BUGUN', yesterday: 'KECHA', week: '1 HAFTA', month: '30 KUN' };
+  const name = periodNames[result.period] || String(result.period || '').toUpperCase();
+  if (result.period === 'today' && result.asOf) {
+    const t = new Date(new Date(result.asOf).getTime() + 5 * 60 * 60 * 1000);
+    const hh = String(t.getUTCHours()).padStart(2, '0');
+    const mm = String(t.getUTCMinutes()).padStart(2, '0');
+    return `${result.toDate || todayTashkent()} — ${name} (soat ${hh}:${mm} holatiga)`;
+  }
+  if (!result.fromDate || !result.toDate) return name;
+  if (result.fromDate === result.toDate) return `${result.toDate} (${name})`;
+  return `${result.fromDate} — ${result.toDate} (${name})`;
+}
+
+// 14B2: bot uchun qisqa davr hisoboti matni — computePeriodReport natijasidan.
+function buildPeriodReportText(result) {
+  const header = `🟣 *Uzum Pro — ${result.shopTitle} (${result.shopId})*\n📅 ${formatPeriodLabel(result)}`;
+  if (!result.ready) {
+    return `${header}\n\n⏳ Hali yetarli ma'lumot yo'q (${result.snapshotCount || 0} kunlik snapshot bor). Kamida 2 kun kerak.`;
+  }
+  const lines = [
+    `🛍️ Sotilgan: ${fmtMoney(result.soldTotal)} dona · Qaytarilgan: ${fmtMoney(result.returnedTotal)} · Sof: ${fmtMoney(result.soldTotalNet)}`,
+    `💰 Daromad: ${fmtMoney(result.totalSales)} so'm`,
+    `💸 Sof foyda: ${fmtMoney(result.totalProfit)} so'm (hisoblangan taxmin)`
+  ];
+  if (result.period === 'today') lines.push(`\n⏳ Bu qisman ma'lumot — kun hali tugamagan`);
+  if (result.partial && result.period !== 'today') lines.push(`\n⚠️ Faqat ${result.actualSpanDays} kunlik ma'lumot mavjud (so'ralgan: ${result.requestedDays} kun)`);
+  return `${header}\n\n${lines.join('\n')}`;
+}
+
+// 14B1: do'kon tanlangach ko'rsatiladigan davr tugmalari (2x2)
+function periodSelectionKeyboard(shopSel) {
+  return {
+    inline_keyboard: [
+      [{ text: '📅 Bugun', callback_data: `period:${shopSel}:today` }, { text: '📆 Kecha', callback_data: `period:${shopSel}:yesterday` }],
+      [{ text: '🗓 1 hafta', callback_data: `period:${shopSel}:week` }, { text: '🗓 30 kun', callback_data: `period:${shopSel}:month` }]
+    ]
+  };
+}
+
 // 6.2: tugma bosilganda Telegram loading spinnerni to'xtatadi (callback_query javobi majburiy emas, lekin UX uchun kerak)
 async function answerCallbackQuery(token, callbackQueryId, text) {
   try {
@@ -1408,24 +1451,36 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
   if (!token) return;
   const appUrl = process.env.APP_URL || '';
 
-  // 6.2: "/hisobot" do'kon tanlash tugmalari bosilganda keladi
+  // 14B1: "/hisobot" endi ikki bosqichli — avval do'kon (shop:{id|all}), keyin davr (period:{id|all}:{code})
   const cq = req.body.callback_query;
   if (cq && cq.data) {
     const chatId = cq.message?.chat?.id;
     await answerCallbackQuery(token, cq.id);
-    if (!chatId || !cq.data.startsWith('report:')) return;
-    const sel = cq.data.slice('report:'.length);
-    if (sel === 'all') {
-      const shops = syncedState.shops || [];
-      for (const shop of shops) {
-        const reportText = await generateReportText(shop.shopId);
-        await sendTelegramMessage(token, chatId, reportText);
+    if (!chatId) return;
+
+    if (cq.data.startsWith('shop:')) {
+      const shopSel = cq.data.slice('shop:'.length);
+      await sendTelegramMessage(token, chatId, "Qaysi davr uchun hisobot kerak?", periodSelectionKeyboard(shopSel));
+      return;
+    }
+
+    if (cq.data.startsWith('period:')) {
+      const [shopSel, period] = cq.data.slice('period:'.length).split(':');
+      if (shopSel === 'all') {
+        const shops = syncedState.shops || [];
+        for (const shop of shops) {
+          const result = await computePeriodReport(shop.shopId, period);
+          const text = result.ok ? buildPeriodReportText(result) : `🟣 *${shop.shopTitle}*\n\n⚠️ Hisobot olinmadi: ${result.error}`;
+          await sendTelegramMessage(token, chatId, text);
+        }
+      } else {
+        const result = await computePeriodReport(shopSel, period);
+        const text = result.ok ? buildPeriodReportText(result) : `⚠️ Hisobot olinmadi: ${result.error}`;
+        await sendTelegramMessage(token, chatId, text, {
+          inline_keyboard: [[{ text: "📊 Dashboardni ochish (Mini App)", web_app: { url: appUrl } }]]
+        });
       }
-    } else {
-      const reportText = await generateReportText(sel);
-      await sendTelegramMessage(token, chatId, reportText, {
-        inline_keyboard: [[{ text: "📊 Dashboardni ochish (Mini App)", web_app: { url: appUrl } }]]
-      });
+      return;
     }
     return;
   }
@@ -1453,16 +1508,17 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
       ]]
     });
   } else if (text.startsWith('/hisobot')) {
-    // 6.2: do'kon tanlash tugmalari — har biri alohida qatorda + "Barchasi"
+    // 14B1: do'kon tanlash tugmalari — har biri alohida qatorda + "Barchasi". Tanlangach davr so'raladi.
     const shops = syncedState.shops || [];
     if (shops.length === 0) {
-      const reportText = await generateReportText();
+      const result = await computePeriodReport(syncedState.activeShop, 'yesterday');
+      const reportText = result.ok ? buildPeriodReportText(result) : `⚠️ Hisobot olinmadi: ${result.error}`;
       await sendTelegramMessage(token, chatId, reportText, {
         inline_keyboard: [[{ text: "📊 Dashboardni ochish (Mini App)", web_app: { url: appUrl } }]]
       });
     } else {
-      const buttons = shops.map(s => ([{ text: s.shopTitle, callback_data: `report:${s.shopId}` }]));
-      buttons.push([{ text: "📊 Barchasi", callback_data: 'report:all' }]);
+      const buttons = shops.map(s => ([{ text: s.shopTitle, callback_data: `shop:${s.shopId}` }]));
+      buttons.push([{ text: "📊 Barchasi", callback_data: 'shop:all' }]);
       await sendTelegramMessage(token, chatId, "Qaysi do'kon uchun hisobot kerak?", { inline_keyboard: buttons });
     }
   } else if (text.startsWith('/dashboard')) {
