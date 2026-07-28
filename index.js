@@ -1295,7 +1295,10 @@ async function generateReportText(shopId) {
       profit += perUnit * d.netSoldDelta;
       totalStorage += storage * d.netSoldDelta;
     }
-    salesSection = `🛍️ Kechagi: Sotilgan ${fmtMoney(delta.totalSold)} dona · Qaytarilgan ${fmtMoney(delta.totalReturned)} · Sof ${fmtMoney(delta.totalSoldNet)} dona\n🏦 Kechagi daromad (sof): ${fmtMoney(revenue)} so'm\n📦 Kechagi saqlash xarajati: ${fmtMoney(totalStorage)} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${fmtMoney(profit)} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}`;
+    // 16: "Qaytarilgan" raqami OLIB TASHLANDI — u umriy/kechikuvchi hisoblagichdan keladi, "kechagi"
+    // qaytarish sifatida aniq ajratib bo'lmaydi (chalg'ituvchi edi). Sof (net) hisobi baribir to'g'ri.
+    // Daromad "sof" ekani aniq yozildi; quantitySold kechikishi haqida izoh qo'shildi.
+    salesSection = `🛍️ Kechagi: Sotilgan ${fmtMoney(delta.totalSold)} dona · Sof ${fmtMoney(delta.totalSoldNet)} dona\n🏦 Kechagi daromad (sof, qaytarishlar ayrilgan): ${fmtMoney(revenue)} so'm\n📦 Kechagi saqlash xarajati: ${fmtMoney(totalStorage)} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${fmtMoney(profit)} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}\n⏳ So'nggi kunlar ma'lumoti Uzum tasdiqlashi bilan yangilanadi`;
   }
 
   // Xarajatlar — source bo'yicha (2.3)
@@ -1411,13 +1414,15 @@ function buildPeriodReportText(result) {
   if (!result.ready) {
     return `${header}\n\n⏳ Hali yetarli ma'lumot yo'q (${result.snapshotCount || 0} kunlik snapshot bor). Kamida 2 kun kerak.`;
   }
+  // 16: "Qaytarilgan" OLIB TASHLANDI (chalg'ituvchi — umriy/kechikuvchi hisoblagichdan). Daromad "sof".
   const lines = [
-    `🛍️ Sotilgan: ${fmtMoney(result.soldTotal)} dona · Qaytarilgan: ${fmtMoney(result.returnedTotal)} · Sof: ${fmtMoney(result.soldTotalNet)}`,
-    `💰 Daromad: ${fmtMoney(result.totalSales)} so'm`,
+    `🛍️ Sotilgan: ${fmtMoney(result.soldTotal)} dona · Sof: ${fmtMoney(result.soldTotalNet)}`,
+    `💰 Daromad (sof, qaytarishlar ayrilgan): ${fmtMoney(result.totalSales)} so'm`,
     `💸 Sof foyda: ${fmtMoney(result.totalProfit)} so'm (hisoblangan taxmin)`
   ];
   if (result.period === 'today') lines.push(`\n⏳ Bu qisman ma'lumot — kun hali tugamagan`);
   if (result.partial && result.period !== 'today') lines.push(`\n⚠️ Faqat ${result.actualSpanDays} kunlik ma'lumot mavjud (so'ralgan: ${result.requestedDays} kun)`);
+  lines.push(`\n⏳ So'nggi kunlar ma'lumoti Uzum tasdiqlashi bilan yangilanadi`);
   return `${header}\n\n${lines.join('\n')}`;
 }
 
