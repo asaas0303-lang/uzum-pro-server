@@ -1631,6 +1631,9 @@ async function detectShopProblems(shopId) {
 async function runProblemCheck() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token || !ADMIN_CHAT_ID) return { ok: false, error: 'token/chat yo\'q' };
+  // Birinchi ishga tushishda (problems.json hali yo'q) — barcha mavjud muammolar "yangi" ko'rinadi va
+  // 20+ xabar toshqini bo'lardi. Shuning uchun birinchi safar FAQAT bazaviy holatni saqlaymiz, ogohlantirmaymiz.
+  const firstRun = !fs.existsSync(PROBLEMS_FILE);
   const prevState = readJsonFile(PROBLEMS_FILE, {});
   const newState = {};
   let alertCount = 0;
@@ -1642,7 +1645,7 @@ async function runProblemCheck() {
     const currentKeys = current.map(p => p.key);
     const prevKeys = prevState[shopId] || [];
     const fresh = current.filter(p => !prevKeys.includes(p.key)); // faqat yangi
-    if (fresh.length) {
+    if (!firstRun && fresh.length) {
       const msg = `⚠️ *Yangi muammo* — ${shop.shopTitle}\n\n${fresh.map(p => p.text).join('\n\n')}\n\n/maslahat — AI murabbiy tahlili`;
       try { await sendTelegramMessage(token, ADMIN_CHAT_ID, msg); alertCount += fresh.length; }
       catch (e) { console.error('[D0] ogohlantirish yuborilmadi:', e.message); }
@@ -1650,8 +1653,8 @@ async function runProblemCheck() {
     newState[shopId] = currentKeys;
   }
   writeJsonFile(PROBLEMS_FILE, newState);
-  console.log(`[D0] Muammo tekshiruvi tugadi — ${alertCount} ta yangi ogohlantirish`);
-  return { ok: true, alertCount };
+  console.log(`[D0] Muammo tekshiruvi tugadi — ${firstRun ? 'birinchi run (bazaviy holat saqlandi, ogohlantirish yo\'q)' : alertCount + ' ta yangi ogohlantirish'}`);
+  return { ok: true, alertCount, firstRun };
 }
 
 async function runDailyReport() {
