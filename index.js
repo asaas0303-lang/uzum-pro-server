@@ -9,6 +9,19 @@ import cron from 'node-cron';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// 18-C1: Uzum bilimlar bazasi (knowledge/uzum-rules.md) — AI kontekstiga qo'shiladi. Bir marta o'qib keshlanadi.
+let _knowledgeBaseCache = null;
+function loadKnowledgeBase() {
+  if (_knowledgeBaseCache !== null) return _knowledgeBaseCache;
+  try {
+    _knowledgeBaseCache = fs.readFileSync(path.join(__dirname, 'knowledge', 'uzum-rules.md'), 'utf8');
+  } catch (err) {
+    console.warn('[KB] Bilimlar bazasi o\'qilmadi:', err.message);
+    _knowledgeBaseCache = '';
+  }
+  return _knowledgeBaseCache;
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -95,11 +108,17 @@ let syncedState = {
   activeShop: 61122,
   products: [], // real Uzum product cards synced from frontend (dashboard.html state.cachedUzumProducts)
   orders: [], // real Uzum finance orders synced from frontend (dashboard.html state.orders)
-  expenses: [] // real Uzum finance expenses synced from frontend (dashboard.html state.expenses)
+  expenses: [], // real Uzum finance expenses synced from frontend (dashboard.html state.expenses)
+  // 18-A: yangi MOLIYA ma'lumotlari (foydalanuvchi qo'lda kiritadi, Uzum'nikidan alohida). Diskda saqlanadi.
+  withdrawals: [], // { id, date, amount, shopId?, note, status: 'kutilmoqda'|'keldi' } — Uzum'dan yechib olingan pul
+  userExpenses: [], // { id, date, amount, category, note } — real xarajatlar (ijara/ish haqi/transport...). "expenses" nomi Uzum uchun band.
+  credits: [], // { id, name, totalAmount, remainingAmount, monthlyPayment, paymentDay, type:'fixed'|'decreasing', startDate, endDate?, note }
+  goals: [] // { id, type:'monthly_turnover', target, createdDate, milestones:[] } — moliyaviy maqsad
 };
 
 // Faqat foydalanuvchi sozlamalari diskda saqlanadi (2.1: sotuv/mahsulot ma'lumoti jonli tortiladi, saqlanmaydi)
-const SETTINGS_KEYS = ['productTypes', 'skuMappings', 'costs', 'shops', 'activeShop', 'productSettings'];
+// 18-A: moliya ma'lumotlari (withdrawals/userExpenses/credits/goals) ham SHU YERDA — mavjud himoya ostida saqlanadi.
+const SETTINGS_KEYS = ['productTypes', 'skuMappings', 'costs', 'shops', 'activeShop', 'productSettings', 'withdrawals', 'userExpenses', 'credits', 'goals'];
 const SETTINGS_BACKUP_FILE = path.join(DATA_DIR, 'settings.backup.json');
 const SETTINGS_BACKUP_RETENTION_DAYS = 7;
 
@@ -816,6 +835,20 @@ app.post('/api/sync-state', (req, res) => {
 // B: frontend yuklanishda serverdagi sozlamalarni O'QIYDI (bo'sh localStorage ustidan yozmasin)
 app.get('/api/settings', (req, res) => {
   res.json(currentSettings());
+});
+
+// 18-A4: MOLIYA ma'lumotlarini yozish — FAQAT aniq foydalanuvchi harakati (qo'shish/o'chirish/tahrir).
+// Kelgan kalitlar (withdrawals/userExpenses/credits/goals) syncedState'ga yoziladi va diskka saqlanadi
+// (mavjud himoya: backupSettings + saveSettings). Sozlamalar (do'kon/tannarx)ga TEGMAYDI.
+app.post('/api/finance-data', (req, res) => {
+  const FINANCE_KEYS = ['withdrawals', 'userExpenses', 'credits', 'goals'];
+  let changed = false;
+  for (const k of FINANCE_KEYS) {
+    if (Array.isArray(req.body[k])) { syncedState[k] = req.body[k]; changed = true; }
+  }
+  if (!changed) return res.status(400).json({ error: "Hech qanday moliya kaliti yuborilmadi" });
+  saveSettings();
+  res.json({ success: true, withdrawals: syncedState.withdrawals.length, userExpenses: syncedState.userExpenses.length, credits: syncedState.credits.length, goals: syncedState.goals.length });
 });
 
 // C: zaxiralar ro'yxati va tiklash
@@ -1618,6 +1651,77 @@ app.get('/api/forecast/:shopId', async (req, res) => {
   const result = await computeForecast(req.params.shopId);
   if (!result.ok) return sendUzumError(res, result.error);
   res.json(result);
+});
+
+// 18-B: NAQD OQIM (cash flow) — botning yuragi. "sinyapmanmi yoki botyapmanmi" savoliga javob.
+// Bu oy: yechib olingan (keldi) − real xarajatlar − kredit to'lovlari = sof naqd oqim.
+// + Keyingi 30 kun proyeksiya: kutilayotgan kredit to'lovlari vs bashorat foyda.
+function creditDaysUntilDue(paymentDay) {
+  // Bugungi Toshkent sanasidan keyingi to'lov sanasigacha necha kun
+  const { date } = tashkentTimeParts();
+  const [y, m, d] = date.split('-').map(Number);
+  const pd = Math.min(28, Math.max(1, paymentDay || 1));
+  let dueYear = y, dueMonth = m;
+  if (d > pd) { dueMonth++; if (dueMonth > 12) { dueMonth = 1; dueYear++; } } // bu oy o'tgan bo'lsa keyingi oy
+  const due = new Date(Date.UTC(dueYear, dueMonth - 1, pd));
+  const todayUTC = new Date(Date.UTC(y, m - 1, d));
+  return Math.round((due - todayUTC) / 86400000);
+}
+
+async function computeCashFlow() {
+  const month = todayTashkent().slice(0, 7); // YYYY-MM
+  const withdrawals = syncedState.withdrawals || [];
+  const userExpenses = syncedState.userExpenses || [];
+  const credits = syncedState.credits || [];
+
+  const wdMonth = withdrawals.filter(w => (w.date || '').slice(0, 7) === month);
+  const withdrawnCame = wdMonth.filter(w => w.status === 'keldi').reduce((a, w) => a + (w.amount || 0), 0);
+  const withdrawnPending = wdMonth.filter(w => w.status !== 'keldi').reduce((a, w) => a + (w.amount || 0), 0);
+
+  const exMonth = userExpenses.filter(e => (e.date || '').slice(0, 7) === month);
+  const expensesTotal = exMonth.reduce((a, e) => a + (e.amount || 0), 0);
+  const expensesByCategory = {};
+  exMonth.forEach(e => { const c = e.category || 'Boshqa'; expensesByCategory[c] = (expensesByCategory[c] || 0) + (e.amount || 0); });
+
+  const creditMonthly = credits.reduce((a, c) => a + (c.monthlyPayment || 0), 0);
+  const creditRemaining = credits.reduce((a, c) => a + (c.remainingAmount || 0), 0);
+
+  const netCashFlow = withdrawnCame - expensesTotal - creditMonthly;
+
+  // B2: proyeksiya — keyingi 30 kun kredit to'lovlari
+  const upcomingCredits = credits.filter(c => creditDaysUntilDue(c.paymentDay) <= 30).reduce((a, c) => a + (c.monthlyPayment || 0), 0);
+  // Kutilayotgan Uzum foydasi (bashoratdan, barcha do'kon) — sof foyda (kassaga tushadigan yangi pul)
+  let expectedIncome = 0, forecastReady = false;
+  for (const shop of (syncedState.shops || [])) {
+    const f = await computeForecast(shop.shopId);
+    if (f.ok && f.ready) { expectedIncome += f.forecastProfit; forecastReady = true; }
+  }
+  let projection = null;
+  if (upcomingCredits > 0 || forecastReady) {
+    let risk, verdict;
+    if (!forecastReady) { risk = 'warn'; verdict = '⚠️ Bashorat uchun ma\'lumot yetarli emas — Uzum tushumini aniq bashorat qilib bo\'lmadi'; }
+    else if (expectedIncome >= upcomingCredits * 1.2) { risk = 'ok'; verdict = '✅ Yetadi — kutilayotgan foyda kredit to\'lovlaridan yuqori'; }
+    else if (expectedIncome >= upcomingCredits) { risk = 'warn'; verdict = '⚠️ Tanqislik bo\'lishi mumkin — foyda kredit to\'lovlariga tenglashyapti, zaxira pul saqlang'; }
+    else { risk = 'danger'; verdict = '🔴 Jiddiy xavf — kutilayotgan foyda kredit to\'lovlaridan KAM. Xarajatni kamaytiring yoki sotuvni oshiring'; }
+    projection = { upcomingCredits, expectedIncome, forecastReady, risk, verdict };
+  }
+
+  return {
+    ok: true, month,
+    withdrawnCame, withdrawnPending,
+    expensesTotal, expensesByCategory,
+    creditMonthly, creditRemaining,
+    netCashFlow, projection
+  };
+}
+
+app.get('/api/cash-flow', async (req, res) => {
+  try {
+    res.json(await computeCashFlow());
+  } catch (err) {
+    console.error('[CASH-FLOW] xato:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // D1/D2/D4/D5/6.3: barcha sozlangan do'konlar bo'yicha jamlangan ko'rsatkichlar (Dashboard "Barcha do'konlar" ko'rinishi uchun).

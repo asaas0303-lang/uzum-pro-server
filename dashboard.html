@@ -199,7 +199,13 @@
       forecast: null, // E: /api/forecast/:shopId natijasi (joriy do'kon)
       showAllShops: false, // 6.3: Dashboard "Barcha do'konlar" birlashtirilgan ko'rinishi
       allShopsSummary: null,
-      allShopsLoading: false
+      allShopsLoading: false,
+      // 18-A: MOLIYA ma'lumotlari (serverdan yuklanadi, faqat aniq harakat bilan yoziladi)
+      withdrawals: [], // { id, date, amount, shopId?, note, status }
+      userExpenses: [], // { id, date, amount, category, note }
+      credits: [], // { id, name, totalAmount, remainingAmount, monthlyPayment, paymentDay, type, note }
+      goals: [], // { id, type, target, createdDate }
+      cashFlow: null // 18-B: /api/cash-flow natijasi
     };
 
     // FAQAT foydalanuvchi sozlamalarini serverga yuboradi (do'kon/tannarx/bog'lanish).
@@ -248,6 +254,11 @@
         state.skuMappings = srv.skuMappings || {};
         state.costs = srv.costs || {};
         state.productSettings = srv.productSettings || {};
+        // 18-A: moliya ma'lumotlari — server manba
+        state.withdrawals = srv.withdrawals || [];
+        state.userExpenses = srv.userExpenses || [];
+        state.credits = srv.credits || [];
+        state.goals = srv.goals || [];
         if (srv.activeShop && state.shops.find(s => s.shopId === srv.activeShop)) {
           state.activeShop = srv.activeShop;
         } else if (state.shops.length > 0 && !state.shops.find(s => s.shopId === state.activeShop)) {
@@ -609,6 +620,9 @@ ${urgentSection}
         console.error("Bashoratni yuklashda xato:", e);
         state.forecast = null;
       }
+
+      // 18-B: naqd oqim (yechilgan/xarajat/kredit + proyeksiya)
+      await loadCashFlow();
 
       // 15: bu yerda avtomatik serverga yozish yo'q (avval syncStateToServer() chaqirilardi —
       // backend baribir products/orders/expenses'ni hech qayerda ishlatmasdi, faqat xotirada
@@ -1905,6 +1919,103 @@ ${urgentSection}
       else if (state.activeTab === 'dashboard') renderDashboard(document.getElementById('main-view'));
     }
 
+    // ============ 18-A: MOLIYA MA'LUMOTLARI BOSHQARUVI ============
+    // Server manba (Stage 15) — bu ma'lumotlar FAQAT aniq foydalanuvchi harakati bilan yoziladi.
+    function finId() { return 'f_' + Date.now() + '_' + Math.floor(Math.random() * 1000); }
+    function todayISO() { return new Date(Date.now() + 5 * 3600 * 1000).toISOString().slice(0, 10); }
+
+    // Barcha moliya ma'lumotini serverga yozadi (aniq harakatdan keyin), so'ng shu tab qayta render bo'ladi
+    async function saveFinanceData() {
+      try {
+        await fetch('/api/finance-data', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ withdrawals: state.withdrawals, userExpenses: state.userExpenses, credits: state.credits, goals: state.goals })
+        });
+      } catch (e) { console.error("Moliya ma'lumotini saqlashda xato:", e); alert("Saqlashda xato — internet aloqasini tekshiring"); }
+      // localStorage'ga ham aks ettiramiz (offline zaxira)
+      localStorage.setItem('uz_withdrawals', JSON.stringify(state.withdrawals));
+      localStorage.setItem('uz_userExpenses', JSON.stringify(state.userExpenses));
+      localStorage.setItem('uz_credits', JSON.stringify(state.credits));
+      localStorage.setItem('uz_goals', JSON.stringify(state.goals));
+      // Cash-flow'ni qayta yuklaymiz (B1 — o'zgargan ma'lumot aks etsin)
+      loadCashFlow().then(() => renderFinance(document.getElementById('main-view')));
+    }
+
+    // A1: yechib olingan pul
+    function addWithdrawal() {
+      const date = document.getElementById('wd-date').value || todayISO();
+      const amount = parseInt(document.getElementById('wd-amount').value) || 0;
+      const note = document.getElementById('wd-note').value.trim();
+      if (amount <= 0) return alert("Summani kiriting");
+      state.withdrawals.push({ id: finId(), date, amount, note, status: 'kutilmoqda' });
+      saveFinanceData();
+    }
+    function toggleWithdrawalStatus(id) {
+      const w = state.withdrawals.find(x => x.id === id);
+      if (w) { w.status = w.status === 'keldi' ? 'kutilmoqda' : 'keldi'; saveFinanceData(); }
+    }
+    function deleteWithdrawal(id) {
+      if (!confirm("Bu yozuvni o'chirasizmi?")) return;
+      state.withdrawals = state.withdrawals.filter(x => x.id !== id); saveFinanceData();
+    }
+
+    // A2: real xarajatlar
+    function addUserExpense() {
+      const date = document.getElementById('ue-date').value || todayISO();
+      const amount = parseInt(document.getElementById('ue-amount').value) || 0;
+      const category = document.getElementById('ue-category').value;
+      const note = document.getElementById('ue-note').value.trim();
+      if (amount <= 0) return alert("Summani kiriting");
+      state.userExpenses.push({ id: finId(), date, amount, category, note });
+      saveFinanceData();
+    }
+    function deleteUserExpense(id) {
+      if (!confirm("Bu xarajatni o'chirasizmi?")) return;
+      state.userExpenses = state.userExpenses.filter(x => x.id !== id); saveFinanceData();
+    }
+
+    // A3: kreditlar
+    function addCredit() {
+      const name = document.getElementById('cr-name').value.trim();
+      const totalAmount = parseInt(document.getElementById('cr-total').value) || 0;
+      const remainingAmount = parseInt(document.getElementById('cr-remaining').value) || totalAmount;
+      const monthlyPayment = parseInt(document.getElementById('cr-monthly').value) || 0;
+      const paymentDay = parseInt(document.getElementById('cr-day').value) || 1;
+      const type = document.getElementById('cr-type').value;
+      const note = document.getElementById('cr-note').value.trim();
+      if (!name || monthlyPayment <= 0) return alert("Kredit nomi va oylik to'lovni kiriting");
+      state.credits.push({ id: finId(), name, totalAmount, remainingAmount, monthlyPayment, paymentDay: Math.min(28, Math.max(1, paymentDay)), type, note });
+      saveFinanceData();
+    }
+    function markCreditPaid(id) {
+      const c = state.credits.find(x => x.id === id);
+      if (!c) return;
+      if (!confirm(`"${c.name}" uchun ${fmtMoney(c.monthlyPayment)} so'm to'lovni belgilaysizmi? Qolgan qarz kamayadi.`)) return;
+      c.remainingAmount = Math.max(0, (c.remainingAmount || 0) - c.monthlyPayment);
+      saveFinanceData();
+    }
+    function deleteCredit(id) {
+      if (!confirm("Bu kreditni o'chirasizmi?")) return;
+      state.credits = state.credits.filter(x => x.id !== id); saveFinanceData();
+    }
+
+    // C4: maqsad
+    function addGoal() {
+      const target = parseInt(document.getElementById('goal-target').value) || 0;
+      if (target <= 0) return alert("Maqsad summasini kiriting");
+      state.goals = [{ id: finId(), type: 'monthly_turnover', target, createdDate: todayISO() }]; // bitta faol maqsad
+      saveFinanceData();
+    }
+    function deleteGoal(id) {
+      state.goals = state.goals.filter(x => x.id !== id); saveFinanceData();
+    }
+
+    // 18-B: cash-flow serverdan
+    async function loadCashFlow() {
+      try { state.cashFlow = await fetchFromProxy('/api/cash-flow'); }
+      catch (e) { console.error("Naqd oqim yuklashda xato:", e); state.cashFlow = null; }
+    }
+
     // UI Panel: FINANCE & ACCOUNTING
     function renderFinance(root) {
       try {
@@ -2114,6 +2225,205 @@ ${urgentSection}
             `}
           </div>
 
+          <!-- 18-A/B: Moliya boshqaruvi (yechilgan pul, xarajatlar, kreditlar, maqsad, naqd oqim) -->
+          ${financeManagementHTML()}
+
+        </div>
+      `;
+      lucide.createIcons();
+    }
+
+    // 18-A/B: Moliya boshqaruvi bo'limlari HTML — Moliya tab oxirida ko'rsatiladi
+    function financeManagementHTML() {
+      const thisMonth = todayISO().slice(0, 7); // YYYY-MM
+      // A1 jamlanma
+      const wdThisMonth = state.withdrawals.filter(w => (w.date || '').slice(0, 7) === thisMonth);
+      const wdCameSum = wdThisMonth.filter(w => w.status === 'keldi').reduce((a, w) => a + (w.amount || 0), 0);
+      const wdPendingSum = wdThisMonth.filter(w => w.status !== 'keldi').reduce((a, w) => a + (w.amount || 0), 0);
+      // A2 jamlanma (bu oy, kategoriya bo'yicha)
+      const exThisMonth = state.userExpenses.filter(e => (e.date || '').slice(0, 7) === thisMonth);
+      const exByCat = {};
+      exThisMonth.forEach(e => { exByCat[e.category || 'Boshqa'] = (exByCat[e.category || 'Boshqa'] || 0) + (e.amount || 0); });
+      const exTotal = exThisMonth.reduce((a, e) => a + (e.amount || 0), 0);
+      // A3 jamlanma
+      const creditMonthly = state.credits.reduce((a, c) => a + (c.monthlyPayment || 0), 0);
+      const creditRemaining = state.credits.reduce((a, c) => a + (c.remainingAmount || 0), 0);
+      const cats = ['Xitoy tovar', 'Logistika', 'Reklama', 'Ijara', 'Ish haqi', 'Soliq', 'Boshqa'];
+      const goal = state.goals[0];
+
+      return `
+        <div class="border-t-2 border-brand/30 pt-4 mt-2">
+          <div class="text-sm font-black text-brand uppercase tracking-wider mb-3 flex items-center gap-2">
+            <i data-lucide="wallet" class="w-4.5 h-4.5"></i> Moliya boshqaruvi
+          </div>
+
+          ${cashFlowBlockHTML()}
+
+          <!-- A1: Yechib olingan pul -->
+          <div class="bg-darkCard border border-darkBorder rounded-2xl overflow-hidden mb-3">
+            <div class="p-3.5 cursor-pointer flex items-center justify-between" onclick="this.parentElement.querySelector('.fin-body').classList.toggle('hidden'); this.querySelector('.fin-chev').classList.toggle('rotate-180')">
+              <div class="flex flex-col">
+                <span class="text-xs font-bold text-slate-200">💵 Yechib olingan pul</span>
+                <span class="text-[10px] text-slate-500">Bu oy keldi: ${fmtMoney(wdCameSum)} · Kutilmoqda: ${fmtMoney(wdPendingSum)} so'm</span>
+              </div>
+              <i data-lucide="chevron-down" class="fin-chev w-4 h-4 text-slate-500 transition-transform"></i>
+            </div>
+            <div class="fin-body hidden px-3.5 pb-3.5 border-t border-darkBorder/40 pt-3 flex flex-col gap-2">
+              <div class="grid grid-cols-2 gap-2">
+                <input type="date" id="wd-date" value="${todayISO()}" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                <input type="number" id="wd-amount" placeholder="Summa (so'm)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              </div>
+              <input type="text" id="wd-note" placeholder="Izoh (ixtiyoriy)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <button onclick="addWithdrawal()" class="bg-brand text-darkBg font-bold text-xs py-2 rounded-lg badge-glow">+ Qo'shish</button>
+              <div class="text-[9.5px] text-slate-500">⚠️ Uzum'dan pul chiqarilgach kartaga 3-4 kunda tushadi. "Keldi" bo'lganini belgilang.</div>
+              <div class="flex flex-col gap-1.5 max-h-[180px] overflow-y-auto">
+                ${state.withdrawals.length === 0 ? `<div class="text-[11px] text-slate-500 text-center py-2">Hali yozuv yo'q</div>` :
+                  state.withdrawals.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '')).map(w => `
+                    <div class="flex items-center justify-between gap-2 p-2 rounded-lg bg-darkBg border border-darkBorder text-[11px]">
+                      <div class="flex flex-col min-w-0">
+                        <span class="font-semibold text-slate-200">${fmtMoney(w.amount)} so'm ${w.status === 'keldi' ? '<span class="text-emerald-400">✓ keldi</span>' : '<span class="text-amber-400">⏳ kutilmoqda</span>'}</span>
+                        <span class="text-[9.5px] text-slate-500">${w.date}${w.note ? ' · ' + w.note : ''}</span>
+                      </div>
+                      <div class="flex gap-1 shrink-0">
+                        <button onclick="toggleWithdrawalStatus('${w.id}')" class="text-[9px] px-1.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-300">${w.status === 'keldi' ? '↩ kutilmoqda' : '✓ keldi'}</button>
+                        <button onclick="deleteWithdrawal('${w.id}')" class="text-rose-500 px-1"><i data-lucide="trash" class="w-3.5 h-3.5"></i></button>
+                      </div>
+                    </div>`).join('')}
+              </div>
+            </div>
+          </div>
+
+          <!-- A2: Real xarajatlar -->
+          <div class="bg-darkCard border border-darkBorder rounded-2xl overflow-hidden mb-3">
+            <div class="p-3.5 cursor-pointer flex items-center justify-between" onclick="this.parentElement.querySelector('.fin-body').classList.toggle('hidden'); this.querySelector('.fin-chev').classList.toggle('rotate-180')">
+              <div class="flex flex-col">
+                <span class="text-xs font-bold text-slate-200">🧾 Real xarajatlar</span>
+                <span class="text-[10px] text-slate-500">Bu oy jami: ${fmtMoney(exTotal)} so'm</span>
+              </div>
+              <i data-lucide="chevron-down" class="fin-chev w-4 h-4 text-slate-500 transition-transform"></i>
+            </div>
+            <div class="fin-body hidden px-3.5 pb-3.5 border-t border-darkBorder/40 pt-3 flex flex-col gap-2">
+              <div class="grid grid-cols-2 gap-2">
+                <input type="date" id="ue-date" value="${todayISO()}" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                <input type="number" id="ue-amount" placeholder="Summa (so'm)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              </div>
+              <select id="ue-category" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                ${cats.map(c => `<option value="${c}">${c}</option>`).join('')}
+              </select>
+              <input type="text" id="ue-note" placeholder="Izoh (ixtiyoriy)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <button onclick="addUserExpense()" class="bg-brand text-darkBg font-bold text-xs py-2 rounded-lg badge-glow">+ Qo'shish</button>
+              ${Object.keys(exByCat).length > 0 ? `
+                <div class="border-t border-darkBorder/30 pt-2 mt-1">
+                  <div class="text-[10px] uppercase text-slate-500 mb-1">Bu oy kategoriya bo'yicha:</div>
+                  ${Object.entries(exByCat).sort((a, b) => b[1] - a[1]).map(([c, amt]) => `
+                    <div class="flex justify-between text-[10.5px] py-0.5"><span class="text-slate-400">${c}</span><span class="text-slate-300 font-mono">${fmtMoney(amt)} so'm</span></div>`).join('')}
+                </div>` : ''}
+              <div class="flex flex-col gap-1.5 max-h-[180px] overflow-y-auto">
+                ${state.userExpenses.length === 0 ? `<div class="text-[11px] text-slate-500 text-center py-2">Hali xarajat yo'q</div>` :
+                  state.userExpenses.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '')).map(e => `
+                    <div class="flex items-center justify-between gap-2 p-2 rounded-lg bg-darkBg border border-darkBorder text-[11px]">
+                      <div class="flex flex-col min-w-0">
+                        <span class="font-semibold text-slate-200">${fmtMoney(e.amount)} so'm · <span class="text-slate-400">${e.category}</span></span>
+                        <span class="text-[9.5px] text-slate-500">${e.date}${e.note ? ' · ' + e.note : ''}</span>
+                      </div>
+                      <button onclick="deleteUserExpense('${e.id}')" class="text-rose-500 px-1 shrink-0"><i data-lucide="trash" class="w-3.5 h-3.5"></i></button>
+                    </div>`).join('')}
+              </div>
+            </div>
+          </div>
+
+          <!-- A3: Kreditlar -->
+          <div class="bg-darkCard border border-darkBorder rounded-2xl overflow-hidden mb-3">
+            <div class="p-3.5 cursor-pointer flex items-center justify-between" onclick="this.parentElement.querySelector('.fin-body').classList.toggle('hidden'); this.querySelector('.fin-chev').classList.toggle('rotate-180')">
+              <div class="flex flex-col">
+                <span class="text-xs font-bold text-slate-200">🏦 Kreditlar</span>
+                <span class="text-[10px] text-slate-500">Oylik yuk: ${fmtMoney(creditMonthly)} · Qolgan qarz: ${fmtMoney(creditRemaining)} so'm</span>
+              </div>
+              <i data-lucide="chevron-down" class="fin-chev w-4 h-4 text-slate-500 transition-transform"></i>
+            </div>
+            <div class="fin-body hidden px-3.5 pb-3.5 border-t border-darkBorder/40 pt-3 flex flex-col gap-2">
+              <input type="text" id="cr-name" placeholder="Kredit nomi (masalan: Uzcard mikrozayom)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <div class="grid grid-cols-2 gap-2">
+                <input type="number" id="cr-total" placeholder="Umumiy summa" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                <input type="number" id="cr-remaining" placeholder="Qolgan summa" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <input type="number" id="cr-monthly" placeholder="Oylik to'lov" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                <input type="number" id="cr-day" placeholder="To'lov kuni (1-28)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              </div>
+              <select id="cr-type" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                <option value="fixed">Har oy bir xil (fixed)</option>
+                <option value="decreasing">Kamayib boradi (decreasing)</option>
+              </select>
+              <input type="text" id="cr-note" placeholder="Izoh (ixtiyoriy)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <button onclick="addCredit()" class="bg-brand text-darkBg font-bold text-xs py-2 rounded-lg badge-glow">+ Kredit qo'shish</button>
+              <div class="text-[9.5px] text-slate-500">⚠️ To'lov sanasidan 10 kun oldin bot ogohlantiradi (Uzum'dan pul chiqarishga ulgurish uchun).</div>
+              <div class="flex flex-col gap-1.5">
+                ${state.credits.length === 0 ? `<div class="text-[11px] text-slate-500 text-center py-2">Hali kredit yo'q</div>` :
+                  state.credits.map(c => `
+                    <div class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-[11px] flex flex-col gap-1">
+                      <div class="flex items-center justify-between">
+                        <span class="font-bold text-slate-200">${c.name}</span>
+                        <div class="flex gap-1">
+                          <button onclick="markCreditPaid('${c.id}')" class="text-[9px] px-1.5 py-1 rounded bg-emerald-900/40 border border-emerald-800 text-emerald-300">✓ To'ladim</button>
+                          <button onclick="deleteCredit('${c.id}')" class="text-rose-500 px-1"><i data-lucide="trash" class="w-3.5 h-3.5"></i></button>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-2 gap-x-3 text-[10px] text-slate-500">
+                        <span>Oylik: <strong class="text-slate-300">${fmtMoney(c.monthlyPayment)}</strong></span>
+                        <span>To'lov kuni: <strong class="text-slate-300">${c.paymentDay}</strong></span>
+                        <span>Qolgan: <strong class="text-slate-300">${fmtMoney(c.remainingAmount)}</strong></span>
+                        <span>Turi: <strong class="text-slate-300">${c.type === 'fixed' ? 'bir xil' : 'kamayuvchi'}</strong></span>
+                      </div>
+                    </div>`).join('')}
+              </div>
+            </div>
+          </div>
+
+          <!-- C4: Maqsad -->
+          <div class="bg-darkCard border border-darkBorder rounded-2xl overflow-hidden mb-1">
+            <div class="p-3.5 cursor-pointer flex items-center justify-between" onclick="this.parentElement.querySelector('.fin-body').classList.toggle('hidden'); this.querySelector('.fin-chev').classList.toggle('rotate-180')">
+              <div class="flex flex-col">
+                <span class="text-xs font-bold text-slate-200">🎯 Maqsad</span>
+                <span class="text-[10px] text-slate-500">${goal ? `Oylik aylanma: ${fmtMoney(goal.target)} so'm` : 'Maqsad qo\'yilmagan'}</span>
+              </div>
+              <i data-lucide="chevron-down" class="fin-chev w-4 h-4 text-slate-500 transition-transform"></i>
+            </div>
+            <div class="fin-body hidden px-3.5 pb-3.5 border-t border-darkBorder/40 pt-3 flex flex-col gap-2">
+              <span class="text-[10.5px] text-slate-400">Oylik aylanma maqsadingizni kiriting — AI murabbiy bosqichlarga bo'lib, yo'l ko'rsatadi.</span>
+              <input type="number" id="goal-target" value="${goal ? goal.target : ''}" placeholder="Masalan: 200000000 (200 mln)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <button onclick="addGoal()" class="bg-brand text-darkBg font-bold text-xs py-2 rounded-lg badge-glow">Maqsadni saqlash</button>
+              ${goal ? `<button onclick="deleteGoal('${goal.id}')" class="text-[10px] text-rose-400">Maqsadni o'chirish</button>` : ''}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // 18-B1: Naqd oqim bloki — /api/cash-flow natijasidan (Group B endpoint)
+    function cashFlowBlockHTML() {
+      const cf = state.cashFlow;
+      if (!cf || !cf.ok) return '';
+      const net = cf.netCashFlow;
+      const color = net >= 0 ? 'text-brand' : 'text-rose-400';
+      const label = net >= 0 ? `✅ Bu oy ${fmtMoney(net)} so'm foydadasiz` : `🔴 Bu oy ${fmtMoney(Math.abs(net))} so'm zarardasiz — xarajatlar daromaddan oshyapti`;
+      return `
+        <div class="bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20 rounded-2xl p-4 mb-3">
+          <div class="text-[11px] text-brand uppercase tracking-wider font-mono mb-2">💰 Naqd oqim — bu oy</div>
+          <div class="flex flex-col gap-1 text-[11px]">
+            <div class="flex justify-between"><span class="text-slate-400">+ Yechib olingan pul (keldi):</span><span class="text-emerald-400 font-mono">${fmtMoney(cf.withdrawnCame)} so'm</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">− Real xarajatlar:</span><span class="text-slate-300 font-mono">${fmtMoney(cf.expensesTotal)} so'm</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">− Kredit to'lovlari:</span><span class="text-slate-300 font-mono">${fmtMoney(cf.creditMonthly)} so'm</span></div>
+            <div class="flex justify-between border-t border-darkBorder/40 pt-1 mt-0.5"><span class="text-slate-300 font-bold">= Sof naqd oqim:</span><span class="font-black font-mono ${color}">${fmtMoney(net)} so'm</span></div>
+          </div>
+          <div class="text-[10.5px] mt-2 font-semibold ${color}">${label}</div>
+          ${cf.projection ? `
+            <div class="border-t border-darkBorder/40 mt-2.5 pt-2">
+              <div class="text-[10px] uppercase text-slate-500 mb-1">Keyingi 30 kun proyeksiya:</div>
+              <div class="flex justify-between text-[10.5px]"><span class="text-slate-400">Kutilayotgan kredit to'lovlari:</span><span class="text-slate-300 font-mono">${fmtMoney(cf.projection.upcomingCredits)} so'm</span></div>
+              <div class="flex justify-between text-[10.5px]"><span class="text-slate-400">Kutilayotgan Uzum tushumi (~):</span><span class="text-slate-300 font-mono">~${fmtMoney(cf.projection.expectedIncome)} so'm</span></div>
+              <div class="text-[10.5px] mt-1 font-semibold ${cf.projection.risk === 'ok' ? 'text-brand' : cf.projection.risk === 'warn' ? 'text-amber-400' : 'text-rose-400'}">${cf.projection.verdict}</div>
+            </div>` : ''}
         </div>
       `;
     }
