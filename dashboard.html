@@ -2491,41 +2491,59 @@ ${urgentSection}
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-brand/10 text-brand border border-brand/20 font-mono font-bold">GEMINI FLASH</span>
             </div>
 
-            <span class="text-[11px] text-slate-400 leading-normal">Joriy zaxira, do'kon narxlari va moliya kutilmalari asosida aqlli maslahatlar va Xitoydan buyurtma qilish rejalarini yuklang:</span>
+            <span class="text-[11px] text-slate-400 leading-normal">Do'kon holati, naqd oqim, kreditlar, xarajat va bashorat asosida — moliyaviy murabbiy sizga bugungi 3 ta muhim ishni pul bilan ko'rsatadi:</span>
 
             <!-- Prompt triggering action -->
             <div class="mt-2.5 flex flex-col gap-2">
               <button onclick="askGeminiAdvice()" id="gemini-trigger-btn" class="w-full bg-brand hover:bg-brandDark text-darkBg font-extrabold text-xs py-2.5 rounded-xl transition badge-glow flex items-center justify-center gap-2">
-                <i data-lucide="brain-circuit" class="w-4 h-4"></i> "Bugun nima qilishim kerak?" va AI Tahlil
+                <i data-lucide="brain-circuit" class="w-4 h-4"></i> AI Moliyaviy Murabbiy — tahlil qil
               </button>
             </div>
 
-            <!-- Result block -->
-            <div id="ai-results-panel" class="mt-3.5 flex flex-col gap-3.5 hidden">
-              <!-- Dynamically populated answer tabs -->
-              <div class="grid grid-cols-2 gap-1.5">
-                <button onclick="selectAiTab('bugun')" id="ai-btn-bugun" class="px-2.5 py-1.5 text-[10.5px] text-slate-400 bg-darkBg border border-darkBorder rounded-lg hover:text-brand font-semibold font-sans">1. Bugun nima qilish</button>
-                <button onclick="selectAiTab('ombor')" id="ai-btn-ombor" class="px-2.5 py-1.5 text-[10.5px] text-slate-400 bg-darkBg border border-darkBorder rounded-lg hover:text-brand font-semibold font-sans">2. FBOga yuborish</button>
-                <button onclick="selectAiTab('reklama')" id="ai-btn-reklama" class="px-2.5 py-1.5 text-[10.5px] text-slate-400 bg-darkBg border border-darkBorder rounded-lg hover:text-brand font-semibold font-sans">3. Reklama & ROI</button>
-                <button onclick="selectAiTab('sotuv_pasayishi')" id="ai-btn-sotuv_pasayishi" class="px-2.5 py-1.5 text-[10.5px] text-slate-400 bg-darkBg border border-darkBorder rounded-lg hover:text-brand font-semibold font-sans">4. Sotuv tahlili</button>
-                <button onclick="selectAiTab('xitoy_buyurtmasi')" id="ai-btn-xitoy_buyurtmasi" class="px-2.5 py-1.5 text-[10.5px] text-slate-400 bg-darkBg border border-darkBorder rounded-lg hover:text-brand font-semibold font-sans">5. Xitoy buyurtmalari</button>
-                <button onclick="selectAiTab('eng_yaxshi')" id="ai-btn-eng_yaxshi" class="px-2.5 py-1.5 text-[10.5px] text-slate-400 bg-darkBg border border-darkBorder rounded-lg hover:text-brand font-semibold font-sans font-sans">6. Eng yaxshi SKU</button>
-              </div>
-
-              <div class="p-3.5 bg-darkBg/95 border border-darkBorder rounded-2xl flex flex-col gap-1 inline-block">
-                <span id="ai-selected-title" class="text-[10.5px] uppercase font-bold text-slate-400 tracking-wider">Bugun tahlil</span>
-                <span id="ai-selected-text" class="text-xs text-slate-300 leading-relaxed font-sans mt-1">Tanlang ...</span>
-              </div>
-            </div>
+            <!-- Result block (18-C3) -->
+            <div id="ai-results-panel" class="mt-3.5 hidden"></div>
 
           </div>
 
         </div>
       `;
-      if (state.aiResults) {
-        document.getElementById('ai-results-panel').classList.remove('hidden');
-        selectAiTab('bugun');
-      }
+      if (state.aiResults) renderAiCoach();
+    }
+
+    // 18-C3: AI murabbiy natijasini render qiladi (moliya_holati, bugungi_ishlar, maqsad, xitoy)
+    function renderAiCoach() {
+      const panel = document.getElementById('ai-results-panel');
+      if (!panel) return;
+      const d = state.aiResults;
+      if (!d) { panel.classList.add('hidden'); return; }
+      panel.classList.remove('hidden');
+      const ishlar = Array.isArray(d.bugungi_ishlar) ? d.bugungi_ishlar : [];
+      panel.innerHTML = `
+        <div class="flex flex-col gap-3">
+          ${d.moliya_holati ? `
+            <div class="bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20 rounded-2xl p-3.5">
+              <div class="text-[10px] uppercase font-bold text-brand tracking-wider mb-1.5">💰 Moliyaviy holat</div>
+              <div class="text-xs text-slate-200 leading-relaxed whitespace-pre-line">${d.moliya_holati}</div>
+            </div>` : ''}
+          ${ishlar.length ? `
+            <div class="bg-darkBg/95 border border-darkBorder rounded-2xl p-3.5">
+              <div class="text-[10px] uppercase font-bold text-slate-300 tracking-wider mb-2">🎯 Bugungi ${ishlar.length} ish</div>
+              <div class="flex flex-col gap-2.5">
+                ${ishlar.map(x => `<div class="text-xs text-slate-200 leading-relaxed whitespace-pre-line border-l-2 border-brand/40 pl-2.5">${x}</div>`).join('')}
+              </div>
+            </div>` : ''}
+          ${d.maqsad ? `
+            <div class="bg-darkBg/95 border border-darkBorder rounded-2xl p-3.5">
+              <div class="text-[10px] uppercase font-bold text-amber-400 tracking-wider mb-1.5">🏆 Maqsad</div>
+              <div class="text-xs text-slate-200 leading-relaxed whitespace-pre-line">${d.maqsad}</div>
+            </div>` : ''}
+          ${d.xitoy_buyurtma ? `
+            <div class="bg-darkBg/95 border border-darkBorder rounded-2xl p-3.5">
+              <div class="text-[10px] uppercase font-bold text-orange-400 tracking-wider mb-1.5">🚚 Xitoy buyurtma</div>
+              <div class="text-xs text-slate-200 leading-relaxed whitespace-pre-line">${d.xitoy_buyurtma}</div>
+            </div>` : ''}
+        </div>
+      `;
     }
 
     // Simulator handler
@@ -2561,71 +2579,30 @@ ${urgentSection}
       }, 500);
     }
 
-    // Call server Gemini Advisor API
+    // 18-C: AI moliyaviy murabbiy — server to'liq kontekstni o'zi yig'adi (faqat shopId yuboramiz)
     async function askGeminiAdvice() {
       const btn = document.getElementById('gemini-trigger-btn');
       btn.disabled = true;
-      btn.innerHTML = `<i class="w-4 h-4 animate-spin inline-block mr-1"></i> Tahlil qilinmoqda (Gemini AI)...`;
-      
+      btn.innerHTML = `<i class="w-4 h-4 animate-spin inline-block mr-1"></i> Murabbiy tahlil qilmoqda...`;
       try {
-        const payload = {
-          currentInventory: state.cachedUzumProducts,
-          activeProductTypes: state.productTypes,
-          currentSales: state.orders,
-          activeShopTitle: getActiveShopName()
-        };
-
         const response = await fetch('/api/gemini/advice', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: JSON.stringify({ shopId: state.activeShop })
         });
-
         if (!response.ok) {
-          const errRes = await response.json();
-          throw new Error(errRes.error || "Gemini API failed");
+          const errRes = await response.json().catch(() => ({}));
+          throw new Error(errRes.error || "AI murabbiy xatosi");
         }
-
-        const data = await response.json();
-        state.aiResults = data;
-        
-        document.getElementById('ai-results-panel').classList.remove('hidden');
-        selectAiTab('bugun');
+        state.aiResults = await response.json();
+        renderAiCoach();
       } catch (err) {
         alert(err.message || "Xatolik yuz berdi. Qayta urinib ko'ring.");
       } finally {
         btn.disabled = false;
-        btn.innerHTML = `<i data-lucide="brain-circuit" class="w-4 h-4"></i> "Bugun nima qilishim kerak?" va AI Tahlil`;
+        btn.innerHTML = `<i data-lucide="brain-circuit" class="w-4 h-4"></i> AI Moliyaviy Murabbiy — tahlil qil`;
         lucide.createIcons();
       }
-    }
-
-    function selectAiTab(key) {
-      if (!state.aiResults) return;
-      
-      const subTabs = ['bugun', 'ombor', 'reklama', 'sotuv_pasayishi', 'xitoy_buyurtmasi', 'eng_yaxshi'];
-      subTabs.forEach(t => {
-        const btn = document.getElementById(`ai-btn-${t}`);
-        if (btn) {
-          if (t === key) {
-            btn.className = "px-2.5 py-1.5 text-[10.5px] text-darkBg bg-brand border border-brand/50 rounded-lg font-bold font-sans";
-          } else {
-            btn.className = "px-2.5 py-1.5 text-[10.5px] text-slate-400 bg-darkBg border border-darkBorder rounded-lg hover:text-brand font-semibold font-sans";
-          }
-        }
-      });
-
-      const titleMap = {
-        bugun: "1. BUGUN NIMA QILISH KERAK?",
-        ombor: "2. QAYSI KARTOCKHAGA TOVAR YUBORISH REJASI",
-        reklama: "3. REKLAMA BYUDJETI VA ROI TAHLILI",
-        sotuv_pasayishi: "4. SOTILISHI PASAYIB KETAYOTGAN SKUlar",
-        xitoy_buyurtmasi: "5. XITOYDAN RE-ORDERING REJASI (28 kunga)",
-        eng_yaxshi: "6. ENG YAXSHI ISHLAYOTGAN KARTOCKHALAR"
-      };
-
-      document.getElementById('ai-selected-title').textContent = titleMap[key] || "Malumotlar";
-      document.getElementById('ai-selected-text').innerHTML = state.aiResults[key] || "Matn kutilmoqda...";
     }
 
     // Secret configurations saving

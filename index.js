@@ -1052,64 +1052,137 @@ app.get('/api/uzum/return', async (req, res) => {
 });
 
 // 3. Gemini Server AI Advice Engine
-app.post('/api/gemini/advice', async (req, res) => {
-  const { currentInventory, activeProductTypes, currentSales, activeShopTitle } = req.body;
-  const apiKey = process.env.GEMINI_API_KEY;
+// 18-C2: AI moliyaviy murabbiy uchun TO'LIQ kontekst — server tomonda yig'iladi (frontend'dan emas).
+// Do'kon holati (per-SKU metrikalar), naqd oqim, kreditlar, xarajat trendi, bashorat, maqsad, Uzum muammolari.
+// Token tejash uchun: eng muhim SKU'lar (A-toifa / kam zaxira / nolikvid / bloklangan) va qisqa matn.
+async function buildAiContext(shopId) {
+  shopId = shopId || syncedState.activeShop;
+  const shop = (syncedState.shops || []).find(s => String(s.shopId) === String(shopId));
+  const shopTitle = shop ? shop.shopTitle : `Shop ${shopId}`;
+  const lines = [];
 
-  if (!apiKey) {
-    return res.status(400).json({
-      error: "Gemini API kaliti yo'qligi sababli tavsiyalar yuklanmadi. Iltimos Secrets menyusidan GEMINI_API_KEY ni kiriting."
+  const prod = await fetchLiveShopProducts(shopId);
+  const metrics = await computeSkuMetrics(shopId);
+  const problems = []; // D0: faol Uzum muammolari
+
+  if (prod.ok && metrics.ok) {
+    const skuRows = [];
+    prod.products.forEach(p => {
+      const isBanned = p.status?.value === 'PERM_BANNED';
+      (p.skuList || []).forEach(sku => {
+        const avail = Math.max(0, sku.availableAmount || 0);
+        const m = metrics.perSku[sku.skuId] || {};
+        const price = sku.purchasePrice || 0;
+        const productId = p.productId;
+        const commission = price * (commissionPct(sku.skuId, sku, productId) / 100);
+        const logi = resolveLogistics(sku.skuId, productId, sku).val;
+        const stor = resolveStorage(sku.skuId, productId, sku).val;
+        const tInfo = resolveTannarx(sku.skuId, productId);
+        const profit = price - commission - logi - stor - tInfo.tannarx;
+        const margin = price > 0 ? (profit / price) * 100 : 0;
+        const stockDays = m.canCompute ? (m.stockDays30 != null ? m.stockDays30 : m.stockDays7) : null;
+        skuRows.push({ title: sku.skuTitle, rank: sku.rank, avail, stockDays, avgDaily: m.avgDaily30 != null ? m.avgDaily30 : m.avgDaily7, price, profit, margin, isDeadStock: m.isDeadStock, needsReorder: m.needsReorder, isBanned, blockReason: (sku.skuBlockReason && sku.skuBlockReason.title) || (isBanned ? 'bloklangan' : null) });
+        // D0 muammolar
+        if (isBanned) problems.push(`🚫 ${sku.skuTitle} bloklangan${sku.skuBlockReason?.title ? ' — ' + sku.skuBlockReason.title : ''}`);
+        else if (avail <= 0 && sku.rank === 'A') problems.push(`🔴 ${sku.skuTitle} (A toifa) tugadi — TOPdan tushmoqda`);
+        else if (stockDays != null && stockDays < 3) problems.push(`🟠 ${sku.skuTitle} ${stockDays.toFixed(0)} kunda tugaydi`);
+        if (m.isDeadStock && avail > 0) problems.push(`❄️ ${sku.skuTitle} nolikvid (${fmtMoney(tInfo.tannarx * avail)} so'm qotgan)`);
+      });
     });
+    // Eng muhim SKU'lar: A-toifa yoki kam zaxira yoki nolikvid yoki bloklangan
+    const important = skuRows.filter(r => r.rank === 'A' || (r.stockDays != null && r.stockDays < 14) || r.isDeadStock || r.isBanned || r.needsReorder).slice(0, 20);
+    lines.push(`## DO'KON: ${shopTitle}`);
+    lines.push(`Muhim SKU'lar (${important.length} ta ko'rsatilyapti):`);
+    important.forEach(r => {
+      lines.push(`- ${r.title} | ABC:${r.rank || '?'} | zaxira:${r.avail} dona | ${r.stockDays != null ? r.stockDays.toFixed(0) + ' kunga yetadi' : 'sotuv tarixi yo\'q'} | kunlik:${r.avgDaily != null ? r.avgDaily.toFixed(1) : '?'} | narx:${fmtMoney(r.price)} | sof foyda/dona:${fmtMoney(r.profit)} (marja ${r.margin.toFixed(0)}%)${r.isDeadStock ? ' | NOLIKVID' : ''}${r.needsReorder ? ' | XITOY BUYURTMA KERAK' : ''}${r.isBanned ? ' | BLOKLANGAN' : ''}`);
+    });
+  } else {
+    lines.push(`## DO'KON: ${shopTitle} — Uzum ma'lumoti olinmadi (${prod.error || metrics.error})`);
   }
 
-  try {
-    const ai = new GoogleGenAI({
-      apiKey: apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build'
-        }
-      }
-    });
+  // Oylik aylanma (30 kunlik moliya xulosasi)
+  const fin = await computeFinanceSummary(shopId, 30);
+  if (fin.ok && fin.ready) {
+    lines.push(`\n## OYLIK AYLANMA (oxirgi ${fin.actualSpanDays} kun, sof):`);
+    lines.push(`Sof sotuv (kamida): ${fin.soldTotalNet} dona | Aylanma: ~${fmtMoney(fin.totalSales)} so'm | Sof foyda: ~${fmtMoney(fin.totalProfit)} so'm`);
+  }
 
-    const inventoryStr = JSON.stringify(currentInventory, null, 2);
-    const typesStr = JSON.stringify(activeProductTypes, null, 2);
-    const salesStr = JSON.stringify(currentSales, null, 2);
+  // Bashorat
+  const fc = await computeForecast(shopId);
+  if (fc.ok && fc.ready) {
+    lines.push(`\n## BASHORAT (keyingi 30 kun, ishonch: ${fc.confidence}):`);
+    lines.push(`Kutilayotgan aylanma: ~${fmtMoney(fc.forecastSales)} so'm | sof foyda: ~${fmtMoney(fc.forecastProfit)} so'm`);
+  }
 
-    const prompt = `Uzum Market sotuvchisiga o'zbek tilida batafsil va amaliy maslahatlar bering.
-Quyidagi ma'lumotlarga asoslanib, savollarimizga javob bering.
+  // Naqd oqim + kreditlar + xarajatlar (barcha do'konlar uchun umumiy — moliya do'konga bog'liq emas)
+  const cf = await computeCashFlow();
+  if (cf.ok) {
+    lines.push(`\n## NAQD OQIM (bu oy, barcha do'konlar):`);
+    lines.push(`Yechib olingan (keldi): ${fmtMoney(cf.withdrawnCame)} | Kutilmoqda: ${fmtMoney(cf.withdrawnPending)}`);
+    lines.push(`Real xarajatlar: ${fmtMoney(cf.expensesTotal)} so'm${Object.keys(cf.expensesByCategory).length ? ' (' + Object.entries(cf.expensesByCategory).map(([c, a]) => c + ': ' + fmtMoney(a)).join(', ') + ')' : ''}`);
+    lines.push(`Kredit oylik yuki: ${fmtMoney(cf.creditMonthly)} | Qolgan umumiy qarz: ${fmtMoney(cf.creditRemaining)}`);
+    lines.push(`SOF NAQD OQIM: ${fmtMoney(cf.netCashFlow)} so'm (${cf.netCashFlow >= 0 ? 'FOYDA' : 'ZARAR'})`);
+    if (cf.projection) lines.push(`Proyeksiya: kutilayotgan kredit ${fmtMoney(cf.projection.upcomingCredits)} vs bashorat foyda ${fmtMoney(cf.projection.expectedIncome)} → ${cf.projection.verdict}`);
+  }
+  // Kreditlar — keyingi to'lov sanalari
+  if ((syncedState.credits || []).length) {
+    lines.push(`\n## KREDITLAR:`);
+    syncedState.credits.forEach(c => lines.push(`- ${c.name}: oylik ${fmtMoney(c.monthlyPayment)}, to'lov kuni ${c.paymentDay} (${creditDaysUntilDue(c.paymentDay)} kundan keyin), qolgan ${fmtMoney(c.remainingAmount)}`));
+  }
+  // Maqsad
+  const goal = (syncedState.goals || [])[0];
+  if (goal) lines.push(`\n## MAQSAD: oylik aylanma ${fmtMoney(goal.target)} so'm`);
 
-Do'kon nomi: ${activeShopTitle || 'Uzum Pro Store'}
-Tovar turlari (Uy zaxirasi): ${typesStr}
-Uzum omboridagi joriy kartochkalar va SKU zaxiralari: ${inventoryStr}
-Yaqub kunlar bo'yicha sotuv natijalari: ${salesStr}
+  // D0 muammolar
+  if (problems.length) {
+    lines.push(`\n## FAOL UZUM MUAMMOLARI (${problems.length} ta):`);
+    problems.slice(0, 12).forEach(p => lines.push(`- ${p}`));
+  }
 
-Quyidagi 6 ta savolning har biriga o'zbek tilida aniq, tushunarli va professional tavsiyalar tayyorlang:
-1. "Bugun nima qilishim kerak?" (Bugungi dolzarb harakatlar va buyruqlar)
-2. "Qaysi kartochkaga qaysi tovar turidan yuboring?" (Omborga yuborish/FBO rejasi)
-3. "Reklamaga qancha pul tikish kerak? (zarar ko'rmaslik uchun)" (Sotuv va xarajat nisbatidan kelib chiqadigan byudjet maslahati)
-4. "Qaysi tovar sotuvi paslamoqda?" (Sotuv ko'rsatkichlari pasayib borayotgan mahsulotlar ogohlantirishi)
-5. "Xitoydan nima va qancha buyurtma qilay?" (Yetkazish 28 kunligini hisobga olgan holda reordering rejasi)
-6. "Qaysi kartochka eng yaxshi ishlayapti?" (Eng serdaromad kartochkani aniqlash)
-
-Natijani quyidagi va faqatgina quyidagi JSON formatida qaytaring:
-{
-  "bugun": "...",
-  "ombor": "...",
-  "reklama": "...",
-  "sotuv_pasayishi": "...",
-  "xitoy_buyurtmasi": "...",
-  "eng_yaxshi": "..."
+  return { text: lines.join('\n'), shopTitle, hasData: prod.ok, problems };
 }
 
-Javoblarda real raqam va mahsulot nomlaridan foydalaning. Hech qanday qo'shimcha matnsiz yoki markdown kod bloklarisiz (masalan, \`\`\`json bo'lmasin, toza JSON matni bo'lsin) faqat JSON ni qaytaring.`;
+// 18-C: AI MOLIYAVIY MURABBIY — eski oddiy maslahatchi butunlay qayta yozildi.
+app.post('/api/gemini/advice', async (req, res) => {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(400).json({ error: "GEMINI_API_KEY sozlanmagan (Railway Variables'da bo'lishi kerak)." });
+  }
+  try {
+    const shopId = req.body?.shopId || syncedState.activeShop;
+    const ctx = await buildAiContext(shopId);
+    const kb = loadKnowledgeBase().replace(/## 6\. RAQOBATCHILAR[\s\S]*?(?=\n## 7\.)/, ''); // raqobatchilar bo'limini token tejash uchun chiqaramiz
+
+    const ai = new GoogleGenAI({ apiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } });
+
+    const prompt = `Sen Uzum Market sotuvchisining shaxsiy MOLIYAVIY MURABBIYIsan. O'zbek tilida javob ber.
+Foydalanuvchi maqsadi: "sinyapmanmi yoki botyapmanmi — aniq raqamlarda bilish" va moliyaviy erkinlikka chiqish.
+
+QAT'IY QOIDALAR:
+- Har tavsiya ANIQ PUL raqami bilan (necha so'm yutiladi/yo'qotiladi).
+- Ma'lumot yo'q bo'lsa "ma'lumot yo'q" deb yoz — SOXTA RAQAM BERMA, taxmin qilma.
+- "Bugungi ishlar" — eng ko'pi 3 ta, ustuvorlik bo'yicha (eng ko'p pul yo'qotilayotgani birinchi).
+- Har ish: NIMA qilish + NEGA (xavf) + kechiksa NIMA bo'ladi (pul).
+- Xitoy buyurtma mantig'i: zaxira_tugash_kuni = zaxira ÷ kunlik_sotuv. Yetkazish 28 kun (21 yo'l + 5 sotuvga chiqish + 2 zaxira). Agar zaxira_tugash ≤ 28 → hozir buyurtma ber, tavsiya miqdor = kunlik × 30.
+
+=== BILIMLAR BAZASI (Uzum qoidalari) ===
+${kb}
+
+=== JORIY HOLAT (real ma'lumot) ===
+${ctx.text}
+
+Quyidagi JSON formatida javob ber (faqat toza JSON, markdown kod bloki YO'Q):
+{
+  "moliya_holati": "Bu oy foyda/zarar holati aniq raqamda + keyingi kredit to'lovi ogohlantirishi (agar bor bo'lsa). 2-3 jumla.",
+  "bugungi_ishlar": ["1. [belgi] NIMA — nega xavfli, kechiksa qancha pul yo'qoladi", "2. ...", "3. ..."],
+  "maqsad": "Agar maqsad qo'yilgan bo'lsa: hozirgi holat vs maqsad, keyingi bosqich, qachon erishish mumkin. Yo'q bo'lsa bo'sh string.",
+  "xitoy_buyurtma": "Xitoydan buyurtma kerak bo'lgan SKU'lar: qaysi, qancha dona, taxminiy foyda. Yo'q bo'lsa 'Hozircha shoshilinch buyurtma kerak emas'."
+}`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.5-flash',
       contents: prompt,
-      config: {
-        responseMimeType: 'application/json'
-      }
+      config: { responseMimeType: 'application/json' }
     });
 
     const responseText = response.text || '';
@@ -1117,16 +1190,13 @@ Javoblarda real raqam va mahsulot nomlaridan foydalaning. Hech qanday qo'shimcha
     try {
       parsedData = JSON.parse(responseText.trim());
     } catch (parseErr) {
-      console.warn("JSON parsing failed, trying to clean JSON format", parseErr);
-      // Clean up optional ```json wraps if any sneaky ones bypassed the constraint
-      let cleanText = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
+      const cleanText = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
       parsedData = JSON.parse(cleanText);
     }
-
     res.json(parsedData);
   } catch (err) {
-    console.error("Gemini API call failed:", err);
-    res.status(500).json({ error: "Gemini AI xizmati bilan bog'lanishda xatolik yuz berdi: " + err.message });
+    console.error("AI murabbiy xato:", err);
+    res.status(500).json({ error: "AI murabbiy bilan bog'lanishda xato: " + err.message });
   }
 });
 
