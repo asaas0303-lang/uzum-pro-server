@@ -1430,10 +1430,13 @@ ${urgentSection}
               <div class="text-[11px] text-slate-500 py-1">Ma'lumot yig'ilmoqda (${state.financeSummary?.snapshotCount || 0} kun)</div>
             ` : `
               <div class="flex flex-col gap-1 text-[11px]">
-                <div class="flex justify-between"><span class="text-slate-400">Aylanma (sof):</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.totalSales)} so'm</span></div>
-                <div class="flex justify-between"><span class="text-slate-400">Sof foyda:</span><span class="font-bold text-brand">${fmtMoney(state.financeSummary.totalProfit)} so'm${state.financeSummary.totalSales > 0 ? ` (${fmtPct((state.financeSummary.totalProfit/state.financeSummary.totalSales)*100)}%)` : ''}</span></div>
-                <!-- 16: "Qaytarilgan" olib tashlandi (chalg'ituvchi umriy/kechikuvchi hisoblagich) -->
-                <div class="flex justify-between"><span class="text-slate-400">Sotilgan · Sof:</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.soldTotal)} · ${fmtMoney(state.financeSummary.soldTotalNet)} dona</span></div>
+                <!-- 17: ko'p kunlik davrda gross oshib ketadi; NET quyi chegara + "~" ko'rsatiladi -->
+                <div class="flex justify-between"><span class="text-slate-400">Aylanma (sof):</span><span class="font-semibold text-slate-200">${state.financeSummary.actualSpanDays > 1 ? '~' : ''}${fmtMoney(state.financeSummary.totalSales)} so'm</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">Sof foyda:</span><span class="font-bold text-brand">${state.financeSummary.actualSpanDays > 1 ? '~' : ''}${fmtMoney(state.financeSummary.totalProfit)} so'm${state.financeSummary.totalSales > 0 ? ` (${fmtPct((state.financeSummary.totalProfit/state.financeSummary.totalSales)*100)}%)` : ''}</span></div>
+                ${state.financeSummary.actualSpanDays > 1
+                  ? `<div class="flex justify-between"><span class="text-slate-400">Sotilgan (kamida):</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.soldTotalNet)} dona</span></div>
+                     <div class="text-[9.5px] text-amber-400/80 mt-0.5">📉 Taxminiy quyi chegara — so'nggi kunlar hali to'liq tasdiqlanmagan</div>`
+                  : `<div class="flex justify-between"><span class="text-slate-400">Sotilgan · Sof:</span><span class="font-semibold text-slate-200">${fmtMoney(state.financeSummary.soldTotal)} · ${fmtMoney(state.financeSummary.soldTotalNet)} dona</span></div>`}
                 ${state.financeSummary.period === 'today' ? `<div class="text-[9.5px] text-amber-400/80 mt-0.5">⏳ Bu qisman ma'lumot — kun hali tugamagan</div>` : ''}
                 ${state.financeSummary.partial && state.financeSummary.period !== 'today' ? `<div class="text-[9.5px] text-amber-400/80 mt-0.5">⚠️ Faqat ${state.financeSummary.actualSpanDays} kunlik ma'lumot mavjud</div>` : ''}
                 <div class="text-[9.5px] text-slate-500 mt-0.5">⏳ So'nggi kunlar ma'lumoti Uzum tasdiqlashi bilan yangilanadi</div>
@@ -1949,6 +1952,8 @@ ${urgentSection}
       const totalProfit = finReady ? fin.totalProfit - realExpensesTotal : 0;
       const profitColor = totalProfit >= 0 ? 'text-brand' : 'text-rose-400';
       const periodLabel = financePeriodLabel(fin);
+      // 17: ko'p kunlik davrda (hafta/oy) summalar quyi chegara — "~" prefiksi bilan belgilanadi
+      const approx = (finReady && fin.actualSpanDays > 1) ? '~' : '';
 
       // 14C1: davr tanlash pill-tugmalari
       const periodDefs = [
@@ -2001,35 +2006,41 @@ ${urgentSection}
               </div>
             ` : `
             <div class="flex flex-col gap-2 font-medium">
-              <!-- 14/16: sanoq (gross, Uzum bilan mos) va pul (sof). "Qaytarilgan" olib tashlandi
-                   (chalg'ituvchi — umriy/kechikuvchi hisoblagichdan keladi, "shu davr" qaytarishi emas) -->
-              <div class="flex justify-between text-xs py-1">
-                <span class="text-slate-400">Sotilgan · Sof:</span>
-                <span class="text-slate-100 font-mono">${fmtMoney(fin.soldTotal)} · ${fmtMoney(fin.soldTotalNet)} dona</span>
-              </div>
+              <!-- 14/16/17: "Qaytarilgan" olib tashlandi. Ko'p kunlik davrda (hafta/oy) gross oshib
+                   ketadi, shuning uchun "Sotilgan (kamida) = NET"; bir kunlik davrda gross·sof aniq. -->
+              ${approx
+                ? `<div class="flex justify-between text-xs py-1">
+                     <span class="text-slate-400">Sotilgan (kamida):</span>
+                     <span class="text-slate-100 font-mono">${fmtMoney(fin.soldTotalNet)} dona</span>
+                   </div>
+                   <div class="text-[10px] text-amber-400/80 -mt-0.5">📉 Taxminiy quyi chegara — so'nggi kunlar hali to'liq tasdiqlanmagan</div>`
+                : `<div class="flex justify-between text-xs py-1">
+                     <span class="text-slate-400">Sotilgan · Sof:</span>
+                     <span class="text-slate-100 font-mono">${fmtMoney(fin.soldTotal)} · ${fmtMoney(fin.soldTotalNet)} dona</span>
+                   </div>`}
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Jami Sotuv (sof, qaytarishlar ayrilgan):</span>
-                <span class="text-slate-100 font-mono">${fmtMoney(fin.totalSales)} so'm</span>
+                <span class="text-slate-100 font-mono">${approx}${fmtMoney(fin.totalSales)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Kutilayotgan Payout (Uzumdan):</span>
-                <span class="text-slate-100 font-mono font-bold">${fmtMoney(fin.totalPayout)} so'm</span>
+                <span class="text-slate-100 font-mono font-bold">${approx}${fmtMoney(fin.totalPayout)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Hisoblangan Tannarx (Xarid):</span>
-                <span class="text-slate-100 font-mono">${fmtMoney(fin.totalMappedCostSum)} so'm</span>
+                <span class="text-slate-100 font-mono">${approx}${fmtMoney(fin.totalMappedCostSum)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Logistika:</span>
-                <span class="text-slate-100 font-mono">${fmtMoney(fin.totalShipping)} so'm</span>
+                <span class="text-slate-100 font-mono">${approx}${fmtMoney(fin.totalShipping)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Saqlash:</span>
-                <span class="text-slate-100 font-mono">${fmtMoney(fin.totalStorage)} so'm</span>
+                <span class="text-slate-100 font-mono">${approx}${fmtMoney(fin.totalStorage)} so'm</span>
               </div>
               <div class="flex justify-between text-xs py-1">
                 <span class="text-slate-400">Marketing & Reklama (byudjet):</span>
-                <span class="text-slate-100 font-mono">${fmtMoney(fin.totalMarketingVal)} so'm</span>
+                <span class="text-slate-100 font-mono">${approx}${fmtMoney(fin.totalMarketingVal)} so'm</span>
               </div>
               <!-- 2.3: real Uzum xarajatlari source bo'yicha (kategoriya o'ylab topilmaydi) -->
               <div class="border-t border-darkBorder/40 pt-2 mt-1">
@@ -2063,7 +2074,7 @@ ${urgentSection}
               ` : ''}
               <div class="flex justify-between text-sm py-2 border-t border-darkBorder/40 mt-1.5">
                 <span class="text-slate-300 font-bold uppercase text-[11px] tracking-wider">Hisoblangan Sof Foyda:</span>
-                <span class="font-black font-mono text-xs ${profitColor}">${fmtMoney(totalProfit)} so'm</span>
+                <span class="font-black font-mono text-xs ${profitColor}">${approx}${fmtMoney(totalProfit)} so'm</span>
               </div>
             </div>
             `}

@@ -1415,11 +1415,21 @@ function buildPeriodReportText(result) {
     return `${header}\n\n⏳ Hali yetarli ma'lumot yo'q (${result.snapshotCount || 0} kunlik snapshot bor). Kamida 2 kun kerak.`;
   }
   // 16: "Qaytarilgan" OLIB TASHLANDI (chalg'ituvchi — umriy/kechikuvchi hisoblagichdan). Daromad "sof".
-  const lines = [
-    `🛍️ Sotilgan: ${fmtMoney(result.soldTotal)} dona · Sof: ${fmtMoney(result.soldTotalNet)}`,
-    `💰 Daromad (sof, qaytarishlar ayrilgan): ${fmtMoney(result.totalSales)} so'm`,
-    `💸 Sof foyda: ${fmtMoney(result.totalProfit)} so'm (hisoblangan taxmin)`
-  ];
+  // 17: KO'P KUNLIK davrlarda (hafta/oy) gross sanoq haqiqiydan OSHIB ketadi (kechikkan qaytarishlar
+  // Δ(sold+returned)ni shishiradi — diagnostika bilan aniqlangan). NET esa hech qachon oshmaydi, faqat
+  // kam bo'lishi mumkin. Shuning uchun ko'p kunlik davrda "kamida NET" (quyi chegara) ko'rsatiladi.
+  // Bir kunlik (kecha/bugun) — o'zgarishsiz, u aniq va isbotlangan (7=7, 4=4).
+  const isMultiDay = result.actualSpanDays > 1;
+  const lines = [];
+  if (isMultiDay) {
+    lines.push(`🛍️ Sotilgan: kamida ${fmtMoney(result.soldTotalNet)} dona (taxminiy quyi chegara — so'nggi kunlar hali to'liq tasdiqlanmagan)`);
+    lines.push(`💰 Daromad (sof): ~${fmtMoney(result.totalSales)} so'm`);
+    lines.push(`💸 Sof foyda: ~${fmtMoney(result.totalProfit)} so'm (hisoblangan taxmin)`);
+  } else {
+    lines.push(`🛍️ Sotilgan: ${fmtMoney(result.soldTotal)} dona · Sof: ${fmtMoney(result.soldTotalNet)}`);
+    lines.push(`💰 Daromad (sof, qaytarishlar ayrilgan): ${fmtMoney(result.totalSales)} so'm`);
+    lines.push(`💸 Sof foyda: ${fmtMoney(result.totalProfit)} so'm (hisoblangan taxmin)`);
+  }
   if (result.period === 'today') lines.push(`\n⏳ Bu qisman ma'lumot — kun hali tugamagan`);
   if (result.partial && result.period !== 'today') lines.push(`\n⚠️ Faqat ${result.actualSpanDays} kunlik ma'lumot mavjud (so'ralgan: ${result.requestedDays} kun)`);
   lines.push(`\n⏳ So'nggi kunlar ma'lumoti Uzum tasdiqlashi bilan yangilanadi`);
