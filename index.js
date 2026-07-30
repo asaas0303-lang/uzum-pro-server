@@ -40,6 +40,7 @@ function fmtMoney(n) {
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const SNAPSHOTS_FILE = path.join(DATA_DIR, 'snapshots.json');
+const PROBLEMS_FILE = path.join(DATA_DIR, 'problems.json'); // 18-D0: faol muammo holati (takroriy ogohlantirmaslik uchun)
 const SNAPSHOT_RETENTION_DAYS = 60;
 
 function ensureDataDir() {
@@ -1143,13 +1144,13 @@ async function buildAiContext(shopId) {
 }
 
 // 18-C: AI MOLIYAVIY MURABBIY — eski oddiy maslahatchi butunlay qayta yozildi.
-app.post('/api/gemini/advice', async (req, res) => {
+// Umumiy funksiya: ham /api/gemini/advice endpointi, ham bot /maslahat buyrug'i ishlatadi.
+async function generateAiAdvice(shopId) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    return res.status(400).json({ error: "GEMINI_API_KEY sozlanmagan (Railway Variables'da bo'lishi kerak)." });
+    return { ok: false, error: "GEMINI_API_KEY sozlanmagan (Railway Variables'da bo'lishi kerak)." };
   }
   try {
-    const shopId = req.body?.shopId || syncedState.activeShop;
     const ctx = await buildAiContext(shopId);
     const kb = loadKnowledgeBase().replace(/## 6\. RAQOBATCHILAR[\s\S]*?(?=\n## 7\.)/, ''); // raqobatchilar bo'limini token tejash uchun chiqaramiz
 
@@ -1193,10 +1194,33 @@ Quyidagi JSON formatida javob ber (faqat toza JSON, markdown kod bloki YO'Q):
       const cleanText = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
       parsedData = JSON.parse(cleanText);
     }
-    res.json(parsedData);
+    return { ok: true, data: parsedData };
   } catch (err) {
     console.error("AI murabbiy xato:", err);
-    res.status(500).json({ error: "AI murabbiy bilan bog'lanishda xato: " + err.message });
+    return { ok: false, error: "AI murabbiy bilan bog'lanishda xato: " + err.message };
+  }
+}
+
+// 18-D1: AI murabbiy JSON javobini Telegram matniga aylantirish (/maslahat buyrug'i uchun)
+function aiAdviceToText(d) {
+  if (!d || typeof d !== 'object') return '⚠️ AI javobi bo\'sh.';
+  const lines = ['🤖 *AI Moliyaviy Murabbiy*', ''];
+  if (d.moliya_holati) { lines.push('💰 *Moliya holati:*', d.moliya_holati, ''); }
+  const ishlar = Array.isArray(d.bugungi_ishlar) ? d.bugungi_ishlar.filter(Boolean) : [];
+  if (ishlar.length) { lines.push('📋 *Bugungi ishlar:*'); ishlar.forEach(x => lines.push(x)); lines.push(''); }
+  if (d.maqsad) { lines.push('🎯 *Maqsad:*', d.maqsad, ''); }
+  if (d.xitoy_buyurtma) { lines.push('🇨🇳 *Xitoy buyurtma:*', d.xitoy_buyurtma); }
+  return lines.join('\n').trim();
+}
+
+app.post('/api/gemini/advice', async (req, res) => {
+  const shopId = req.body?.shopId || syncedState.activeShop;
+  const result = await generateAiAdvice(shopId);
+  if (result.ok) {
+    res.json(result.data);
+  } else {
+    const code = result.error.includes('sozlanmagan') ? 400 : 500;
+    res.status(code).json({ error: result.error });
   }
 });
 
@@ -1339,6 +1363,125 @@ async function fetchExpensesGrouped(shopId, token) {
 }
 
 // Global Text Builder for Telegram Daily Report — jonli ma'lumot + snapshot delta (2.1)
+// 18-D: bloklangan mahsulotlar nomi bilan (hozir faqat "N ta" edi — aniq emas)
+function blockedProductNames(products) {
+  return products.filter(p => p.status?.value === 'PERM_BANNED').map(p => p.title);
+}
+
+// 18-D3: keyingi 10 kun ichida to'lovi keladigan kreditlar (Uzum'dan pul chiqarishga ulgurish uchun ogohlantirish)
+function creditWarnings() {
+  const warns = [];
+  (syncedState.credits || []).forEach(c => {
+    const days = creditDaysUntilDue(c.paymentDay);
+    if (days >= 0 && days <= 10) {
+      warns.push(`⚠️ *${c.name}* to'lovi ${days} kundan keyin (oyning ${c.paymentDay}-kuni). Summa: ${fmtMoney(c.monthlyPayment)} so'm.\n   → Uzum'dan hozir pul chiqaring — kartaga 3-4 kunda tushadi.`);
+    }
+  });
+  return warns;
+}
+
+// 18-D2: kunlik hisobot uchun qisqa moliyaviy qator (naqd oqim + keyingi kredit)
+async function financeSummaryLine() {
+  const cf = await computeCashFlow();
+  if (!cf.ok) return '';
+  const net = cf.netCashFlow;
+  let s = `💰 Bu oy: ${net >= 0 ? '+' : ''}${fmtMoney(net)} so'm (${net >= 0 ? 'foyda' : 'zarar'})`;
+  // eng yaqin kredit
+  let nearest = null;
+  (syncedState.credits || []).forEach(c => {
+    const days = creditDaysUntilDue(c.paymentDay);
+    if (nearest === null || days < nearest.days) nearest = { name: c.name, days, amount: c.monthlyPayment };
+  });
+  if (nearest) s += ` · Keyingi kredit: ${nearest.name} ${nearest.days} kun (${fmtMoney(nearest.amount)})`;
+  return s;
+}
+
+// 18-D1: /moliya buyrug'i matni — to'liq naqd oqim + proyeksiya + kredit ogohlantirishlari.
+async function moliyaCommandText() {
+  const cf = await computeCashFlow();
+  if (!cf.ok) return '⚠️ Moliya ma\'lumoti olinmadi.';
+  const lines = [];
+  lines.push(`💰 *Moliyaviy holat* (${cf.month})`);
+  lines.push('');
+  lines.push('📥 *Bu oy kassa:*');
+  lines.push(`   Yechib olindi (keldi): ${fmtMoney(cf.withdrawnCame)} so'm`);
+  if (cf.withdrawnPending > 0) lines.push(`   Yo'lda (kutilmoqda): ${fmtMoney(cf.withdrawnPending)} so'm`);
+  lines.push(`   Xarajat: −${fmtMoney(cf.expensesTotal)} so'm`);
+  if (cf.creditMonthly > 0) lines.push(`   Kredit to'lovi: −${fmtMoney(cf.creditMonthly)} so'm`);
+  lines.push('   ─────────────');
+  const net = cf.netCashFlow;
+  lines.push(`   *Sof: ${net >= 0 ? '+' : ''}${fmtMoney(net)} so'm* (${net >= 0 ? 'foyda ✅' : 'zarar 🔴'})`);
+
+  const cats = Object.entries(cf.expensesByCategory || {}).sort((a, b) => b[1] - a[1]);
+  if (cats.length) {
+    lines.push('');
+    lines.push('🧾 *Xarajat taqsimoti:*');
+    cats.slice(0, 6).forEach(([c, v]) => lines.push(`   ${c}: ${fmtMoney(v)} so'm`));
+  }
+
+  if (cf.projection) {
+    const p = cf.projection;
+    lines.push('');
+    lines.push('📅 *Keyingi 30 kun (proyeksiya):*');
+    if (p.upcomingCredits > 0) lines.push(`   Kelayotgan kredit to'lovlari: ${fmtMoney(p.upcomingCredits)} so'm`);
+    if (p.forecastReady) lines.push(`   Kutilayotgan Uzum foydasi: ${fmtMoney(p.expectedIncome)} so'm`);
+    lines.push(`   ${p.verdict}`);
+  }
+
+  const warns = creditWarnings();
+  if (warns.length) {
+    lines.push('');
+    lines.push('🏦 *Kredit ogohlantirishlari:*');
+    warns.forEach(w => lines.push(w));
+  }
+
+  lines.push('');
+  lines.push('/maslahat — AI murabbiy tahlili · /maqsad — maqsad holati');
+  return lines.join('\n');
+}
+
+// 18-D1: /maqsad buyrug'i matni — oylik aylanma maqsadi vs joriy holat.
+async function maqsadCommandText() {
+  const goals = syncedState.goals || [];
+  if (!goals.length) {
+    return '🎯 *Maqsad qo\'yilmagan.*\n\nDashboard → Moliya bo\'limidan oylik aylanma maqsadingizni kiriting. Keyin bu yerda har kun qancha yaqinlashayotganingizni ko\'rasiz.';
+  }
+  const month = todayTashkent().slice(0, 7);
+  const goal = goals[goals.length - 1]; // bitta faol maqsad (frontend bitta saqlaydi)
+  const target = goal.target || 0;
+
+  // Joriy oy aylanmasi — barcha do'kon finance summary yig'indisi (aylanma = sotilgan × narx, sof)
+  let currentTurnover = 0, hasData = false;
+  const day = parseInt(todayTashkent().slice(8, 10), 10) || 1;
+  for (const shop of (syncedState.shops || [])) {
+    const fin = await computeFinanceSummary(shop.shopId, day);
+    if (fin.ok && fin.ready) { currentTurnover += (fin.totalSales || 0); hasData = true; }
+  }
+
+  const lines = [];
+  lines.push(`🎯 *Maqsad: ${fmtMoney(target)} so'm/oy aylanma*`);
+  lines.push('');
+  if (!hasData) {
+    lines.push('Joriy aylanma ma\'lumoti hali yetarli emas (snapshot to\'planmoqda).');
+  } else {
+    const pct = target > 0 ? (currentTurnover / target * 100) : 0;
+    const daysInMonth = new Date(parseInt(month.slice(0, 4)), parseInt(month.slice(5, 7)), 0).getDate();
+    const projected = day > 0 ? (currentTurnover / day * daysInMonth) : 0;
+    lines.push(`Bu oy ${day} kunda: ${fmtMoney(currentTurnover)} so'm (${fmtPct(pct)}%)`);
+    lines.push(`Shu sur'atda oy oxiriga: ~${fmtMoney(projected)} so'm`);
+    lines.push('');
+    if (projected >= target) lines.push('✅ Shu sur\'atda maqsadga yetasiz — davom eting!');
+    else {
+      const need = target - currentTurnover;
+      const daysLeft = Math.max(1, daysInMonth - day);
+      lines.push(`⚠️ Yetishmayapti. Maqsad uchun qolgan ${daysLeft} kunda kuniga ~${fmtMoney(need / daysLeft)} so'm aylanma kerak.`);
+    }
+  }
+  lines.push('');
+  lines.push('/moliya — pul holati · /maslahat — AI murabbiy');
+  return lines.join('\n');
+}
+
 async function generateReportText(shopId) {
   shopId = shopId || syncedState.activeShop;
   const shop = (syncedState.shops || []).find(s => String(s.shopId) === String(shopId));
@@ -1448,14 +1591,69 @@ ${expenseSection}
 ✅ Sotuvda (e'lonlar): ${activeCount} ta
 ❌ Tugagan SKU: ${outOfStock} ta
 ⚠️ Kam qolgan SKU: ${low} ta
-🚫 Bloklangan: ${blocked} ta
+🚫 Bloklangan: ${blocked} ta${blocked > 0 ? '\n' + blockedProductNames(products).slice(0, 5).map(t => `   • ${t}`).join('\n') + (blocked > 5 ? `\n   • …va yana ${blocked - 5} ta` : '') : ''}
 ${urgentSection}${riskSection}
-/start — boshlash | /hisobot — hisobot | /dashboard — mini app`;
+/start — boshlash | /moliya — pul holati | /maslahat — AI murabbiy | /dashboard — mini app`;
 }
 
 // 6.1: Kunlik hisobotni yuborish — cron va qo'lda diagnostika endpoint ikkalasi ham shu funksiyani ishlatadi.
 // Har bir sozlangan do'kon uchun ALOHIDA xabar yuboriladi (do'konlar aralashib ketmasin).
 const ADMIN_CHAT_ID = '5155194813';
+
+// 18-D0: bitta do'kon uchun joriy faol Uzum muammolarini keyli ro'yxatda qaytaradi.
+// Har muammo: { key (barqaror identifikator, takroriy ogohlantirmaslik uchun), text (ogohlantirish matni) }.
+async function detectShopProblems(shopId) {
+  const out = [];
+  const prod = await fetchLiveShopProducts(shopId);
+  const metrics = await computeSkuMetrics(shopId);
+  if (!prod.ok || !metrics.ok) return out;
+  prod.products.forEach(p => {
+    const isBanned = p.status?.value === 'PERM_BANNED';
+    (p.skuList || []).forEach(sku => {
+      const avail = Math.max(0, sku.availableAmount || 0);
+      const m = metrics.perSku[sku.skuId] || {};
+      const stockDays = m.canCompute ? (m.stockDays30 != null ? m.stockDays30 : m.stockDays7) : null;
+      const id = sku.skuId;
+      if (isBanned) {
+        out.push({ key: `ban:${id}`, text: `🚫 *${sku.skuTitle}* bloklandi${sku.skuBlockReason?.title ? ' — ' + sku.skuBlockReason.title : ''}. Sababni tekshirib tuzating.` });
+      } else if (avail <= 0 && sku.rank === 'A') {
+        out.push({ key: `oosA:${id}`, text: `🔴 *${sku.skuTitle}* (A toifa) TUGADI — TOPdan tushmoqda. Uy zaxirasidan yoki Xitoydan zudlik bilan to'ldiring.` });
+      } else if (stockDays != null && stockDays < 3) {
+        out.push({ key: `low:${id}`, text: `🟠 *${sku.skuTitle}* zaxirasi ~${stockDays.toFixed(0)} kunda tugaydi (${avail} dona). Jo'natishni tayyorlang.` });
+      }
+    });
+  });
+  return out;
+}
+
+// 18-D0: barcha do'konlar bo'yicha muammolarni tekshiradi, FAQAT yangi paydo bo'lganlarini ogohlantiradi.
+// Holat problems.json'da saqlanadi — bir muammo ketguncha faqat bir marta ogohlantiriladi (spam yo'q).
+async function runProblemCheck() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || !ADMIN_CHAT_ID) return { ok: false, error: 'token/chat yo\'q' };
+  const prevState = readJsonFile(PROBLEMS_FILE, {});
+  const newState = {};
+  let alertCount = 0;
+  for (const shop of (syncedState.shops || [])) {
+    const shopId = String(shop.shopId);
+    let current;
+    try { current = await detectShopProblems(shopId); }
+    catch (e) { console.error(`[D0] ${shopId} muammo tekshiruvida xato:`, e.message); newState[shopId] = prevState[shopId] || []; continue; }
+    const currentKeys = current.map(p => p.key);
+    const prevKeys = prevState[shopId] || [];
+    const fresh = current.filter(p => !prevKeys.includes(p.key)); // faqat yangi
+    if (fresh.length) {
+      const msg = `⚠️ *Yangi muammo* — ${shop.shopTitle}\n\n${fresh.map(p => p.text).join('\n\n')}\n\n/maslahat — AI murabbiy tahlili`;
+      try { await sendTelegramMessage(token, ADMIN_CHAT_ID, msg); alertCount += fresh.length; }
+      catch (e) { console.error('[D0] ogohlantirish yuborilmadi:', e.message); }
+    }
+    newState[shopId] = currentKeys;
+  }
+  writeJsonFile(PROBLEMS_FILE, newState);
+  console.log(`[D0] Muammo tekshiruvi tugadi — ${alertCount} ta yangi ogohlantirish`);
+  return { ok: true, alertCount };
+}
+
 async function runDailyReport() {
   console.log(`[CRON] Kunlik hisobot boshlandi: ${new Date().toISOString()}`);
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -1489,6 +1687,18 @@ async function runDailyReport() {
       results.push({ shopId: shop.shopId, shopTitle: shop.shopTitle, success: false, error: err.message });
     }
   }
+  // 18-D2/D3: barcha do'kon hisobotlaridan keyin — bitta GLOBAL moliya xabari (naqd oqim + kredit ogohlantirishlari)
+  try {
+    const finLine = await financeSummaryLine();
+    const warns = creditWarnings();
+    if (finLine || warns.length) {
+      let moneyMsg = `💰 *Moliyaviy holat*\n${finLine}`;
+      if (warns.length) moneyMsg += `\n\n🏦 *Kredit ogohlantirishlari:*\n${warns.join('\n')}`;
+      moneyMsg += `\n\n/moliya — batafsil · /maslahat — AI murabbiy`;
+      await sendTelegramMessage(token, ADMIN_CHAT_ID, moneyMsg);
+    }
+  } catch (err) { console.error('[CRON] Moliya xabarida xato:', err); }
+
   if (anyOk) setLastReportDate(todayTashkent()); // kamida bittasi ketgan bo'lsa ham "bugun bajarildi" deb belgilanadi (catch-up uchun)
   return { success: anyOk, chatIdUsed: ADMIN_CHAT_ID, shops: results };
 }
@@ -1616,6 +1826,9 @@ Assalomu alaykum! Do'kon aslahasi muvaffaqiyatli ulangan. Men sizning sotuvlar v
 
 Mavjud buyruqlar:
 /hisobot — Bugungi savdolar, xarajatlar va zaxira holati hisoboti.
+/moliya — Naqd oqim: bu oy foyda/zarar, xarajat, kredit, proyeksiya.
+/maslahat — AI moliyaviy murabbiy: bugungi 3 ta ish + Xitoy buyurtma.
+/maqsad — Oylik aylanma maqsadi va unga qanchalik yaqinligingiz.
 /dashboard — Do'konni vizual boshqarish va AI maslahat xonasi.
 
 Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz mumkin.`;
@@ -1639,6 +1852,21 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
       buttons.push([{ text: "📊 Barchasi", callback_data: 'shop:all' }]);
       await sendTelegramMessage(token, chatId, "Qaysi do'kon uchun hisobot kerak?", { inline_keyboard: buttons });
     }
+  } else if (text.startsWith('/moliya')) {
+    // 18-D1: pul holati — naqd oqim + proyeksiya + kredit
+    await sendTelegramMessage(token, chatId, await moliyaCommandText());
+  } else if (text.startsWith('/maslahat')) {
+    // 18-D1: AI moliyaviy murabbiy
+    await sendTelegramMessage(token, chatId, "🤖 AI murabbiy tahlil qilyapti... (10-20 soniya)");
+    const result = await generateAiAdvice(syncedState.activeShop);
+    if (result.ok) {
+      await sendTelegramMessage(token, chatId, aiAdviceToText(result.data));
+    } else {
+      await sendTelegramMessage(token, chatId, `⚠️ AI murabbiy javob bermadi: ${result.error}`);
+    }
+  } else if (text.startsWith('/maqsad')) {
+    // 18-D1: oylik aylanma maqsadi holati
+    await sendTelegramMessage(token, chatId, await maqsadCommandText());
   } else if (text.startsWith('/dashboard')) {
     await sendTelegramMessage(token, chatId, "Uzum Market sotuvchi hisobotlar panelini ochish uchun quyidagi tugmani bosing:", {
       inline_keyboard: [[
@@ -1659,6 +1887,12 @@ app.get('/api/tg-bot/simulate-report', async (req, res) => {
 // Diagnostika: kunlik hisobotni qo'lda, darhol ishga tushiradi (cron kutmasdan sinash uchun)
 app.get('/api/tg-bot/trigger-daily-report', async (req, res) => {
   const result = await runDailyReport();
+  res.json(result);
+});
+
+// 18-D0 diagnostika: muammo tekshiruvini qo'lda ishga tushiradi (cron kutmasdan).
+app.get('/api/tg-bot/trigger-problem-check', async (req, res) => {
+  const result = await runProblemCheck();
   res.json(result);
 });
 
@@ -1894,8 +2128,11 @@ if (process.env.UZUM_TOKEN) {
   cron.schedule('50 4 * * *', () => {
     console.log(`[CRON] Snapshot cron ishga tushdi: ${new Date().toISOString()}`);
     captureSnapshot()
-      .then(r => console.log(`[CRON] Snapshot cron tugadi: ${r.savedShops} do'kon saqlandi (${r.date})`))
-      .catch(e => console.error('[CRON] Snapshot cron xato:', e));
+      .then(r => {
+        console.log(`[CRON] Snapshot cron tugadi: ${r.savedShops} do'kon saqlandi (${r.date})`);
+        return runProblemCheck(); // 18-D0: snapshotdan keyin muammo kuzatuvi (yangi bloklangan/tugagan SKU)
+      })
+      .catch(e => console.error('[CRON] Snapshot/muammo cron xato:', e));
   }, { timezone: 'Asia/Tashkent' });
   console.log('[CRON] Kunlik snapshot rejalashtirildi: har kuni 04:50 Asia/Tashkent.');
 } else {
