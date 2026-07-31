@@ -810,7 +810,8 @@ async function computeSalesFromOrders(shopId, period) {
     uzumCostUsed, perSku,
     // eski renderer'lar bilan moslik uchun alias'lar (aniq, "kamida" emas):
     totalSales: revenue, totalProfit: profit, soldTotal: units, soldTotalNet: units,
-    actualSpanDays: spanDays, requestedDays: spanDays, partial: false
+    actualSpanDays: spanDays, requestedDays: spanDays, partial: false,
+    fromDate: fromDay, toDate: toDay
   };
 }
 
@@ -819,11 +820,9 @@ async function computeSalesFromOrders(shopId, period) {
 async function computePeriodReport(shopId, period) {
   const shop = (syncedState.shops || []).find(s => String(s.shopId) === String(shopId));
   const shopTitle = shop ? shop.shopTitle : `Shop ${shopId}`;
-  const daysByPeriod = { yesterday: 1, week: 7, month: 30 };
-  let fin;
-  if (period === 'today') fin = await getTodaySoFarDelta(shopId);
-  else if (daysByPeriod[period] != null) fin = await computeFinanceSummary(shopId, daysByPeriod[period]);
-  else return { ok: false, error: `Noma'lum davr: ${period}` };
+  // 18-FIX: SOTUV/DAROMAD endi finance/orders'dan (real vaqtli, aniq) — snapshot delta EMAS.
+  if (!['today', 'yesterday', 'week', 'month'].includes(period)) return { ok: false, error: `Noma'lum davr: ${period}` };
+  const fin = await computeSalesFromOrders(shopId, period);
   if (!fin.ok) return fin;
   return { ...fin, period, shopId: shop ? shop.shopId : shopId, shopTitle };
 }
@@ -1615,39 +1614,13 @@ async function generateReportText(shopId) {
     });
   });
 
-  // Kunlik sotuv — snapshot delta (2.1). Yetarli snapshot bo'lmasa aniq belgilanadi.
-  const delta = getDailyDelta(shopId);
+  // 18-FIX: Kunlik sotuv — finance/orders'dan (real vaqtli, aniq). "kecha" = tugagan oldingi kun.
+  const sales = await computeSalesFromOrders(shopId, 'yesterday');
   let salesSection;
-  if (!delta.ready) {
-    let lifeSold = 0, lifeReturned = 0;
-    products.forEach(p => (p.skuList || []).forEach(s => { lifeSold += s.quantitySold || 0; lifeReturned += s.quantityReturned || 0; }));
-    salesSection = `⏳ Kunlik sotuv ma'lumoti yig'ilmoqda (ertadan boshlab aniq bo'ladi — hozir ${delta.snapshotCount} ta kunlik snapshot bor).\n\n📊 *Boshidan beri jami* (umriy hisoblagich, kunlik emas):\n🛍️ Sotilgan: ${fmtMoney(lifeSold)} dona\n↩️ Qaytarilgan: ${fmtMoney(lifeReturned)} dona`;
+  if (!sales.ok) {
+    salesSection = `⚠️ Kechagi sotuv olinmadi: ${sales.error}`;
   } else {
-    // 14: SANOQ (nechta sotildi) = GROSS (delta.totalSold, Uzum bilan solishtirish uchun).
-    // PUL (daromad/foyda) = NET (d.netSoldDelta) — qaytarilgan tovar daromad/foyda bermaydi.
-    let profit = 0, revenue = 0, unmapped = 0, totalStorage = 0;
-    for (const skuId of Object.keys(delta.perSku)) {
-      const d = delta.perSku[skuId];
-      if (d.netSoldDelta === 0) continue;
-      const { sku, product } = findSkuInProducts(products, skuId);
-      const price = sku ? (sku.purchasePrice || 0) : 0;
-      revenue += price * d.netSoldDelta;
-      const productId = product ? product.productId : null;
-      const tInfo = resolveTannarx(skuId, productId); // 3.4/3.5: SKU/mahsulot qo'lda yoki turi
-      if (!sku || tInfo.source === 'unmapped') { unmapped++; continue; }
-      // 4.3: yagona formula — sotuv_narxi − komissiya − logistika − saqlash − reklama/dona − tannarx
-      const logi = resolveLogistics(skuId, productId, sku).val;
-      const storage = resolveStorage(skuId, productId, sku).val;
-      const dailyBudget = (syncedState.costs[skuId] || {}).budget || 0;
-      const adPerUnit = dailyBudget > 0 ? dailyBudget / d.netSoldDelta : 0; // kunlik byudjet / kunlik sof sotilgan
-      const perUnit = price - price * (commissionPct(skuId, sku, productId) / 100) - logi - storage - adPerUnit - tInfo.tannarx;
-      profit += perUnit * d.netSoldDelta;
-      totalStorage += storage * d.netSoldDelta;
-    }
-    // 16: "Qaytarilgan" raqami OLIB TASHLANDI — u umriy/kechikuvchi hisoblagichdan keladi, "kechagi"
-    // qaytarish sifatida aniq ajratib bo'lmaydi (chalg'ituvchi edi). Sof (net) hisobi baribir to'g'ri.
-    // Daromad "sof" ekani aniq yozildi; quantitySold kechikishi haqida izoh qo'shildi.
-    salesSection = `🛍️ Kechagi: Sotilgan ${fmtMoney(delta.totalSold)} dona · Sof ${fmtMoney(delta.totalSoldNet)} dona\n🏦 Kechagi daromad (sof, qaytarishlar ayrilgan): ${fmtMoney(revenue)} so'm\n📦 Kechagi saqlash xarajati: ${fmtMoney(totalStorage)} so'm\n💵 Kechagi sof foyda (hisoblangan taxmin, real payout emas): ${fmtMoney(profit)} so'm${unmapped > 0 ? `\n⚠️ ${unmapped} ta SKU bog'lanmagan — foydaga kirmadi` : ''}\n⏳ So'nggi kunlar ma'lumoti Uzum tasdiqlashi bilan yangilanadi`;
+    salesSection = `🛍️ Kecha sotildi: ${fmtMoney(sales.units)} dona (${fmtMoney(sales.orders)} buyurtma)${sales.canceledCount ? ` · ❌ ${fmtMoney(sales.canceledCount)} bekor` : ''}\n💰 Kecha tushum: ${fmtMoney(sales.revenue)} so'm\n🏦 Uzum to'lovi: ${fmtMoney(sales.payout)} so'm\n💵 Kecha sof foyda (tannarx ayrilgan): ${fmtMoney(sales.profit)} so'm`;
   }
 
   // Xarajatlar — source bo'yicha (2.3)
@@ -1830,28 +1803,14 @@ function formatPeriodLabel(result) {
 // 14B2: bot uchun qisqa davr hisoboti matni — computePeriodReport natijasidan.
 function buildPeriodReportText(result) {
   const header = `🟣 *Uzum Pro — ${result.shopTitle} (${result.shopId})*\n📅 ${formatPeriodLabel(result)}`;
-  if (!result.ready) {
-    return `${header}\n\n⏳ Hali yetarli ma'lumot yo'q (${result.snapshotCount || 0} kunlik snapshot bor). Kamida 2 kun kerak.`;
-  }
-  // 16: "Qaytarilgan" OLIB TASHLANDI (chalg'ituvchi — umriy/kechikuvchi hisoblagichdan). Daromad "sof".
-  // 17: KO'P KUNLIK davrlarda (hafta/oy) gross sanoq haqiqiydan OSHIB ketadi (kechikkan qaytarishlar
-  // Δ(sold+returned)ni shishiradi — diagnostika bilan aniqlangan). NET esa hech qachon oshmaydi, faqat
-  // kam bo'lishi mumkin. Shuning uchun ko'p kunlik davrda "kamida NET" (quyi chegara) ko'rsatiladi.
-  // Bir kunlik (kecha/bugun) — o'zgarishsiz, u aniq va isbotlangan (7=7, 4=4).
-  const isMultiDay = result.actualSpanDays > 1;
+  // 18-FIX: finance/orders — REAL VAQTLI va ANIQ. "kamida/taxminiy/~" belgilari OLIB TASHLANDI.
   const lines = [];
-  if (isMultiDay) {
-    lines.push(`🛍️ Sotilgan: kamida ${fmtMoney(result.soldTotalNet)} dona (taxminiy quyi chegara — so'nggi kunlar hali to'liq tasdiqlanmagan)`);
-    lines.push(`💰 Daromad (sof): ~${fmtMoney(result.totalSales)} so'm`);
-    lines.push(`💸 Sof foyda: ~${fmtMoney(result.totalProfit)} so'm (hisoblangan taxmin)`);
-  } else {
-    lines.push(`🛍️ Sotilgan: ${fmtMoney(result.soldTotal)} dona · Sof: ${fmtMoney(result.soldTotalNet)}`);
-    lines.push(`💰 Daromad (sof, qaytarishlar ayrilgan): ${fmtMoney(result.totalSales)} so'm`);
-    lines.push(`💸 Sof foyda: ${fmtMoney(result.totalProfit)} so'm (hisoblangan taxmin)`);
-  }
-  if (result.period === 'today') lines.push(`\n⏳ Bu qisman ma'lumot — kun hali tugamagan`);
-  if (result.partial && result.period !== 'today') lines.push(`\n⚠️ Faqat ${result.actualSpanDays} kunlik ma'lumot mavjud (so'ralgan: ${result.requestedDays} kun)`);
-  lines.push(`\n⏳ So'nggi kunlar ma'lumoti Uzum tasdiqlashi bilan yangilanadi`);
+  lines.push(`🛍️ Sotildi: ${fmtMoney(result.units)} dona (${fmtMoney(result.orders)} buyurtma)${result.canceledCount ? ` · ❌ ${fmtMoney(result.canceledCount)} bekor` : ''}`);
+  lines.push(`💰 Tushum: ${fmtMoney(result.revenue)} so'm`);
+  lines.push(`🏦 Uzum to'lovi (komissiya/logistikadan keyin): ${fmtMoney(result.payout)} so'm`);
+  lines.push(`💸 Sof foyda (tannarx ayrilgan): ${fmtMoney(result.profit)} so'm`);
+  if (result.period === 'today') lines.push(`\n⏳ Bugun — kun hali tugamagan, kun davomida yangilanadi`);
+  lines.push(`\n📊 Manba: Uzum buyurtmalar (real vaqtli, aniq)`);
   return `${header}\n\n${lines.join('\n')}`;
 }
 
