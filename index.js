@@ -759,6 +759,10 @@ function periodToDayRange(period) {
   if (period === 'yesterday') { const y = tashDayMinus(1); return { fromDay: y, toDay: y, spanDays: 1 }; }
   if (period === 'week') return { fromDay: tashDayMinus(6), toDay: today, spanDays: 7 };
   if (period === 'month') return { fromDay: tashDayMinus(29), toDay: today, spanDays: 30 };
+  if (period === 'thismonth') { // joriy kalendar oy boshidan bugungacha (maqsad uchun)
+    const fromDay = today.slice(0, 8) + '01';
+    return { fromDay, toDay: today, spanDays: parseInt(today.slice(8, 10), 10) };
+  }
   return null;
 }
 
@@ -1203,11 +1207,11 @@ async function buildAiContext(shopId) {
     lines.push(`## DO'KON: ${shopTitle} — Uzum ma'lumoti olinmadi (${prod.error || metrics.error})`);
   }
 
-  // Oylik aylanma (30 kunlik moliya xulosasi)
-  const fin = await computeFinanceSummary(shopId, 30);
-  if (fin.ok && fin.ready) {
-    lines.push(`\n## OYLIK AYLANMA (oxirgi ${fin.actualSpanDays} kun, sof):`);
-    lines.push(`Sof sotuv (kamida): ${fin.soldTotalNet} dona | Aylanma: ~${fmtMoney(fin.totalSales)} so'm | Sof foyda: ~${fmtMoney(fin.totalProfit)} so'm`);
+  // 18-FIX: Oylik aylanma — finance/orders (30 kun, real vaqtli, aniq)
+  const fin = await computeSalesFromOrders(shopId, 'month');
+  if (fin.ok) {
+    lines.push(`\n## OYLIK AYLANMA (oxirgi 30 kun, aniq):`);
+    lines.push(`Sotildi: ${fin.units} dona (${fin.orders} buyurtma, ${fin.canceledCount} bekor) | Aylanma: ${fmtMoney(fin.revenue)} so'm | Uzum to'lovi: ${fmtMoney(fin.payout)} so'm | Sof foyda: ${fmtMoney(fin.profit)} so'm`);
   }
 
   // Bashorat
@@ -1552,12 +1556,12 @@ async function maqsadCommandText() {
   const goal = goals[goals.length - 1]; // bitta faol maqsad (frontend bitta saqlaydi)
   const target = goal.target || 0;
 
-  // Joriy oy aylanmasi — barcha do'kon finance summary yig'indisi (aylanma = sotilgan × narx, sof)
+  // 18-FIX: Joriy oy aylanmasi — finance/orders (kalendar oy boshidan bugungacha, aniq)
   let currentTurnover = 0, hasData = false;
   const day = parseInt(todayTashkent().slice(8, 10), 10) || 1;
   for (const shop of (syncedState.shops || [])) {
-    const fin = await computeFinanceSummary(shop.shopId, day);
-    if (fin.ok && fin.ready) { currentTurnover += (fin.totalSales || 0); hasData = true; }
+    const fin = await computeSalesFromOrders(shop.shopId, 'thismonth');
+    if (fin.ok) { currentTurnover += (fin.revenue || 0); hasData = true; }
   }
 
   const lines = [];
@@ -2142,11 +2146,11 @@ app.get('/api/all-shops-summary', async (req, res) => {
         }
       });
     });
-    const fin = await computeFinanceSummary(shop.shopId); // D4: oxirgi kunlik aylanma
+    const fin = await computeSalesFromOrders(shop.shopId, 'month'); // 18-FIX: D4 aylanma — finance/orders (30 kun, aniq)
     results.push({
       shopId: shop.shopId, shopTitle: shop.shopTitle, ok: true, totalStock, activeCount, outOfStock, blocked,
       stockValueTannarx, stockValueSotilsa, stockValueFoyda,
-      turnover: fin.ok && fin.ready ? { ready: true, spanDays: fin.spanDays, totalSales: fin.totalSales, totalProfit: fin.totalProfit, soldTotal: fin.soldTotal } : { ready: false, snapshotCount: fin.ok ? (fin.snapshotCount || 0) : 0 }
+      turnover: fin.ok ? { ready: true, spanDays: fin.spanDays, totalSales: fin.totalSales, totalProfit: fin.totalProfit, soldTotal: fin.soldTotal } : { ready: false, error: fin.error }
     });
   }
 
