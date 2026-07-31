@@ -766,41 +766,78 @@ function periodToDayRange(period) {
   return null;
 }
 
-// finance/orders'dan sotuv/daromad/foyda — client-side sana filtri bilan. Tannarx: qo'lda (resolveTannarx,
-// SKU'ni productId+skuTitle bo'yicha jonli mahsulotdan topib), aks holda Uzum purchasePrice (100% to'la).
+// Tannarx manbasi qatori (hisobot uchun): nechta SKU foydalanuvchi tannarxi, nechta Uzum tannarxi.
+function costSourceLine(cs) {
+  if (!cs) return '';
+  const parts = [];
+  if (cs.userSkus) parts.push(`${cs.userSkus} ta sizning tannarx`);
+  if (cs.uzumSkus) parts.push(`${cs.uzumSkus} ta Uzum tannarxi`);
+  if (cs.unknownSkus) parts.push(`${cs.unknownSkus} ta tannarx noma'lum`);
+  return parts.length ? `🏷️ Foyda hisobida: ${parts.join(', ')}` : '';
+}
+
+// finance/orders SKU'sini jonli mahsulot SKU'siga bog'laydi va tannarx manbasini aniqlaydi.
+// finance/orders'da skuId YO'Q — faqat productId + skuTitle ("JAYDAR-MINIK-КРАСН"), jonli skuTitle esa
+// faqat rang ("КРАСН"). Shuning uchun productId + rang-suffiks bo'yicha bog'laymiz (skuId → skuMappings).
+function normSkuText(s) { return String(s || '').toUpperCase().replace(/[^A-ZА-Я0-9]/g, ''); }
+function buildSkuMatcher(products) {
+  const byProduct = {}; // productId -> [{skuId, ntitle}]
+  products.forEach(p => (p.skuList || []).forEach(s => {
+    (byProduct[p.productId] = byProduct[p.productId] || []).push({ skuId: s.skuId, ntitle: normSkuText(s.skuTitle) });
+  }));
+  return function matchSkuId(productId, skuTitle) {
+    const cands = byProduct[productId];
+    if (!cands) return null;
+    const fn = normSkuText(skuTitle);
+    let m = cands.filter(c => c.ntitle && (fn.endsWith(c.ntitle) || fn.includes(c.ntitle)));
+    if (m.length === 0 && cands.length === 1) m = cands; // mahsulotda yagona SKU bo'lsa — bir xil
+    return m.length === 1 ? m[0].skuId : null;
+  };
+}
+
+// TANNARX USTUVORLIGI (foydalanuvchi qoidasi): 1) foydalanuvchi bu SKU'ga tannarx kiritgan bo'lsa (mapping/
+// qo'lda) → SIZNING tannarx; 2) kiritmagan bo'lsa → Uzum purchasePrice; 3) ikkalasi ham yo'q → noma'lum.
+// HAMMA tovar foydaga kiradi — faqat tannarx MANBASI har xil.
+function resolveOrderCost(order, matchSkuId) {
+  const skuId = matchSkuId(order.productId, order.skuTitle);
+  const t = resolveTannarx(skuId, order.productId);
+  if (t.source !== 'unmapped') return { perUnit: t.tannarx, source: 'user' };
+  if (order.purchasePrice > 0) return { perUnit: order.purchasePrice, source: 'uzum' };
+  return { perUnit: 0, source: 'unknown' };
+}
+
+// finance/orders'dan sotuv/daromad/foyda — client-side sana filtri bilan. Tannarx yuqoridagi ustuvorlik bo'yicha.
 async function computeSalesFromOrders(shopId, period) {
   const range = period && /^\d{4}-\d{2}-\d{2}$/.test(period) ? null : periodToDayRange(period);
   const { fromDay, toDay, spanDays } = range || { fromDay: period, toDay: period, spanDays: 1 };
   if (!fromDay) return { ok: false, error: `Noma'lum davr: ${period}` };
   const fo = await fetchFinanceOrders(shopId);
   if (!fo.ok) return { ok: false, error: fo.error, status: fo.status };
-  const prod = await fetchLiveShopProducts(shopId); // SKU'ni title bo'yicha topish (tannarx uchun) — 5 daq kesh
+  const prod = await fetchLiveShopProducts(shopId); // SKU bog'lash (tannarx uchun) — 5 daq kesh
   const products = prod.ok ? prod.products : [];
-  const skuByTitle = {}; // "productId|skuTitle" -> skuId (qo'lda tannarx uchun)
-  products.forEach(p => (p.skuList || []).forEach(s => { skuByTitle[`${p.productId}|${s.skuTitle}`] = s.skuId; }));
+  const matchSkuId = buildSkuMatcher(products);
 
   const inRange = fo.orders.filter(o => o.orderId != null && o.date != null);
   const dayOrders = inRange.filter(o => { const d = tashDayOf(o.date); return d >= fromDay && d <= toDay; });
   const canceled = dayOrders.filter(o => o.status === 'CANCELED');
   const valid = dayOrders.filter(o => o.status !== 'CANCELED');
 
-  let units = 0, revenue = 0, commissionTotal = 0, logisticsTotal = 0, payout = 0, cost = 0, uzumCostUsed = 0;
+  let units = 0, revenue = 0, commissionTotal = 0, logisticsTotal = 0, payout = 0, cost = 0;
+  const userSkus = new Set(), uzumSkus = new Set(), unknownSkus = new Set(); // tannarx manbasi bo'yicha (aniq SKU)
   const perSku = {};
   for (const o of valid) {
     const amount = o.amount || 0;
-    const skuId = skuByTitle[`${o.productId}|${o.skuTitle}`];
-    const t = resolveTannarx(skuId, o.productId);
-    const costPerUnit = (t.source !== 'unmapped') ? t.tannarx : (o.purchasePrice || 0);
-    if (t.source === 'unmapped') uzumCostUsed++;
-    const orderCost = costPerUnit * amount;
+    const c = resolveOrderCost(o, matchSkuId);
+    const orderCost = c.perUnit * amount;
+    const k = o.skuTitle || String(o.productId);
+    if (c.source === 'user') userSkus.add(k); else if (c.source === 'uzum') uzumSkus.add(k); else unknownSkus.add(k);
     units += amount;
     revenue += (o.sellPrice || 0) * amount;
     commissionTotal += o.commission || 0;
     logisticsTotal += o.logisticDeliveryFee || 0;
     payout += o.sellerProfit || 0;
     cost += orderCost;
-    const k = o.skuTitle || String(o.productId);
-    if (!perSku[k]) perSku[k] = { title: k, units: 0, revenue: 0, payout: 0, profit: 0 };
+    if (!perSku[k]) perSku[k] = { title: k, units: 0, revenue: 0, payout: 0, profit: 0, costSource: c.source };
     perSku[k].units += amount;
     perSku[k].revenue += (o.sellPrice || 0) * amount;
     perSku[k].payout += o.sellerProfit || 0;
@@ -811,7 +848,9 @@ async function computeSalesFromOrders(shopId, period) {
     ok: true, ready: true, source: 'finance-orders', period, fromDay, toDay, spanDays,
     orders: valid.length, canceledCount: canceled.length, units,
     revenue, commissionTotal, logisticsTotal, payout, cost, profit,
-    uzumCostUsed, perSku,
+    // tannarx manbasi bo'yicha (aniq SKU soni) — ko'rsatish uchun
+    costSource: { userSkus: userSkus.size, uzumSkus: uzumSkus.size, unknownSkus: unknownSkus.size },
+    perSku,
     // eski renderer'lar bilan moslik uchun alias'lar (aniq, "kamida" emas):
     totalSales: revenue, totalProfit: profit, soldTotal: units, soldTotalNet: units,
     actualSpanDays: spanDays, requestedDays: spanDays, partial: false,
@@ -1624,7 +1663,8 @@ async function generateReportText(shopId) {
   if (!sales.ok) {
     salesSection = `⚠️ Kechagi sotuv olinmadi: ${sales.error}`;
   } else {
-    salesSection = `🛍️ Kecha sotildi: ${fmtMoney(sales.units)} dona (${fmtMoney(sales.orders)} buyurtma)${sales.canceledCount ? ` · ❌ ${fmtMoney(sales.canceledCount)} bekor` : ''}\n💰 Kecha tushum: ${fmtMoney(sales.revenue)} so'm\n🏦 Uzum to'lovi: ${fmtMoney(sales.payout)} so'm\n💵 Kecha sof foyda (tannarx ayrilgan): ${fmtMoney(sales.profit)} so'm`;
+    const csl = costSourceLine(sales.costSource);
+    salesSection = `🛍️ Kecha sotildi: ${fmtMoney(sales.units)} dona (${fmtMoney(sales.orders)} buyurtma)${sales.canceledCount ? ` · ❌ ${fmtMoney(sales.canceledCount)} bekor` : ''}\n💰 Kecha tushum: ${fmtMoney(sales.revenue)} so'm\n🏦 Uzum to'lovi: ${fmtMoney(sales.payout)} so'm\n💵 Kecha sof foyda (tannarx ayrilgan): ${fmtMoney(sales.profit)} so'm${csl ? '\n' + csl : ''}`;
   }
 
   // Xarajatlar — source bo'yicha (2.3)
@@ -1813,6 +1853,7 @@ function buildPeriodReportText(result) {
   lines.push(`💰 Tushum: ${fmtMoney(result.revenue)} so'm`);
   lines.push(`🏦 Uzum to'lovi (komissiya/logistikadan keyin): ${fmtMoney(result.payout)} so'm`);
   lines.push(`💸 Sof foyda (tannarx ayrilgan): ${fmtMoney(result.profit)} so'm`);
+  lines.push(costSourceLine(result.costSource));
   if (result.period === 'today') lines.push(`\n⏳ Bugun — kun hali tugamagan, kun davomida yangilanadi`);
   lines.push(`\n📊 Manba: Uzum buyurtmalar (real vaqtli, aniq)`);
   return `${header}\n\n${lines.join('\n')}`;
