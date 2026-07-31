@@ -711,6 +711,109 @@ async function getTodaySoFarDelta(shopId) {
   return { ...fin, asOf: new Date().toISOString() }; // "hozirgacha" belgisi — to'liq kunlik EMAS
 }
 
+// ============ 18-FIX: finance/orders REAL-VAQTLI SOTUV MANBAI ============
+// Diagnostika (2026-07-31) isbotladi: v1/finance/orders REAL vaqtli buyurtmalarni beradi — snapshot
+// delta EMAS (u faqat QABUL QILINGACH o'sadi, shu sabab bot "1 dona", Uzum sayti "10+ buyurtma" edi).
+// QOIDALAR (diagnostikadan):
+//  - shopIds SHART (yo'q bo'lsa 403). Har do'kon alohida.
+//  - Sana filtri (dateFrom/dateTo) ISHLAMAYDI — har qanday formatda bo'sh qaytadi. Shuning uchun
+//    SANASIZ olamiz va client-side `date` (Tashkent kuni, UTC+5) bo'yicha filtrlaymiz — soatgacha aniq.
+//  - status: CANCELED = bekor (sanoq va puldan CHIQADI, returnCause "Отменён до получения"),
+//    qolgani (PROCESSING/TO_WITHDRAW/CREATED/DELIVERED...) = haqiqiy sotuv.
+//  - Maydonlar: sellPrice=DONA narxi; commission/logisticDeliveryFee/sellerProfit=QATOR JAMISI (×amount);
+//    purchasePrice=DONA tannarxi (Uzum); sellerProfit = sellPrice×amount − commission − logistics (aniq).
+//  - orderId:null yozuvlar (ombor operatsiyalari) chetlab o'tiladi.
+const FIN_ORDERS_TTL_MS = 5 * 60 * 1000; // rate-limit himoyasi: har do'kon 5 daqiqada bir marta so'raladi
+const _finOrdersCache = {}; // shopId -> { at, orders }
+async function fetchFinanceOrders(shopId) {
+  const key = String(shopId);
+  const now = Date.now();
+  const cached = _finOrdersCache[key];
+  if (cached && (now - cached.at) < FIN_ORDERS_TTL_MS) return { ok: true, orders: cached.orders, cached: true };
+  const all = [];
+  const size = 200;
+  for (let page = 0; page < 6; page++) { // 6×200=1200 buyurtma — 30+ kunni qoplaydi
+    const r = await uzumGet(`/v1/finance/orders?shopIds=${key}&page=${page}&size=${size}`, process.env.UZUM_TOKEN);
+    if (!r.ok) {
+      if (all.length) break; // qisman ma'lumot bor — shuni ishlatamiz (rate-limit yoki oxirgi sahifa xatosi)
+      return { ok: false, status: r.status, error: r.error || `Uzum ${r.status}` };
+    }
+    const d = r.data || {};
+    const orders = d.payload?.orders || d.orderItems || (Array.isArray(d.payload) ? d.payload : []);
+    all.push(...orders);
+    if (orders.length < size) break; // oxirgi sahifa
+  }
+  _finOrdersCache[key] = { at: now, orders: all };
+  return { ok: true, orders: all, cached: false };
+}
+
+// Ixtiyoriy ms → Tashkent (UTC+5) kuni "YYYY-MM-DD"
+function tashDayOf(ms) { return new Date((ms || 0) + 5 * 60 * 60 * 1000).toISOString().slice(0, 10); }
+// Bugundan n kun oldingi Tashkent kuni "YYYY-MM-DD"
+function tashDayMinus(n) { return new Date(Date.now() + 5 * 60 * 60 * 1000 - n * 86400000).toISOString().slice(0, 10); }
+
+// period → [fromDay, toDay] (Tashkent kuni, inklyuziv)
+function periodToDayRange(period) {
+  const today = todayTashkent();
+  if (period === 'today') return { fromDay: today, toDay: today, spanDays: 1 };
+  if (period === 'yesterday') { const y = tashDayMinus(1); return { fromDay: y, toDay: y, spanDays: 1 }; }
+  if (period === 'week') return { fromDay: tashDayMinus(6), toDay: today, spanDays: 7 };
+  if (period === 'month') return { fromDay: tashDayMinus(29), toDay: today, spanDays: 30 };
+  return null;
+}
+
+// finance/orders'dan sotuv/daromad/foyda — client-side sana filtri bilan. Tannarx: qo'lda (resolveTannarx,
+// SKU'ni productId+skuTitle bo'yicha jonli mahsulotdan topib), aks holda Uzum purchasePrice (100% to'la).
+async function computeSalesFromOrders(shopId, period) {
+  const range = period && /^\d{4}-\d{2}-\d{2}$/.test(period) ? null : periodToDayRange(period);
+  const { fromDay, toDay, spanDays } = range || { fromDay: period, toDay: period, spanDays: 1 };
+  if (!fromDay) return { ok: false, error: `Noma'lum davr: ${period}` };
+  const fo = await fetchFinanceOrders(shopId);
+  if (!fo.ok) return { ok: false, error: fo.error, status: fo.status };
+  const prod = await fetchLiveShopProducts(shopId); // SKU'ni title bo'yicha topish (tannarx uchun) — 5 daq kesh
+  const products = prod.ok ? prod.products : [];
+  const skuByTitle = {}; // "productId|skuTitle" -> skuId (qo'lda tannarx uchun)
+  products.forEach(p => (p.skuList || []).forEach(s => { skuByTitle[`${p.productId}|${s.skuTitle}`] = s.skuId; }));
+
+  const inRange = fo.orders.filter(o => o.orderId != null && o.date != null);
+  const dayOrders = inRange.filter(o => { const d = tashDayOf(o.date); return d >= fromDay && d <= toDay; });
+  const canceled = dayOrders.filter(o => o.status === 'CANCELED');
+  const valid = dayOrders.filter(o => o.status !== 'CANCELED');
+
+  let units = 0, revenue = 0, commissionTotal = 0, logisticsTotal = 0, payout = 0, cost = 0, uzumCostUsed = 0;
+  const perSku = {};
+  for (const o of valid) {
+    const amount = o.amount || 0;
+    const skuId = skuByTitle[`${o.productId}|${o.skuTitle}`];
+    const t = resolveTannarx(skuId, o.productId);
+    const costPerUnit = (t.source !== 'unmapped') ? t.tannarx : (o.purchasePrice || 0);
+    if (t.source === 'unmapped') uzumCostUsed++;
+    const orderCost = costPerUnit * amount;
+    units += amount;
+    revenue += (o.sellPrice || 0) * amount;
+    commissionTotal += o.commission || 0;
+    logisticsTotal += o.logisticDeliveryFee || 0;
+    payout += o.sellerProfit || 0;
+    cost += orderCost;
+    const k = o.skuTitle || String(o.productId);
+    if (!perSku[k]) perSku[k] = { title: k, units: 0, revenue: 0, payout: 0, profit: 0 };
+    perSku[k].units += amount;
+    perSku[k].revenue += (o.sellPrice || 0) * amount;
+    perSku[k].payout += o.sellerProfit || 0;
+    perSku[k].profit += (o.sellerProfit || 0) - orderCost;
+  }
+  const profit = payout - cost;
+  return {
+    ok: true, ready: true, source: 'finance-orders', period, fromDay, toDay, spanDays,
+    orders: valid.length, canceledCount: canceled.length, units,
+    revenue, commissionTotal, logisticsTotal, payout, cost, profit,
+    uzumCostUsed, perSku,
+    // eski renderer'lar bilan moslik uchun alias'lar (aniq, "kamida" emas):
+    totalSales: revenue, totalProfit: profit, soldTotal: units, soldTotalNet: units,
+    actualSpanDays: spanDays, requestedDays: spanDays, partial: false
+  };
+}
+
 // 14A3: barcha davrlar uchun YAGONA javob shakli — bot va dashboard bir xil renderer ishlatsin.
 // period: today | yesterday | week | month
 async function computePeriodReport(shopId, period) {
@@ -1938,6 +2041,14 @@ app.get('/api/metrics/:shopId', async (req, res) => {
 app.get('/api/finance-summary/:shopId', async (req, res) => {
   const days = Math.max(1, Math.min(60, Number(req.query.days) || 30));
   const result = await computeFinanceSummary(req.params.shopId, days);
+  if (!result.ok) return sendUzumError(res, result.error);
+  res.json(result);
+});
+
+// 18-FIX diagnostika: finance/orders'dan sotuv (?period=today|yesterday|week|month yoki YYYY-MM-DD)
+app.get('/api/sales-orders/:shopId', async (req, res) => {
+  const period = req.query.period || 'yesterday';
+  const result = await computeSalesFromOrders(req.params.shopId, period);
   if (!result.ok) return sendUzumError(res, result.error);
   res.json(result);
 });
