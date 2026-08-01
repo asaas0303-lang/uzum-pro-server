@@ -2228,7 +2228,7 @@ app.get('/api/all-shops-summary', async (req, res) => {
 if (process.env.TELEGRAM_BOT_TOKEN && process.env.APP_URL) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const webhookUrl = `${process.env.APP_URL}/api/tg-bot/webhook`;
-  
+
   fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`)
     .then(r => r.json())
     .then(data => {
@@ -2237,6 +2237,34 @@ if (process.env.TELEGRAM_BOT_TOKEN && process.env.APP_URL) {
     .catch(err => {
       console.error(`Telegram Bot webhook registration failed:`, err);
     });
+}
+
+// 18-BOT-FIX: setMyCommands — buyruqlar "/" menyusida chiqishi va matnda BOSILADIGAN bo'lishi uchun
+// Telegram serveriga ro'yxatdan o'tkaziladi. Bir martalik sozlash — xato bo'lsa asosiy ishga xalaqit
+// bermasligi uchun try/catch bilan o'raladi, faqat log yoziladi.
+if (process.env.TELEGRAM_BOT_TOKEN) {
+  (async () => {
+    try {
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      const commands = [
+        { command: 'hisobot', description: "Bugungi savdo, xarajat, zaxira hisoboti" },
+        { command: 'moliya', description: "Naqd oqim: foyda/zarar, xarajat, kredit" },
+        { command: 'maslahat', description: "AI murabbiy: bugungi ishlar va tavsiyalar" },
+        { command: 'maqsad', description: "Aylanma maqsadi va unga yaqinlik" },
+        { command: 'dashboard', description: "Mini App ochish" }
+      ];
+      const response = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ commands })
+      });
+      const data = await response.json();
+      if (data.ok) console.log('[TG] setMyCommands muvaffaqiyatli:', JSON.stringify(commands.map(c => c.command)));
+      else console.error('[TG] setMyCommands RAD ETILDI:', JSON.stringify(data));
+    } catch (err) {
+      console.error('[TG] setMyCommands xato (asosiy ishga ta\'sir qilmaydi):', err.message);
+    }
+  })();
 }
 
 // Snapshot cron — har kuni 04:50 Asia/Tashkent (hisobotdan oldin, sotuv tezligi uchun)
