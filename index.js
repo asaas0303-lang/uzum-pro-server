@@ -1986,6 +1986,19 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
   }
 });
 
+// 18-BOT-FIX diagnostika: setMyCommands muvaffaqiyatli ro'yxatdan o'tganini tekshirish (o'qish uchun, xavfsiz).
+app.get('/api/tg-bot/commands-status', async (req, res) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return res.status(400).json({ error: "TELEGRAM_BOT_TOKEN yo'q" });
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/getMyCommands`);
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Endpoint to fetch simulated bot report text in the simulator
 app.get('/api/tg-bot/simulate-report', async (req, res) => {
   // Return the textual report so frontend simulator can demonstrate beautifully
