@@ -1935,14 +1935,31 @@ ${urgentSection}
       return parseInt(el.value.replace(/[^\d]/g, '')) || 0;
     }
 
-    // Barcha moliya ma'lumotini serverga yozadi (aniq harakatdan keyin), so'ng shu tab qayta render bo'ladi
-    async function saveFinanceData() {
+    // Barcha moliya ma'lumotini serverga yozadi (aniq harakatdan keyin), so'ng shu tab qayta render bo'ladi.
+    // confirmClear: shu chaqiriqda ATAYLAB bo'shatilayotgan kalitlar ro'yxati (masalan, oxirgi yozuvni
+    // o'chirish) — server buni bo'sh-yozuv himoyasidan o'tkazish uchun ishlatadi (2026-08-02 hodisasidan keyin).
+    async function saveFinanceData(confirmClear = []) {
+      let resp;
       try {
-        await fetch('/api/finance-data', {
+        resp = await fetch('/api/finance-data', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ withdrawals: state.withdrawals, userExpenses: state.userExpenses, credits: state.credits, goals: state.goals })
+          body: JSON.stringify({ withdrawals: state.withdrawals, userExpenses: state.userExpenses, credits: state.credits, goals: state.goals, _confirmClear: confirmClear })
         });
-      } catch (e) { console.error("Moliya ma'lumotini saqlashda xato:", e); alert("Saqlashda xato — internet aloqasini tekshiring"); }
+      } catch (e) {
+        console.error("Moliya ma'lumotini saqlashda xato:", e);
+        alert("Saqlashda xato — internet aloqasini tekshiring");
+        return;
+      }
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        console.error("Moliya saqlash rad etildi:", err);
+        alert(err.error || "Saqlashda xato yuz berdi");
+        // Server rad etsa — mahalliy holat serverdan farq qilishi mumkin, haqiqiy holatni qayta yuklaymiz
+        // (ustidan yozib yubormaslik uchun — aynan shu turdagi xato tufayli ma'lumot yo'qolgan edi).
+        await loadServerSettings();
+        renderFinance(document.getElementById('main-view'));
+        return;
+      }
       // localStorage'ga ham aks ettiramiz (offline zaxira)
       localStorage.setItem('uz_withdrawals', JSON.stringify(state.withdrawals));
       localStorage.setItem('uz_userExpenses', JSON.stringify(state.userExpenses));
@@ -1968,7 +1985,8 @@ ${urgentSection}
     }
     function deleteWithdrawal(id) {
       if (!confirm("Bu yozuvni o'chirasizmi?")) return;
-      state.withdrawals = state.withdrawals.filter(x => x.id !== id); saveFinanceData();
+      state.withdrawals = state.withdrawals.filter(x => x.id !== id);
+      saveFinanceData(state.withdrawals.length === 0 ? ['withdrawals'] : []);
     }
 
     // A2: real xarajatlar
@@ -1984,7 +2002,8 @@ ${urgentSection}
     }
     function deleteUserExpense(id) {
       if (!confirm("Bu xarajatni o'chirasizmi?")) return;
-      state.userExpenses = state.userExpenses.filter(x => x.id !== id); saveFinanceData();
+      state.userExpenses = state.userExpenses.filter(x => x.id !== id);
+      saveFinanceData(state.userExpenses.length === 0 ? ['userExpenses'] : []);
     }
 
     // 18-KREDIT-FIX: bugungi (Tashkent) kundan berilgan sanagacha necha kun qolgani (ko'rsatish uchun, faqat frontend).
@@ -2034,7 +2053,8 @@ ${urgentSection}
     }
     function deleteCredit(id) {
       if (!confirm("Bu kreditni o'chirasizmi?")) return;
-      state.credits = state.credits.filter(x => x.id !== id); saveFinanceData();
+      state.credits = state.credits.filter(x => x.id !== id);
+      saveFinanceData(state.credits.length === 0 ? ['credits'] : []);
     }
 
     // C4: maqsad
@@ -2045,7 +2065,8 @@ ${urgentSection}
       saveFinanceData();
     }
     function deleteGoal(id) {
-      state.goals = state.goals.filter(x => x.id !== id); saveFinanceData();
+      state.goals = state.goals.filter(x => x.id !== id);
+      saveFinanceData(state.goals.length === 0 ? ['goals'] : []);
     }
 
     // 18-B: cash-flow serverdan

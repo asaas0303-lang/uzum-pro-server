@@ -986,13 +986,29 @@ app.get('/api/settings', (req, res) => {
 // 18-A4: MOLIYA ma'lumotlarini yozish — FAQAT aniq foydalanuvchi harakati (qo'shish/o'chirish/tahrir).
 // Kelgan kalitlar (withdrawals/userExpenses/credits/goals) syncedState'ga yoziladi va diskka saqlanadi
 // (mavjud himoya: backupSettings + saveSettings). Sozlamalar (do'kon/tannarx)ga TEGMAYDI.
+//
+// XAVFSIZLIK (2026-08-02 hodisasi — haqiqiy foydalanuvchi ma'lumoti tasodifan bo'shatildi): eski
+// isSettingsEmpty() himoyasi FAQAT shops/productTypes'ni tekshirar edi, moliya kalitlarini UMUMAN
+// himoyalamas edi. Endi: mavjud (bo'sh bo'lmagan) massivni bo'sh massiv bilan almashtirish FAQAT
+// foydalanuvchi aniq shu kalitni tozalashni tasdiqlagan bo'lsa (masalan, oxirgi yozuvni o'chirish
+// tugmasi — _confirmClear ro'yxatida) ruxsat etiladi. Aks holda RAD ETILADI (409) — eskirgan tab,
+// tashqi so'rov yoki diagnostika chaqiruvi haqiqiy ma'lumotni tasodifan o'chirib yubormasin.
 app.post('/api/finance-data', (req, res) => {
   const FINANCE_KEYS = ['withdrawals', 'userExpenses', 'credits', 'goals'];
-  let changed = false;
-  for (const k of FINANCE_KEYS) {
-    if (Array.isArray(req.body[k])) { syncedState[k] = req.body[k]; changed = true; }
+  const confirmClear = new Set(Array.isArray(req.body._confirmClear) ? req.body._confirmClear : []);
+  const sentKeys = FINANCE_KEYS.filter(k => Array.isArray(req.body[k]));
+  if (sentKeys.length === 0) return res.status(400).json({ error: "Hech qanday moliya kaliti yuborilmadi" });
+
+  for (const k of sentKeys) {
+    const willBeEmpty = req.body[k].length === 0;
+    const currentlyHasData = (syncedState[k] || []).length > 0;
+    if (willBeEmpty && currentlyHasData && !confirmClear.has(k)) {
+      console.warn(`[FINANCE-DATA] RAD ETILDI: "${k}" bo'sh yuborildi (serverda ${syncedState[k].length} ta yozuv bor edi, tasdiqlanmagan) — himoya.`);
+      return res.status(409).json({ error: `"${k}" ni bo'shatish tasdiqlanmadi — mavjud ${syncedState[k].length} ta yozuv saqlanib qoldi.`, rejectedKey: k, currentCount: syncedState[k].length });
+    }
   }
-  if (!changed) return res.status(400).json({ error: "Hech qanday moliya kaliti yuborilmadi" });
+
+  for (const k of sentKeys) syncedState[k] = req.body[k];
   saveSettings();
   res.json({ success: true, withdrawals: syncedState.withdrawals.length, userExpenses: syncedState.userExpenses.length, credits: syncedState.credits.length, goals: syncedState.goals.length });
 });
