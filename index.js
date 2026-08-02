@@ -997,6 +997,23 @@ app.post('/api/finance-data', (req, res) => {
   res.json({ success: true, withdrawals: syncedState.withdrawals.length, userExpenses: syncedState.userExpenses.length, credits: syncedState.credits.length, goals: syncedState.goals.length });
 });
 
+// XAVFSIZLIK DIAGNOSTIKASI (vaqtinchalik): zaxira faylining moliya kalitlarini FAQAT O'QIYDI —
+// syncedState'ga TEGMAYDI, saveSettings() chaqirmaydi. /restore'dan farqli — bu hech narsani yozmaydi.
+app.get('/api/settings/backup-peek', (req, res) => {
+  const file = (req.query.file || 'settings.backup.json').toString();
+  if (!/^settings(\.\d{4}-\d{2}-\d{2})?\.(backup\.)?json$/.test(file) || file.includes('/') || file.includes('..')) {
+    return res.status(400).json({ error: "Noto'g'ri fayl nomi" });
+  }
+  const full = path.join(DATA_DIR, file);
+  const data = readJsonFile(full, null);
+  if (!data) return res.status(404).json({ error: "Fayl topilmadi" });
+  res.json({
+    file, shops: (data.shops || []).length, productTypesCount: (data.productTypes || []).length,
+    withdrawals: data.withdrawals || [], userExpenses: data.userExpenses || [],
+    credits: data.credits || [], goals: data.goals || []
+  });
+});
+
 // C: zaxiralar ro'yxati va tiklash
 app.get('/api/settings/backups', (req, res) => {
   try {
