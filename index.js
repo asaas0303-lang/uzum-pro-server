@@ -1057,6 +1057,33 @@ app.post('/api/settings/restore', (req, res) => {
   res.json({ success: true, restored: file, shops: (data.shops||[]).length, productTypes: (data.productTypes||[]).length });
 });
 
+// 19-A DIAGNOSTIKA (o'qish uchun, vaqtinchalik): Uzum TA'MINLASH (invoice) API'sini tekshirish.
+// Hech narsa yozmaydi/o'zgartirmaydi — Uzum'dan RAW javobni qaytaradi (tuzilmani ko'rish uchun).
+app.get('/api/uzum/invoice', async (req, res) => {
+  const token = getAuthToken(req);
+  if (!token) return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
+  const qs = new URLSearchParams(req.query).toString();
+  const r = await uzumGet(`/v1/invoice${qs ? '?' + qs : ''}`, token);
+  if (!r.ok) return sendUzumError(res, `Uzum ${r.status}: ${r.error}`);
+  res.json({ ...r.data, source: 'live' });
+});
+app.get('/api/uzum/shop/:shopId/invoice', async (req, res) => {
+  const token = getAuthToken(req);
+  if (!token) return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
+  const qs = new URLSearchParams(req.query).toString();
+  const r = await uzumGet(`/v1/shop/${req.params.shopId}/invoice${qs ? '?' + qs : ''}`, token);
+  if (!r.ok) return sendUzumError(res, `Uzum ${r.status}: ${r.error}`);
+  res.json({ ...r.data, source: 'live' });
+});
+app.get('/api/uzum/shop/:shopId/invoice/products', async (req, res) => {
+  const token = getAuthToken(req);
+  if (!token) return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
+  const qs = new URLSearchParams(req.query).toString();
+  const r = await uzumGet(`/v1/shop/${req.params.shopId}/invoice/products${qs ? '?' + qs : ''}`, token);
+  if (!r.ok) return sendUzumError(res, `Uzum ${r.status}: ${r.error}`);
+  res.json({ ...r.data, source: 'live' });
+});
+
 // 2. Proxies / Mimics for Uzum Seller API
 // Hech biri jim mock'ga tushmaydi: token yo'q yoki Uzum xato qaytarsa — aniq 502 xato,
 // faqat DEMO_MODE=true bo'lganda mock ishlatiladi (lokal test uchun).
