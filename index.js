@@ -41,6 +41,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const SNAPSHOTS_FILE = path.join(DATA_DIR, 'snapshots.json');
 const PROBLEMS_FILE = path.join(DATA_DIR, 'problems.json'); // 18-D0: faol muammo holati (takroriy ogohlantirmaslik uchun)
+const INVOICE_STATE_FILE = path.join(DATA_DIR, 'invoice_state.json'); // 19-B: { deducted:[invoiceId], acceptedNotified:[invoiceId] } — bir yuk xatini ikki marta qayta ishlamaslik uchun
 const SNAPSHOT_RETENTION_DAYS = 60;
 
 function ensureDataDir() {
@@ -1839,6 +1840,130 @@ async function runProblemCheck() {
   return { ok: true, alertCount, firstRun };
 }
 
+// ============ 19-B/C: TA'MINLASH (invoice) — avto zaxira + kompensatsiya nomzodlari ============
+// Uzum /v1/invoice REAL yuk xatlarini beradi: CREATED (yaratilgan, yo'lda) -> ACCEPTED (omborda qabul qilingan).
+// Har SKU: skuForInvoiceDtoList[].id = skuId (bizning skuMappings kaliti bilan bir xil — tekshirilgan),
+// quantityToStock (jo'natilgan), quantityAccepted (qabul qilingan), purchasePrice (tannarx).
+// MUHIM: `size>50` bo'sh qaytaradi (finance/orders'dagidek) — shuning uchun page=0,1,2... size=50 bilan sahifalaymiz.
+const INVOICE_TTL_MS = 5 * 60 * 1000;
+let _invoiceCache = null; // { at, invoices }
+async function fetchAllInvoices() {
+  const now = Date.now();
+  if (_invoiceCache && (now - _invoiceCache.at) < INVOICE_TTL_MS) return { ok: true, invoices: _invoiceCache.invoices, cached: true };
+  const all = [];
+  for (let page = 0; page < 40; page++) { // xavfsizlik chegarasi: 40*50=2000 yuk xati
+    const r = await uzumGet(`/v1/invoice?page=${page}&size=50`, process.env.UZUM_TOKEN);
+    if (!r.ok) { if (all.length) break; return { ok: false, status: r.status, error: r.error || `Uzum ${r.status}` }; }
+    const d = r.data;
+    const list = Array.isArray(d) ? d : (d && d.payload && Array.isArray(d.payload) ? d.payload : []);
+    all.push(...list);
+    if (list.length < 50) break; // oxirgi sahifa
+  }
+  _invoiceCache = { at: now, invoices: all };
+  return { ok: true, invoices: all, cached: false };
+}
+
+// Bitta yuk xatining SKU'larini uy zaxirasi turlariga (productTypes) bog'lab, tur bo'yicha jami dona qaytaradi.
+// { typeId: qty } — faqat skuMappings'da bog'langan SKU'lar (bog'lanmaganlar uy zaxirasida yo'q, e'tiborsiz).
+function invoiceQtyByType(invoice, field) {
+  const byType = {};
+  (invoice.productForInvoiceDto || []).forEach(p => (p.skuForInvoiceDtoList || []).forEach(s => {
+    const typeId = syncedState.skuMappings[String(s.id)];
+    if (!typeId) return;
+    byType[typeId] = (byType[typeId] || 0) + (s[field] || 0);
+  }));
+  return byType;
+}
+
+// 19-C: bitta ACCEPTED yuk xati bo'yicha kompensatsiya nomzodlari (quantityToStock − quantityAccepted > 0).
+function invoiceMissingItems(invoice) {
+  const items = [];
+  (invoice.productForInvoiceDto || []).forEach(p => (p.skuForInvoiceDtoList || []).forEach(s => {
+    const diff = (s.quantityToStock || 0) - (s.quantityAccepted || 0);
+    if (diff > 0) items.push({ skuId: s.id, skuTitle: s.skuTitle, toStock: s.quantityToStock, accepted: s.quantityAccepted, missing: diff, purchasePrice: s.purchasePrice || 0, value: diff * (s.purchasePrice || 0) });
+  }));
+  return items;
+}
+
+// 19-B: yangi CREATED yuk xatlari uchun uy zaxirasidan AVTOMATIK ayirish (tasdiq so'ramasdan, lekin aniq xabar bilan),
+// va ACCEPTED holatga o'tganida alohida xabar (zaxiraga tegmasdan). Holat invoice_state.json'da — takror ayirmaslik.
+// Birinchi ishga tushishda (fayl yo'q) — barcha mavjud yuk xatlari BAZAVIY deb belgilanadi (ayirish/xabar YO'Q).
+async function runInvoiceSync() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const fetchRes = await fetchAllInvoices();
+  if (!fetchRes.ok) { console.error('[INVOICE] olinmadi:', fetchRes.error); return { ok: false, error: fetchRes.error }; }
+  const invoices = fetchRes.invoices;
+
+  const firstRun = !fs.existsSync(INVOICE_STATE_FILE);
+  const st = readJsonFile(INVOICE_STATE_FILE, { deducted: [], acceptedNotified: [] });
+  const deducted = new Set(st.deducted || []);
+  const acceptedNotified = new Set(st.acceptedNotified || []);
+
+  if (firstRun) {
+    // Bazaviy holat: hamma narsani "ishlangan" deb belgilaymiz — eski yuk xatlari zaxirani buzmasin, toshqin bo'lmasin.
+    invoices.forEach(inv => { deducted.add(inv.id); acceptedNotified.add(inv.id); });
+    writeJsonFile(INVOICE_STATE_FILE, { deducted: [...deducted], acceptedNotified: [...acceptedNotified] });
+    console.log(`[INVOICE] Birinchi run — ${invoices.length} ta yuk xati bazaviy belgilandi (ayirish/xabar yo'q).`);
+    return { ok: true, firstRun: true, baselined: invoices.length };
+  }
+
+  const messages = [];
+  let stockChanged = false, deductedCount = 0, acceptedCount = 0;
+
+  for (const inv of invoices) {
+    const status = inv.invoiceStatus && inv.invoiceStatus.value;
+    const numLabel = inv.invoiceNumber || inv.id;
+
+    // 1) YANGI yuk xati (CREATED yoki to'g'ridan ACCEPTED) hali ayirilmagan bo'lsa — uy zaxirasidan ayir
+    if (!deducted.has(inv.id)) {
+      const byType = invoiceQtyByType(inv, 'quantityToStock');
+      const lines = [];
+      for (const [typeId, qty] of Object.entries(byType)) {
+        const type = (syncedState.productTypes || []).find(t => t.id === typeId);
+        if (!type) continue;
+        const before = type.stock || 0;
+        type.stock = Math.max(0, before - qty); // manfiy zaxira yo'q
+        lines.push(`   ${type.name}: ${before} → ${type.stock} (−${qty})`);
+        stockChanged = true;
+      }
+      const totalToStock = inv.totalToStock || 0;
+      let msg = `📦 *Yangi yuk xati* #${numLabel} (${inv.shopTitle})\n${fmtMoney(totalToStock)} dona Uzum'ga jo'natildi.`;
+      if (lines.length) msg += `\n\n🏠 Uy zaxirasidan ayirildi:\n${lines.join('\n')}`;
+      else msg += `\n\n(Uy zaxirasiga bog'langan SKU topilmadi — zaxira o'zgarmadi)`;
+      messages.push(msg);
+      deducted.add(inv.id);
+      deductedCount++;
+    }
+
+    // 2) ACCEPTED holatga o'tgan va hali xabar berilmagan bo'lsa — alohida xabar (zaxiraga TEGMAYMIZ)
+    if (status === 'ACCEPTED' && !acceptedNotified.has(inv.id)) {
+      const totalToStock = inv.totalToStock || 0, totalAccepted = inv.totalAccepted || 0;
+      const missing = invoiceMissingItems(inv);
+      let msg = `✅ *Uzum qabul qildi* #${numLabel} (${inv.shopTitle})\nJo'natilgan: ${fmtMoney(totalToStock)} · Qabul: ${fmtMoney(totalAccepted)} dona`;
+      if (missing.length) {
+        const totalMissing = missing.reduce((a, m) => a + m.missing, 0);
+        const totalVal = missing.reduce((a, m) => a + m.value, 0);
+        msg += `\n\n⚠️ *${fmtMoney(totalMissing)} dona farq* (~${fmtMoney(totalVal)} so'm) — kompensatsiya nomzodi:\n${missing.slice(0, 6).map(m => `   ${m.skuTitle}: ${m.toStock}→${m.accepted} (−${m.missing})`).join('\n')}\n\n→ Uzum kabinetida sababini tekshiring (sifat/markirovka rad etilishimi yoki yo'qolganmi). Bu KAFOLATLANGAN pul emas.`;
+      }
+      messages.push(msg);
+      acceptedNotified.add(inv.id);
+      acceptedCount++;
+    }
+  }
+
+  writeJsonFile(INVOICE_STATE_FILE, { deducted: [...deducted], acceptedNotified: [...acceptedNotified] });
+  if (stockChanged) saveSettings(); // uy zaxirasi o'zgardi — diskka saqlaymiz (mavjud himoya ostida)
+
+  if (token && ADMIN_CHAT_ID && messages.length) {
+    for (const m of messages) {
+      try { await sendTelegramMessage(token, ADMIN_CHAT_ID, m); }
+      catch (e) { console.error('[INVOICE] xabar yuborilmadi:', e.message); }
+    }
+  }
+  console.log(`[INVOICE] Sinxron tugadi — ${deductedCount} yangi (ayirildi), ${acceptedCount} qabul qilindi, ${messages.length} xabar.`);
+  return { ok: true, firstRun: false, deductedCount, acceptedCount, messagesSent: messages.length };
+}
+
 async function runDailyReport() {
   console.log(`[CRON] Kunlik hisobot boshlandi: ${new Date().toISOString()}`);
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -2079,6 +2204,22 @@ app.get('/api/tg-bot/trigger-daily-report', async (req, res) => {
 app.get('/api/tg-bot/trigger-problem-check', async (req, res) => {
   const result = await runProblemCheck();
   res.json(result);
+});
+
+// 19-B diagnostika: invoice sinxronni qo'lda ishga tushiradi (cron kutmasdan)
+app.get('/api/invoice/trigger-sync', async (req, res) => {
+  const result = await runInvoiceSync();
+  res.json(result);
+});
+
+// 19-B diagnostika (o'qish uchun): invoice holati — nechta ayirilgan/qabul belgilangan
+app.get('/api/invoice/sync-status', (req, res) => {
+  const st = readJsonFile(INVOICE_STATE_FILE, null);
+  res.json({
+    fileExists: fs.existsSync(INVOICE_STATE_FILE),
+    deductedCount: st ? (st.deducted || []).length : 0,
+    acceptedNotifiedCount: st ? (st.acceptedNotified || []).length : 0
+  });
 });
 
 // Diagnostika: snapshotni qo'lda darhol oladi (cron kutmasdan sinash uchun)
@@ -2375,7 +2516,8 @@ if (process.env.UZUM_TOKEN) {
         console.log(`[CRON] Snapshot cron tugadi: ${r.savedShops} do'kon saqlandi (${r.date})`);
         return runProblemCheck(); // 18-D0: snapshotdan keyin muammo kuzatuvi (yangi bloklangan/tugagan SKU)
       })
-      .catch(e => console.error('[CRON] Snapshot/muammo cron xato:', e));
+      .then(() => runInvoiceSync()) // 19-B: yangi yuk xati -> uy zaxirasidan avto ayirish + qabul/farq xabari
+      .catch(e => console.error('[CRON] Snapshot/muammo/invoice cron xato:', e));
   }, { timezone: 'Asia/Tashkent' });
   console.log('[CRON] Kunlik snapshot rejalashtirildi: har kuni 04:50 Asia/Tashkent.');
 } else {
