@@ -205,7 +205,8 @@
       userExpenses: [], // { id, date, amount, category, note }
       credits: [], // { id, name, totalAmount, remainingAmount, monthlyPayment, nextPaymentDate, interestRate?, endDate?, remainingPayments?, type, note }
       goals: [], // { id, type, target, createdDate }
-      cashFlow: null // 18-B: /api/cash-flow natijasi
+      cashFlow: null, // 18-B: /api/cash-flow natijasi
+      compensation: null // 19-C: /api/compensation-candidates natijasi
     };
 
     // FAQAT foydalanuvchi sozlamalarini serverga yuboradi (do'kon/tannarx/bog'lanish).
@@ -623,6 +624,8 @@ ${urgentSection}
 
       // 18-B: naqd oqim (yechilgan/xarajat/kredit + proyeksiya)
       await loadCashFlow();
+      // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar)
+      await loadCompensation();
 
       // 15: bu yerda avtomatik serverga yozish yo'q (avval syncStateToServer() chaqirilardi —
       // backend baribir products/orders/expenses'ni hech qayerda ishlatmasdi, faqat xotirada
@@ -2075,6 +2078,12 @@ ${urgentSection}
       catch (e) { console.error("Naqd oqim yuklashda xato:", e); state.cashFlow = null; }
     }
 
+    // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar)
+    async function loadCompensation() {
+      try { state.compensation = await fetchFromProxy('/api/compensation-candidates'); }
+      catch (e) { console.error("Kompensatsiya yuklashda xato:", e); state.compensation = null; }
+    }
+
     // UI Panel: FINANCE & ACCOUNTING
     function renderFinance(root) {
       try {
@@ -2268,9 +2277,58 @@ ${urgentSection}
           <!-- 18-A/B: Moliya boshqaruvi (yechilgan pul, xarajatlar, kreditlar, maqsad, naqd oqim) -->
           ${financeManagementHTML()}
 
+          <!-- 19-C: Kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar) -->
+          ${compensationHTML()}
+
         </div>
       `;
       lucide.createIcons();
+    }
+
+    // 19-C: Kompensatsiya nomzodlari HTML — yuk xatlarida jo'natilgan vs qabul qilingan farqi
+    function compensationHTML() {
+      const c = state.compensation;
+      if (!c || !c.ok) return '';
+      if (!c.count) {
+        return `
+          <div class="bg-darkCard border border-darkBorder rounded-2xl p-4 mb-3">
+            <div class="flex items-center justify-between border-b border-darkBorder pb-2.5 mb-2">
+              <span class="text-xs uppercase font-bold text-slate-300 tracking-wider">📋 Kompensatsiya nomzodlari</span>
+            </div>
+            <div class="text-[11px] text-slate-500 text-center py-2">Farq topilmadi — barcha yuk xatlari to'liq qabul qilingan ✅</div>
+          </div>`;
+      }
+      return `
+        <div class="bg-gradient-to-br from-amber-500/10 to-amber-500/5 border border-amber-500/25 rounded-2xl p-4 mb-3">
+          <div class="flex items-center justify-between border-b border-amber-500/20 pb-2.5 mb-2">
+            <span class="text-xs uppercase font-bold text-amber-300 tracking-wider">⚠️ Kompensatsiya nomzodlari</span>
+            <span class="text-[10px] font-mono font-bold text-amber-400">${fmtMoney(c.count)} holat</span>
+          </div>
+          <div class="flex justify-between text-xs mb-2">
+            <span class="text-slate-400">Jami farq:</span>
+            <span class="font-bold text-amber-300 font-mono">${fmtMoney(c.totalUnits)} dona · ${fmtMoney(c.totalValue)} so'm</span>
+          </div>
+          <div class="text-[10px] text-amber-400/90 bg-amber-950/30 border border-amber-900/40 rounded-lg px-2 py-1.5 mb-2.5 leading-relaxed">
+            ⚠️ Bu <b>KAFOLATLANGAN pul EMAS</b>. Farq — yo'qolgan/shikastlangan (kompensatsiya olsa bo'ladi) YOKI sifat/markirovka rad etilishi (olib bo'lmaydi) bo'lishi mumkin. Har birini Uzum kabinetida tekshiring.
+          </div>
+          <div class="flex flex-col gap-2 max-h-[320px] overflow-y-auto">
+            ${c.candidates.map(inv => `
+              <div class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-[11px] flex flex-col gap-1">
+                <div class="flex items-center justify-between">
+                  <span class="font-bold text-slate-200">#${inv.invoiceNumber}</span>
+                  <span class="text-[9.5px] text-slate-500">${inv.shopTitle} · ${inv.dateCreated}</span>
+                </div>
+                <div class="flex justify-between text-[10px] text-amber-300/90 font-mono">
+                  <span>Farq: ${fmtMoney(inv.missingUnits)} dona</span>
+                  <span>${fmtMoney(inv.missingValue)} so'm</span>
+                </div>
+                <div class="flex flex-col gap-0.5 mt-0.5 border-t border-darkBorder/40 pt-1">
+                  ${inv.items.map(it => `<div class="flex justify-between text-[9.5px] text-slate-400"><span class="truncate">${it.skuTitle}</span><span class="font-mono shrink-0 ml-2">${it.toStock}→${it.accepted} (−${it.missing}) · ${fmtMoney(it.value)} so'm</span></div>`).join('')}
+                </div>
+              </div>`).join('')}
+          </div>
+          <div class="text-[9.5px] text-slate-500 mt-2">📊 Manba: Uzum yuk xatlari (jo'natilgan − qabul qilingan). Faqat qabul qilingan (ACCEPTED) yuk xatlari.</div>
+        </div>`;
     }
 
     // 18-A/B: Moliya boshqaruvi bo'limlari HTML — Moliya tab oxirida ko'rsatiladi

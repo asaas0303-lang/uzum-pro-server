@@ -1885,6 +1885,32 @@ function invoiceMissingItems(invoice) {
   return items;
 }
 
+// 19-C: BARCHA ACCEPTED yuk xatlari bo'yicha kompensatsiya nomzodlari (to'liq sahifalash bilan).
+// MUHIM: bu KAFOLATLANGAN pul EMAS — farq sifat/markirovka rad etilishi HAM bo'lishi mumkin (Uzum API
+// `issue` maydonini bermaydi). Foydalanuvchi Uzum kabinetida har birini tekshirishi kerak.
+async function computeCompensationCandidates() {
+  const fetchRes = await fetchAllInvoices();
+  if (!fetchRes.ok) return { ok: false, error: fetchRes.error };
+  const candidates = [];
+  let totalUnits = 0, totalValue = 0;
+  fetchRes.invoices
+    .filter(inv => inv.invoiceStatus && inv.invoiceStatus.value === 'ACCEPTED')
+    .forEach(inv => {
+      const items = invoiceMissingItems(inv);
+      if (!items.length) return;
+      const invUnits = items.reduce((a, m) => a + m.missing, 0);
+      const invValue = items.reduce((a, m) => a + m.value, 0);
+      totalUnits += invUnits; totalValue += invValue;
+      candidates.push({
+        invoiceId: inv.id, invoiceNumber: inv.invoiceNumber, shopId: inv.shopId, shopTitle: inv.shopTitle,
+        dateCreated: inv.dateCreated, missingUnits: invUnits, missingValue: invValue, items
+      });
+    });
+  // eng katta summa birinchi
+  candidates.sort((a, b) => b.missingValue - a.missingValue);
+  return { ok: true, count: candidates.length, totalUnits, totalValue, candidates };
+}
+
 // 19-B: yangi CREATED yuk xatlari uchun uy zaxirasidan AVTOMATIK ayirish (tasdiq so'ramasdan, lekin aniq xabar bilan),
 // va ACCEPTED holatga o'tganida alohida xabar (zaxiraga tegmasdan). Holat invoice_state.json'da — takror ayirmaslik.
 // Birinchi ishga tushishda (fayl yo'q) — barcha mavjud yuk xatlari BAZAVIY deb belgilanadi (ayirish/xabar YO'Q).
@@ -2220,6 +2246,13 @@ app.get('/api/invoice/sync-status', (req, res) => {
     deductedCount: st ? (st.deducted || []).length : 0,
     acceptedNotifiedCount: st ? (st.acceptedNotified || []).length : 0
   });
+});
+
+// 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar) — barcha ACCEPTED yuk xatlari bo'yicha
+app.get('/api/compensation-candidates', async (req, res) => {
+  const result = await computeCompensationCandidates();
+  if (!result.ok) return sendUzumError(res, result.error);
+  res.json(result);
 });
 
 // Diagnostika: snapshotni qo'lda darhol oladi (cron kutmasdan sinash uchun)
