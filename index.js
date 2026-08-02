@@ -113,7 +113,7 @@ let syncedState = {
   // 18-A: yangi MOLIYA ma'lumotlari (foydalanuvchi qo'lda kiritadi, Uzum'nikidan alohida). Diskda saqlanadi.
   withdrawals: [], // { id, date, amount, shopId?, note, status: 'kutilmoqda'|'keldi' } — Uzum'dan yechib olingan pul
   userExpenses: [], // { id, date, amount, category, note } — real xarajatlar (ijara/ish haqi/transport...). "expenses" nomi Uzum uchun band.
-  credits: [], // { id, name, totalAmount, remainingAmount, monthlyPayment, paymentDay, type:'fixed'|'decreasing', startDate, endDate?, note }
+  credits: [], // { id, name, totalAmount, remainingAmount, monthlyPayment, nextPaymentDate:'YYYY-MM-DD', interestRate?, endDate?, remainingPayments?, type:'fixed'|'decreasing'|'annuity', note } — eski kreditlarda paymentDay (1-28) bo'lishi mumkin, creditDaysUntilDue() orqaga moslikni saqlaydi
   goals: [] // { id, type:'monthly_turnover', target, createdDate, milestones:[] } — moliyaviy maqsad
 };
 
@@ -1273,7 +1273,7 @@ async function buildAiContext(shopId) {
   // Kreditlar — keyingi to'lov sanalari
   if ((syncedState.credits || []).length) {
     lines.push(`\n## KREDITLAR:`);
-    syncedState.credits.forEach(c => lines.push(`- ${c.name}: oylik ${fmtMoney(c.monthlyPayment)}, to'lov kuni ${c.paymentDay} (${creditDaysUntilDue(c.paymentDay)} kundan keyin), qolgan ${fmtMoney(c.remainingAmount)}`));
+    syncedState.credits.forEach(c => lines.push(`- ${c.name} (${c.type || 'fixed'}): oylik ${fmtMoney(c.monthlyPayment)}, keyingi to'lov ${c.nextPaymentDate || '?'} (${creditDaysUntilDue(c)} kundan keyin), qolgan qarz ${fmtMoney(c.remainingAmount)}`));
   }
   // Maqsad
   const goal = (syncedState.goals || [])[0];
@@ -1517,9 +1517,9 @@ function blockedProductNames(products) {
 function creditWarnings() {
   const warns = [];
   (syncedState.credits || []).forEach(c => {
-    const days = creditDaysUntilDue(c.paymentDay);
+    const days = creditDaysUntilDue(c);
     if (days >= 0 && days <= 10) {
-      warns.push(`⚠️ *${c.name}* to'lovi ${days} kundan keyin (oyning ${c.paymentDay}-kuni). Summa: ${fmtMoney(c.monthlyPayment)} so'm.\n   → Uzum'dan hozir pul chiqaring — kartaga 3-4 kunda tushadi.`);
+      warns.push(`⚠️ *${c.name}* to'lovi ${days} kundan keyin (${c.nextPaymentDate || '?'}). Summa: ${fmtMoney(c.monthlyPayment)} so'm.\n   → Uzum'dan hozir pul chiqaring — kartaga 3-4 kunda tushadi.`);
     }
   });
   return warns;
@@ -1534,7 +1534,7 @@ async function financeSummaryLine() {
   // eng yaqin kredit
   let nearest = null;
   (syncedState.credits || []).forEach(c => {
-    const days = creditDaysUntilDue(c.paymentDay);
+    const days = creditDaysUntilDue(c);
     if (nearest === null || days < nearest.days) nearest = { name: c.name, days, amount: c.monthlyPayment };
   });
   if (nearest) s += ` · Keyingi kredit: ${nearest.name} ${nearest.days} kun (${fmtMoney(nearest.amount)})`;
@@ -1556,6 +1556,8 @@ async function moliyaCommandText() {
   lines.push('   ─────────────');
   const net = cf.netCashFlow;
   lines.push(`   *Sof: ${net >= 0 ? '+' : ''}${fmtMoney(net)} so'm* (${net >= 0 ? 'foyda ✅' : 'zarar 🔴'})`);
+  // Umumiy qarz — bu oy oqimidan ALOHIDA (bu bir martalik "zaxira", oqim emas)
+  if (cf.creditRemaining > 0) lines.push(`\n🏦 Umumiy qolgan qarz (barcha kreditlar): ${fmtMoney(cf.creditRemaining)} so'm`);
 
   const cats = Object.entries(cf.expensesByCategory || {}).sort((a, b) => b[1] - a[1]);
   if (cats.length) {
@@ -2091,8 +2093,11 @@ app.get('/api/forecast/:shopId', async (req, res) => {
 // 18-B: NAQD OQIM (cash flow) — botning yuragi. "sinyapmanmi yoki botyapmanmi" savoliga javob.
 // Bu oy: yechib olingan (keldi) − real xarajatlar − kredit to'lovlari = sof naqd oqim.
 // + Keyingi 30 kun proyeksiya: kutilayotgan kredit to'lovlari vs bashorat foyda.
-function creditDaysUntilDue(paymentDay) {
-  // Bugungi Toshkent sanasidan keyingi to'lov sanasigacha necha kun
+//
+// 18-KREDIT-FIX: eski "oyning N-kuni" (paymentDay, 1-28) o'rniga ANIQ SANA (nextPaymentDate) asosiy
+// bo'ldi — foydalanuvchi oldindan to'lagan bo'lsa ham, muddat oxiriga yaqin oylarda ham to'g'ri ishlaydi.
+// Eski kreditlar (faqat paymentDay bilan, nextPaymentDate'siz) uchun orqaga moslik saqlanadi.
+function creditDaysUntilDueByDay(paymentDay) {
   const { date } = tashkentTimeParts();
   const [y, m, d] = date.split('-').map(Number);
   const pd = Math.min(28, Math.max(1, paymentDay || 1));
@@ -2101,6 +2106,25 @@ function creditDaysUntilDue(paymentDay) {
   const due = new Date(Date.UTC(dueYear, dueMonth - 1, pd));
   const todayUTC = new Date(Date.UTC(y, m - 1, d));
   return Math.round((due - todayUTC) / 86400000);
+}
+// Kredit obyektini qabul qiladi (nextPaymentDate ustuvor, paymentDay — eski format uchun zaxira).
+function creditDaysUntilDue(credit) {
+  if (credit && credit.nextPaymentDate) {
+    const { date } = tashkentTimeParts();
+    const todayUTC = new Date(date + 'T00:00:00Z');
+    const dueUTC = new Date(credit.nextPaymentDate + 'T00:00:00Z');
+    return Math.round((dueUTC - todayUTC) / 86400000);
+  }
+  return creditDaysUntilDueByDay(credit ? credit.paymentDay : credit);
+}
+// Sanani 1 oyga suradi (kun oyning oxiridan oshsa qisqartiriladi — masalan 31-yanvar + 1 oy = 28/29-fevral).
+function addOneMonthISO(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  let ny = y, nm = m + 1;
+  if (nm > 12) { nm = 1; ny++; }
+  const lastDay = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
+  const nd = Math.min(d, lastDay);
+  return `${ny}-${String(nm).padStart(2, '0')}-${String(nd).padStart(2, '0')}`;
 }
 
 async function computeCashFlow() {
@@ -2124,7 +2148,7 @@ async function computeCashFlow() {
   const netCashFlow = withdrawnCame - expensesTotal - creditMonthly;
 
   // B2: proyeksiya — keyingi 30 kun kredit to'lovlari
-  const upcomingCredits = credits.filter(c => creditDaysUntilDue(c.paymentDay) <= 30).reduce((a, c) => a + (c.monthlyPayment || 0), 0);
+  const upcomingCredits = credits.filter(c => creditDaysUntilDue(c) <= 30).reduce((a, c) => a + (c.monthlyPayment || 0), 0);
   // Kutilayotgan Uzum foydasi (bashoratdan, barcha do'kon) — sof foyda (kassaga tushadigan yangi pul)
   let expectedIncome = 0, forecastReady = false;
   for (const shop of (syncedState.shops || [])) {

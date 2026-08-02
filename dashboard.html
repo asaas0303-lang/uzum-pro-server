@@ -203,7 +203,7 @@
       // 18-A: MOLIYA ma'lumotlari (serverdan yuklanadi, faqat aniq harakat bilan yoziladi)
       withdrawals: [], // { id, date, amount, shopId?, note, status }
       userExpenses: [], // { id, date, amount, category, note }
-      credits: [], // { id, name, totalAmount, remainingAmount, monthlyPayment, paymentDay, type, note }
+      credits: [], // { id, name, totalAmount, remainingAmount, monthlyPayment, nextPaymentDate, interestRate?, endDate?, remainingPayments?, type, note }
       goals: [], // { id, type, target, createdDate }
       cashFlow: null // 18-B: /api/cash-flow natijasi
     };
@@ -1921,6 +1921,20 @@ ${urgentSection}
     function finId() { return 'f_' + Date.now() + '_' + Math.floor(Math.random() * 1000); }
     function todayISO() { return new Date(Date.now() + 5 * 3600 * 1000).toISOString().slice(0, 10); }
 
+    // 18-KREDIT-FIX: pul maydonlari <input type="number"> edi — bo'shliq/vergul bilan yozilgan katta
+    // summalar ("23 577 979") brauzer tomonidan RAD ETILIB, maydon jimgina bo'sh qolardi (kiritish
+    // "ishlamayapti" bo'lib ko'rinardi). Endi type="text" + jonli formatlash: foydalanuvchi bo'shliq
+    // bilan yozishi mumkin, orqa fonda toza raqamga aylanadi.
+    function onMoneyInput(el) {
+      const digits = el.value.replace(/[^\d]/g, '');
+      el.value = digits ? Number(digits).toLocaleString('uz-UZ') : '';
+    }
+    function parseMoneyInput(id) {
+      const el = document.getElementById(id);
+      if (!el) return 0;
+      return parseInt(el.value.replace(/[^\d]/g, '')) || 0;
+    }
+
     // Barcha moliya ma'lumotini serverga yozadi (aniq harakatdan keyin), so'ng shu tab qayta render bo'ladi
     async function saveFinanceData() {
       try {
@@ -1941,10 +1955,11 @@ ${urgentSection}
     // A1: yechib olingan pul
     function addWithdrawal() {
       const date = document.getElementById('wd-date').value || todayISO();
-      const amount = parseInt(document.getElementById('wd-amount').value) || 0;
+      const amount = parseMoneyInput('wd-amount');
       const note = document.getElementById('wd-note').value.trim();
       if (amount <= 0) return alert("Summani kiriting");
       state.withdrawals.push({ id: finId(), date, amount, note, status: 'kutilmoqda' });
+      document.getElementById('wd-amount').value = ''; document.getElementById('wd-note').value = '';
       saveFinanceData();
     }
     function toggleWithdrawalStatus(id) {
@@ -1959,11 +1974,12 @@ ${urgentSection}
     // A2: real xarajatlar
     function addUserExpense() {
       const date = document.getElementById('ue-date').value || todayISO();
-      const amount = parseInt(document.getElementById('ue-amount').value) || 0;
+      const amount = parseMoneyInput('ue-amount');
       const category = document.getElementById('ue-category').value;
       const note = document.getElementById('ue-note').value.trim();
       if (amount <= 0) return alert("Summani kiriting");
       state.userExpenses.push({ id: finId(), date, amount, category, note });
+      document.getElementById('ue-amount').value = ''; document.getElementById('ue-note').value = '';
       saveFinanceData();
     }
     function deleteUserExpense(id) {
@@ -1971,24 +1987,49 @@ ${urgentSection}
       state.userExpenses = state.userExpenses.filter(x => x.id !== id); saveFinanceData();
     }
 
-    // A3: kreditlar
+    // 18-KREDIT-FIX: bugungi (Tashkent) kundan berilgan sanagacha necha kun qolgani (ko'rsatish uchun, faqat frontend).
+    function creditDaysUntilDueFront(dateStr) {
+      const today = todayISO();
+      return Math.round((new Date(dateStr + 'T00:00:00') - new Date(today + 'T00:00:00')) / 86400000);
+    }
+    // Sanani 1 oyga suradi (backend addOneMonthISO bilan bir xil mantiq — oy oxiri qisqarsa moslashadi).
+    function addOneMonthISO(dateStr) {
+      const [y, m, d] = dateStr.split('-').map(Number);
+      let ny = y, nm = m + 1;
+      if (nm > 12) { nm = 1; ny++; }
+      const lastDay = new Date(ny, nm, 0).getDate();
+      const nd = Math.min(d, lastDay);
+      return `${ny}-${String(nm).padStart(2, '0')}-${String(nd).padStart(2, '0')}`;
+    }
+
+    // A3: kreditlar — 18-KREDIT-FIX: paymentDay (oy kuni) o'rniga nextPaymentDate (aniq sana) + annuity turi
+    // + foiz stavkasi/muddat oxiri/qolgan to'lovlar soni (ixtiyoriy, faqat ko'rsatish uchun).
     function addCredit() {
       const name = document.getElementById('cr-name').value.trim();
-      const totalAmount = parseInt(document.getElementById('cr-total').value) || 0;
-      const remainingAmount = parseInt(document.getElementById('cr-remaining').value) || totalAmount;
-      const monthlyPayment = parseInt(document.getElementById('cr-monthly').value) || 0;
-      const paymentDay = parseInt(document.getElementById('cr-day').value) || 1;
+      const totalAmount = parseMoneyInput('cr-total');
+      const remainingAmount = parseMoneyInput('cr-remaining') || totalAmount;
+      const monthlyPayment = parseMoneyInput('cr-monthly');
+      const nextPaymentDate = document.getElementById('cr-next-date').value;
+      const interestRate = parseFloat(document.getElementById('cr-rate').value) || null;
+      const endDate = document.getElementById('cr-end-date').value || null;
+      const remainingPayments = parseInt(document.getElementById('cr-remaining-count').value) || null;
       const type = document.getElementById('cr-type').value;
       const note = document.getElementById('cr-note').value.trim();
       if (!name || monthlyPayment <= 0) return alert("Kredit nomi va oylik to'lovni kiriting");
-      state.credits.push({ id: finId(), name, totalAmount, remainingAmount, monthlyPayment, paymentDay: Math.min(28, Math.max(1, paymentDay)), type, note });
+      if (!nextPaymentDate) return alert("Keyingi to'lov sanasini kiriting");
+      state.credits.push({ id: finId(), name, totalAmount, remainingAmount, monthlyPayment, nextPaymentDate, interestRate, endDate, remainingPayments, type, note });
+      ['cr-name','cr-total','cr-remaining','cr-monthly','cr-next-date','cr-rate','cr-end-date','cr-remaining-count','cr-note'].forEach(id => document.getElementById(id).value = '');
       saveFinanceData();
     }
+    // "To'ladim": sanaga bog'liq EMAS — istalgan vaqt bosish mumkin (oldindan to'lash holati uchun).
+    // Qolgan qarz oylik to'lov miqdoricha kamayadi, keyingi to'lov 1 oyga suriladi, qolgan to'lovlar soni −1.
     function markCreditPaid(id) {
       const c = state.credits.find(x => x.id === id);
       if (!c) return;
-      if (!confirm(`"${c.name}" uchun ${fmtMoney(c.monthlyPayment)} so'm to'lovni belgilaysizmi? Qolgan qarz kamayadi.`)) return;
+      if (!confirm(`"${c.name}" uchun ${fmtMoney(c.monthlyPayment)} so'm to'lovni belgilaysizmi? Qolgan qarz kamayadi, keyingi to'lov sanasi 1 oyga suriladi.`)) return;
       c.remainingAmount = Math.max(0, (c.remainingAmount || 0) - c.monthlyPayment);
+      if (c.nextPaymentDate) c.nextPaymentDate = addOneMonthISO(c.nextPaymentDate);
+      if (c.remainingPayments != null) c.remainingPayments = Math.max(0, c.remainingPayments - 1);
       saveFinanceData();
     }
     function deleteCredit(id) {
@@ -1998,7 +2039,7 @@ ${urgentSection}
 
     // C4: maqsad
     function addGoal() {
-      const target = parseInt(document.getElementById('goal-target').value) || 0;
+      const target = parseMoneyInput('goal-target');
       if (target <= 0) return alert("Maqsad summasini kiriting");
       state.goals = [{ id: finId(), type: 'monthly_turnover', target, createdDate: todayISO() }]; // bitta faol maqsad
       saveFinanceData();
@@ -2249,7 +2290,7 @@ ${urgentSection}
             <div class="fin-body hidden px-3.5 pb-3.5 border-t border-darkBorder/40 pt-3 flex flex-col gap-2">
               <div class="grid grid-cols-2 gap-2">
                 <input type="date" id="wd-date" value="${todayISO()}" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
-                <input type="number" id="wd-amount" placeholder="Summa (so'm)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                <input type="text" inputmode="numeric" id="wd-amount" placeholder="Summa (so'm)" oninput="onMoneyInput(this)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
               </div>
               <input type="text" id="wd-note" placeholder="Izoh (ixtiyoriy)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
               <button onclick="addWithdrawal()" class="bg-brand text-darkBg font-bold text-xs py-2 rounded-lg badge-glow">+ Qo'shish</button>
@@ -2283,7 +2324,7 @@ ${urgentSection}
             <div class="fin-body hidden px-3.5 pb-3.5 border-t border-darkBorder/40 pt-3 flex flex-col gap-2">
               <div class="grid grid-cols-2 gap-2">
                 <input type="date" id="ue-date" value="${todayISO()}" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
-                <input type="number" id="ue-amount" placeholder="Summa (so'm)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                <input type="text" inputmode="numeric" id="ue-amount" placeholder="Summa (so'm)" oninput="onMoneyInput(this)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
               </div>
               <select id="ue-category" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
                 ${cats.map(c => `<option value="${c}">${c}</option>`).join('')}
@@ -2320,25 +2361,40 @@ ${urgentSection}
               <i data-lucide="chevron-down" class="fin-chev w-4 h-4 text-slate-500 transition-transform"></i>
             </div>
             <div class="fin-body hidden px-3.5 pb-3.5 border-t border-darkBorder/40 pt-3 flex flex-col gap-2">
-              <input type="text" id="cr-name" placeholder="Kredit nomi (masalan: Uzcard mikrozayom)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <input type="text" id="cr-name" placeholder="Kredit nomi (masalan: Mikroqarz)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
               <div class="grid grid-cols-2 gap-2">
-                <input type="number" id="cr-total" placeholder="Umumiy summa" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
-                <input type="number" id="cr-remaining" placeholder="Qolgan summa" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                <input type="text" inputmode="numeric" id="cr-total" placeholder="Shartnoma summasi" oninput="onMoneyInput(this)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                <input type="text" inputmode="numeric" id="cr-remaining" placeholder="Qolgan qarz (foiz bilan)" oninput="onMoneyInput(this)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
               </div>
               <div class="grid grid-cols-2 gap-2">
-                <input type="number" id="cr-monthly" placeholder="Oylik to'lov" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
-                <input type="number" id="cr-day" placeholder="To'lov kuni (1-28)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                <input type="text" inputmode="numeric" id="cr-monthly" placeholder="Oylik to'lov" oninput="onMoneyInput(this)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                <input type="number" step="0.1" id="cr-rate" placeholder="Foiz stavkasi % (ixtiyoriy)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
               </div>
+              <div class="grid grid-cols-2 gap-2">
+                <div class="flex flex-col gap-0.5">
+                  <label class="text-[9.5px] text-slate-500 px-0.5">Keyingi to'lov sanasi</label>
+                  <input type="date" id="cr-next-date" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                </div>
+                <div class="flex flex-col gap-0.5">
+                  <label class="text-[9.5px] text-slate-500 px-0.5">Muddat oxiri (ixtiyoriy)</label>
+                  <input type="date" id="cr-end-date" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+                </div>
+              </div>
+              <input type="number" id="cr-remaining-count" placeholder="Qolgan to'lovlar soni (ixtiyoriy)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
               <select id="cr-type" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
                 <option value="fixed">Har oy bir xil (fixed)</option>
                 <option value="decreasing">Kamayib boradi (decreasing)</option>
+                <option value="annuity">Annuitet — har oy bir xil, ichki nisbat o'zgaradi (annuity)</option>
               </select>
               <input type="text" id="cr-note" placeholder="Izoh (ixtiyoriy)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
               <button onclick="addCredit()" class="bg-brand text-darkBg font-bold text-xs py-2 rounded-lg badge-glow">+ Kredit qo'shish</button>
-              <div class="text-[9.5px] text-slate-500">⚠️ To'lov sanasidan 10 kun oldin bot ogohlantiradi (Uzum'dan pul chiqarishga ulgurish uchun).</div>
+              <div class="text-[9.5px] text-slate-500">⚠️ To'lov sanasidan 10 kun oldin bot ogohlantiradi (Uzum'dan pul chiqarishga ulgurish uchun). "To'ladim" tugmasi sanaga bog'liq emas — oldindan to'lasangiz ham istalgan vaqt bosishingiz mumkin.</div>
               <div class="flex flex-col gap-1.5">
                 ${state.credits.length === 0 ? `<div class="text-[11px] text-slate-500 text-center py-2">Hali kredit yo'q</div>` :
-                  state.credits.map(c => `
+                  state.credits.map(c => {
+                    const typeLabel = c.type === 'annuity' ? 'annuitet' : (c.type === 'decreasing' ? 'kamayuvchi' : 'bir xil');
+                    const daysLeft = c.nextPaymentDate ? creditDaysUntilDueFront(c.nextPaymentDate) : null;
+                    return `
                     <div class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-[11px] flex flex-col gap-1">
                       <div class="flex items-center justify-between">
                         <span class="font-bold text-slate-200">${c.name}</span>
@@ -2349,11 +2405,15 @@ ${urgentSection}
                       </div>
                       <div class="grid grid-cols-2 gap-x-3 text-[10px] text-slate-500">
                         <span>Oylik: <strong class="text-slate-300">${fmtMoney(c.monthlyPayment)}</strong></span>
-                        <span>To'lov kuni: <strong class="text-slate-300">${c.paymentDay}</strong></span>
-                        <span>Qolgan: <strong class="text-slate-300">${fmtMoney(c.remainingAmount)}</strong></span>
-                        <span>Turi: <strong class="text-slate-300">${c.type === 'fixed' ? 'bir xil' : 'kamayuvchi'}</strong></span>
+                        <span>Keyingi to'lov: <strong class="text-slate-300">${c.nextPaymentDate || '?'}</strong>${daysLeft != null ? ` <span class="${daysLeft <= 10 ? 'text-amber-400' : 'text-slate-500'}">(${daysLeft} kun)</span>` : ''}</span>
+                        <span>Qolgan qarz: <strong class="text-slate-300">${fmtMoney(c.remainingAmount)}</strong></span>
+                        <span>Turi: <strong class="text-slate-300">${typeLabel}</strong></span>
+                        ${c.interestRate != null ? `<span>Foiz: <strong class="text-slate-300">${c.interestRate}%</strong></span>` : ''}
+                        ${c.remainingPayments != null ? `<span>Qolgan to'lov: <strong class="text-slate-300">${c.remainingPayments} ta</strong></span>` : ''}
+                        ${c.endDate ? `<span class="col-span-2">Muddat oxiri: <strong class="text-slate-300">${c.endDate}</strong></span>` : ''}
                       </div>
-                    </div>`).join('')}
+                    </div>`;
+                  }).join('')}
               </div>
             </div>
           </div>
@@ -2369,7 +2429,7 @@ ${urgentSection}
             </div>
             <div class="fin-body hidden px-3.5 pb-3.5 border-t border-darkBorder/40 pt-3 flex flex-col gap-2">
               <span class="text-[10.5px] text-slate-400">Oylik aylanma maqsadingizni kiriting — AI murabbiy bosqichlarga bo'lib, yo'l ko'rsatadi.</span>
-              <input type="number" id="goal-target" value="${goal ? goal.target : ''}" placeholder="Masalan: 200000000 (200 mln)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <input type="text" inputmode="numeric" id="goal-target" value="${goal ? fmtMoney(goal.target) : ''}" placeholder="Masalan: 200 000 000 (200 mln)" oninput="onMoneyInput(this)" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
               <button onclick="addGoal()" class="bg-brand text-darkBg font-bold text-xs py-2 rounded-lg badge-glow">Maqsadni saqlash</button>
               ${goal ? `<button onclick="deleteGoal('${goal.id}')" class="text-[10px] text-rose-400">Maqsadni o'chirish</button>` : ''}
             </div>
@@ -2395,6 +2455,7 @@ ${urgentSection}
             <div class="flex justify-between border-t border-darkBorder/40 pt-1 mt-0.5"><span class="text-slate-300 font-bold">= Sof naqd oqim:</span><span class="font-black font-mono ${color}">${fmtMoney(net)} so'm</span></div>
           </div>
           <div class="text-[10.5px] mt-2 font-semibold ${color}">${label}</div>
+          ${cf.creditRemaining > 0 ? `<div class="flex justify-between text-[10.5px] mt-2 pt-2 border-t border-darkBorder/40"><span class="text-slate-500">🏦 Umumiy qolgan qarz (barcha kredit, oqimga kirmaydi):</span><span class="text-amber-400 font-mono font-semibold">${fmtMoney(cf.creditRemaining)} so'm</span></div>` : ''}
           ${cf.projection ? `
             <div class="border-t border-darkBorder/40 mt-2.5 pt-2">
               <div class="text-[10px] uppercase text-slate-500 mb-1">Keyingi 30 kun proyeksiya:</div>
