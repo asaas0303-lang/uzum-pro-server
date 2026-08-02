@@ -1346,6 +1346,14 @@ async function buildAiContext(shopId) {
     problems.slice(0, 12).forEach(p => lines.push(`- ${p}`));
   }
 
+  // 19-D: ta'minlash (yuk xatlari) — yo'lda tovar + kompensatsiya nomzodlari (barcha do'kon uchun umumiy)
+  try {
+    const invSum = await computeInvoicesSummary();
+    if (invSum.ok && invSum.inTransitUnits > 0) lines.push(`\n## TA'MINLASH: hozir yo'lda ${invSum.inTransitUnits} dona tovar (Uzum omboriga kirmoqda).`);
+    const comp = await computeCompensationCandidates();
+    if (comp.ok && comp.count > 0) lines.push(`## KOMPENSATSIYA NOMZODI: ${comp.count} ta yuk xatida jami ${comp.totalUnits} dona farq (~${fmtMoney(comp.totalValue)} so'm) — Uzum kabinetida tekshirish tavsiya etiladi (kafolatlangan emas).`);
+  } catch (e) { /* invoice AI kontekstga majburiy emas */ }
+
   return { text: lines.join('\n'), shopTitle, hasData: prod.ok, problems };
 }
 
@@ -1911,6 +1919,30 @@ async function computeCompensationCandidates() {
   return { ok: true, count: candidates.length, totalUnits, totalValue, candidates };
 }
 
+// 19-D: Ta'minlashlar (yuk xatlari) ro'yxati — dashboard va AI konteksti uchun toza shakl.
+// Yangi (CREATED) = yo'lda; ACCEPTED = omborda. inTransitUnits = hozir yo'lda bo'lgan dona.
+async function computeInvoicesSummary() {
+  const fetchRes = await fetchAllInvoices();
+  if (!fetchRes.ok) return { ok: false, error: fetchRes.error };
+  let inTransitUnits = 0, createdCount = 0, acceptedCount = 0;
+  const invoices = fetchRes.invoices.map(inv => {
+    const status = inv.invoiceStatus && inv.invoiceStatus.value;
+    if (status === 'CREATED') { createdCount++; inTransitUnits += inv.totalToStock || 0; }
+    else if (status === 'ACCEPTED') acceptedCount++;
+    const items = [];
+    (inv.productForInvoiceDto || []).forEach(p => (p.skuForInvoiceDtoList || []).forEach(s => {
+      items.push({ skuTitle: s.skuTitle, toStock: s.quantityToStock || 0, accepted: s.quantityAccepted || 0 });
+    }));
+    return {
+      id: inv.id, invoiceNumber: inv.invoiceNumber, shopId: inv.shopId, shopTitle: inv.shopTitle,
+      status, statusText: inv.invoiceStatus && inv.invoiceStatus.text, dateCreated: inv.dateCreated,
+      dateAccepted: inv.dateAccepted ? new Date(inv.dateAccepted).toISOString().slice(0, 10) : null,
+      totalToStock: inv.totalToStock || 0, totalAccepted: inv.totalAccepted || 0, items
+    };
+  });
+  return { ok: true, count: invoices.length, createdCount, acceptedCount, inTransitUnits, invoices };
+}
+
 // 19-B: yangi CREATED yuk xatlari uchun uy zaxirasidan AVTOMATIK ayirish (tasdiq so'ramasdan, lekin aniq xabar bilan),
 // va ACCEPTED holatga o'tganida alohida xabar (zaxiraga tegmasdan). Holat invoice_state.json'da — takror ayirmaslik.
 // Birinchi ishga tushishda (fayl yo'q) — barcha mavjud yuk xatlari BAZAVIY deb belgilanadi (ayirish/xabar YO'Q).
@@ -2027,9 +2059,20 @@ async function runDailyReport() {
   try {
     const finLine = await financeSummaryLine();
     const warns = creditWarnings();
-    if (finLine || warns.length) {
+    // 19-D: ta'minlash qatori — yo'lda tovar + kompensatsiya nomzodlari
+    let invLine = '';
+    try {
+      const invSum = await computeInvoicesSummary();
+      const comp = await computeCompensationCandidates();
+      const parts = [];
+      if (invSum.ok && invSum.inTransitUnits > 0) parts.push(`📦 Yo'lda: ${fmtMoney(invSum.inTransitUnits)} dona`);
+      if (comp.ok && comp.count > 0) parts.push(`⚠️ Kompensatsiya nomzodi: ${comp.count} holat (~${fmtMoney(comp.totalValue)} so'm)`);
+      if (parts.length) invLine = '\n\n' + parts.join('\n');
+    } catch (e) { /* invoice majburiy emas */ }
+    if (finLine || warns.length || invLine) {
       let moneyMsg = `💰 *Moliyaviy holat*\n${finLine}`;
       if (warns.length) moneyMsg += `\n\n🏦 *Kredit ogohlantirishlari:*\n${warns.join('\n')}`;
+      moneyMsg += invLine;
       moneyMsg += `\n\n/moliya — batafsil · /maslahat — AI murabbiy`;
       await sendTelegramMessage(token, ADMIN_CHAT_ID, moneyMsg);
     }
@@ -2251,6 +2294,13 @@ app.get('/api/invoice/sync-status', (req, res) => {
 // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar) — barcha ACCEPTED yuk xatlari bo'yicha
 app.get('/api/compensation-candidates', async (req, res) => {
   const result = await computeCompensationCandidates();
+  if (!result.ok) return sendUzumError(res, result.error);
+  res.json(result);
+});
+
+// 19-D: ta'minlashlar (yuk xatlari) ro'yxati — dashboard "Ta'minlashlar" bo'limi uchun
+app.get('/api/invoices', async (req, res) => {
+  const result = await computeInvoicesSummary();
   if (!result.ok) return sendUzumError(res, result.error);
   res.json(result);
 });

@@ -206,7 +206,8 @@
       credits: [], // { id, name, totalAmount, remainingAmount, monthlyPayment, nextPaymentDate, interestRate?, endDate?, remainingPayments?, type, note }
       goals: [], // { id, type, target, createdDate }
       cashFlow: null, // 18-B: /api/cash-flow natijasi
-      compensation: null // 19-C: /api/compensation-candidates natijasi
+      compensation: null, // 19-C: /api/compensation-candidates natijasi
+      invoices: null // 19-D: /api/invoices (ta'minlashlar) natijasi
     };
 
     // FAQAT foydalanuvchi sozlamalarini serverga yuboradi (do'kon/tannarx/bog'lanish).
@@ -626,6 +627,8 @@ ${urgentSection}
       await loadCashFlow();
       // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar)
       await loadCompensation();
+      // 19-D: ta'minlashlar (yuk xatlari ro'yxati)
+      await loadInvoices();
 
       // 15: bu yerda avtomatik serverga yozish yo'q (avval syncStateToServer() chaqirilardi —
       // backend baribir products/orders/expenses'ni hech qayerda ishlatmasdi, faqat xotirada
@@ -2083,6 +2086,11 @@ ${urgentSection}
       try { state.compensation = await fetchFromProxy('/api/compensation-candidates'); }
       catch (e) { console.error("Kompensatsiya yuklashda xato:", e); state.compensation = null; }
     }
+    // 19-D: ta'minlashlar (yuk xatlari)
+    async function loadInvoices() {
+      try { state.invoices = await fetchFromProxy('/api/invoices'); }
+      catch (e) { console.error("Ta'minlashlar yuklashda xato:", e); state.invoices = null; }
+    }
 
     // UI Panel: FINANCE & ACCOUNTING
     function renderFinance(root) {
@@ -2280,9 +2288,56 @@ ${urgentSection}
           <!-- 19-C: Kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar) -->
           ${compensationHTML()}
 
+          <!-- 19-D: Ta'minlashlar (yuk xatlari ro'yxati) -->
+          ${invoicesHTML()}
+
         </div>
       `;
       lucide.createIcons();
+    }
+
+    // 19-D: Ta'minlashlar HTML — yuk xatlari ro'yxati, holati (yo'lda/qabul qilingan), tarkibi (ochiladigan)
+    function invoicesHTML() {
+      const inv = state.invoices;
+      if (!inv || !inv.ok || !inv.count) return '';
+      const statusBadge = (s) => s === 'CREATED'
+        ? `<span class="text-[9px] px-1.5 py-0.5 rounded bg-sky-900/40 border border-sky-800 text-sky-300">🚚 Yo'lda</span>`
+        : `<span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-900/40 border border-emerald-800 text-emerald-300">✅ Qabul qilingan</span>`;
+      return `
+        <div class="bg-darkCard border border-darkBorder rounded-2xl overflow-hidden mb-3">
+          <div class="p-3.5 cursor-pointer flex items-center justify-between" onclick="this.parentElement.querySelector('.fin-body').classList.toggle('hidden'); this.querySelector('.fin-chev').classList.toggle('rotate-180')">
+            <div class="flex flex-col">
+              <span class="text-xs font-bold text-slate-200">📦 Ta'minlashlar (yuk xatlari)</span>
+              <span class="text-[10px] text-slate-500">${fmtMoney(inv.count)} ta · 🚚 yo'lda ${fmtMoney(inv.createdCount)} (${fmtMoney(inv.inTransitUnits)} dona) · ✅ qabul ${fmtMoney(inv.acceptedCount)}</span>
+            </div>
+            <i data-lucide="chevron-down" class="fin-chev w-4 h-4 text-slate-500 transition-transform"></i>
+          </div>
+          <div class="fin-body hidden px-3.5 pb-3.5 border-t border-darkBorder/40 pt-3">
+            <div class="flex flex-col gap-2 max-h-[360px] overflow-y-auto">
+              ${inv.invoices.map(iv => {
+                const diff = iv.totalToStock - iv.totalAccepted;
+                return `
+                <div class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-[11px] flex flex-col gap-1">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="font-bold text-slate-200">#${iv.invoiceNumber}</span>
+                    ${statusBadge(iv.status)}
+                  </div>
+                  <div class="flex justify-between text-[9.5px] text-slate-500">
+                    <span>${iv.shopTitle} · ${iv.dateCreated}${iv.dateAccepted ? ' → ' + iv.dateAccepted : ''}</span>
+                    <span class="font-mono">${fmtMoney(iv.totalToStock)}${iv.status === 'ACCEPTED' ? '→' + fmtMoney(iv.totalAccepted) : ''} dona${iv.status === 'ACCEPTED' && diff > 0 ? ` <span class="text-amber-400">(−${diff})</span>` : ''}</span>
+                  </div>
+                  <details class="mt-0.5">
+                    <summary class="text-[9.5px] text-slate-500 cursor-pointer">Tarkibi (${iv.items.length} SKU)</summary>
+                    <div class="flex flex-col gap-0.5 mt-1 border-t border-darkBorder/40 pt-1">
+                      ${iv.items.map(it => `<div class="flex justify-between text-[9.5px] text-slate-400"><span class="truncate">${it.skuTitle}</span><span class="font-mono shrink-0 ml-2">${it.toStock}${iv.status === 'ACCEPTED' ? '→' + it.accepted : ''}</span></div>`).join('')}
+                    </div>
+                  </details>
+                </div>`;
+              }).join('')}
+            </div>
+            <div class="text-[9.5px] text-slate-500 mt-2">📊 Manba: Uzum yuk xatlari. "Yo'lda" = uy zaxirasidan ayirilib, Uzum omboriga jo'natilgan.</div>
+          </div>
+        </div>`;
     }
 
     // 19-C: Kompensatsiya nomzodlari HTML — yuk xatlarida jo'natilgan vs qabul qilingan farqi
