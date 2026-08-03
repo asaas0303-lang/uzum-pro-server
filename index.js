@@ -1924,11 +1924,12 @@ async function computeCompensationCandidates() {
 async function computeInvoicesSummary() {
   const fetchRes = await fetchAllInvoices();
   if (!fetchRes.ok) return { ok: false, error: fetchRes.error };
-  let inTransitUnits = 0, createdCount = 0, acceptedCount = 0;
+  let inTransitUnits = 0, createdCount = 0, acceptedCount = 0, canceledCount = 0;
   const invoices = fetchRes.invoices.map(inv => {
     const status = inv.invoiceStatus && inv.invoiceStatus.value;
     if (status === 'CREATED') { createdCount++; inTransitUnits += inv.totalToStock || 0; }
     else if (status === 'ACCEPTED') acceptedCount++;
+    else if (status === 'CANCELED') canceledCount++;
     const items = [];
     (inv.productForInvoiceDto || []).forEach(p => (p.skuForInvoiceDtoList || []).forEach(s => {
       items.push({ skuTitle: s.skuTitle, toStock: s.quantityToStock || 0, accepted: s.quantityAccepted || 0 });
@@ -1940,7 +1941,7 @@ async function computeInvoicesSummary() {
       totalToStock: inv.totalToStock || 0, totalAccepted: inv.totalAccepted || 0, items
     };
   });
-  return { ok: true, count: invoices.length, createdCount, acceptedCount, inTransitUnits, invoices };
+  return { ok: true, count: invoices.length, createdCount, acceptedCount, canceledCount, inTransitUnits, invoices };
 }
 
 // 19-B: yangi CREATED yuk xatlari uchun uy zaxirasidan AVTOMATIK ayirish (tasdiq so'ramasdan, lekin aniq xabar bilan),
@@ -1972,25 +1973,31 @@ async function runInvoiceSync() {
     const status = inv.invoiceStatus && inv.invoiceStatus.value;
     const numLabel = inv.invoiceNumber || inv.id;
 
-    // 1) YANGI yuk xati (CREATED yoki to'g'ridan ACCEPTED) hali ayirilmagan bo'lsa — uy zaxirasidan ayir
+    // 1) YANGI yuk xati (CREATED yoki to'g'ridan ACCEPTED) hali ayirilmagan bo'lsa — uy zaxirasidan ayir.
+    // MUHIM: CANCELED (bekor qilingan) yuk xati JISMONAN jo'natilmagan — zaxiraga TEGMAYMIZ, xabar YO'Q,
+    // faqat "ishlangan" deb belgilaymiz (qayta tekshirmaslik uchun).
     if (!deducted.has(inv.id)) {
-      const byType = invoiceQtyByType(inv, 'quantityToStock');
-      const lines = [];
-      for (const [typeId, qty] of Object.entries(byType)) {
-        const type = (syncedState.productTypes || []).find(t => t.id === typeId);
-        if (!type) continue;
-        const before = type.stock || 0;
-        type.stock = Math.max(0, before - qty); // manfiy zaxira yo'q
-        lines.push(`   ${type.name}: ${before} → ${type.stock} (−${qty})`);
-        stockChanged = true;
+      if (status === 'CANCELED') {
+        deducted.add(inv.id); // bekor qilingan — hech qanday ayirish/xabar yo'q
+      } else {
+        const byType = invoiceQtyByType(inv, 'quantityToStock');
+        const lines = [];
+        for (const [typeId, qty] of Object.entries(byType)) {
+          const type = (syncedState.productTypes || []).find(t => t.id === typeId);
+          if (!type) continue;
+          const before = type.stock || 0;
+          type.stock = Math.max(0, before - qty); // manfiy zaxira yo'q
+          lines.push(`   ${type.name}: ${before} → ${type.stock} (−${qty})`);
+          stockChanged = true;
+        }
+        const totalToStock = inv.totalToStock || 0;
+        let msg = `📦 *Yangi yuk xati* #${numLabel} (${inv.shopTitle})\n${fmtMoney(totalToStock)} dona Uzum'ga jo'natildi.`;
+        if (lines.length) msg += `\n\n🏠 Uy zaxirasidan ayirildi:\n${lines.join('\n')}`;
+        else msg += `\n\n(Uy zaxirasiga bog'langan SKU topilmadi — zaxira o'zgarmadi)`;
+        messages.push(msg);
+        deducted.add(inv.id);
+        deductedCount++;
       }
-      const totalToStock = inv.totalToStock || 0;
-      let msg = `📦 *Yangi yuk xati* #${numLabel} (${inv.shopTitle})\n${fmtMoney(totalToStock)} dona Uzum'ga jo'natildi.`;
-      if (lines.length) msg += `\n\n🏠 Uy zaxirasidan ayirildi:\n${lines.join('\n')}`;
-      else msg += `\n\n(Uy zaxirasiga bog'langan SKU topilmadi — zaxira o'zgarmadi)`;
-      messages.push(msg);
-      deducted.add(inv.id);
-      deductedCount++;
     }
 
     // 2) ACCEPTED holatga o'tgan va hali xabar berilmagan bo'lsa — alohida xabar (zaxiraga TEGMAYMIZ)

@@ -2303,18 +2303,20 @@ ${urgentSection}
       const statusBadge = (s) => s === 'CREATED'
         ? `<span class="text-[9px] px-1.5 py-0.5 rounded bg-sky-900/40 border border-sky-800 text-sky-300">🚚 Yo'lda</span>`
         : `<span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-900/40 border border-emerald-800 text-emerald-300">✅ Qabul qilingan</span>`;
+      // Bekor qilingan (CANCELED) yuk xatlari ro'yxatdan chiqariladi (harakat talab qilmaydi) — faqat sarlavhada son ko'rsatiladi.
+      const shown = inv.invoices.filter(iv => iv.status !== 'CANCELED');
       return `
         <div class="bg-darkCard border border-darkBorder rounded-2xl overflow-hidden mb-3">
           <div class="p-3.5 cursor-pointer flex items-center justify-between" onclick="this.parentElement.querySelector('.fin-body').classList.toggle('hidden'); this.querySelector('.fin-chev').classList.toggle('rotate-180')">
             <div class="flex flex-col">
               <span class="text-xs font-bold text-slate-200">📦 Ta'minlashlar (yuk xatlari)</span>
-              <span class="text-[10px] text-slate-500">${fmtMoney(inv.count)} ta · 🚚 yo'lda ${fmtMoney(inv.createdCount)} (${fmtMoney(inv.inTransitUnits)} dona) · ✅ qabul ${fmtMoney(inv.acceptedCount)}</span>
+              <span class="text-[10px] text-slate-500">🚚 yo'lda ${fmtMoney(inv.createdCount)} (${fmtMoney(inv.inTransitUnits)} dona) · ✅ qabul ${fmtMoney(inv.acceptedCount)}${inv.canceledCount ? ` · ❌ bekor ${fmtMoney(inv.canceledCount)}` : ''}</span>
             </div>
             <i data-lucide="chevron-down" class="fin-chev w-4 h-4 text-slate-500 transition-transform"></i>
           </div>
           <div class="fin-body hidden px-3.5 pb-3.5 border-t border-darkBorder/40 pt-3">
             <div class="flex flex-col gap-2 max-h-[360px] overflow-y-auto">
-              ${inv.invoices.map(iv => {
+              ${shown.map(iv => {
                 const diff = iv.totalToStock - iv.totalAccepted;
                 return `
                 <div class="p-2.5 rounded-lg bg-darkBg border border-darkBorder text-[11px] flex flex-col gap-1">
