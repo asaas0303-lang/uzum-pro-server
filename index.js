@@ -1351,7 +1351,7 @@ async function buildAiContext(shopId) {
     const invSum = await computeInvoicesSummary();
     if (invSum.ok && invSum.inTransitUnits > 0) lines.push(`\n## TA'MINLASH: hozir yo'lda ${invSum.inTransitUnits} dona tovar (Uzum omboriga kirmoqda).`);
     const comp = await computeCompensationCandidates();
-    if (comp.ok && comp.count > 0) lines.push(`## KOMPENSATSIYA NOMZODI: ${comp.count} ta yuk xatida jami ${comp.totalUnits} dona farq (~${fmtMoney(comp.totalValue)} so'm) — Uzum kabinetida tekshirish tavsiya etiladi (kafolatlangan emas).`);
+    if (comp.ok && comp.total.units > 0) lines.push(`## KOMPENSATSIYA NOMZODI: ~${comp.aniq.units} dona haqiqiy yo'qolgan (~${fmtMoney(comp.aniq.value)} so'm, sotuv−komissiya; qayta saralanganlar chiqarilgan)${comp.qisman.units ? ` + ${comp.qisman.units} dona qisman aniqlanmagan` : ''} — Uzum kabinetida tekshirish tavsiya etiladi (kafolatlangan emas).`);
   } catch (e) { /* invoice AI kontekstga majburiy emas */ }
 
   return { text: lines.join('\n'), shopTitle, hasData: prod.ok, problems };
@@ -1893,30 +1893,98 @@ function invoiceMissingItems(invoice) {
   return items;
 }
 
-// 19-C: BARCHA ACCEPTED yuk xatlari bo'yicha kompensatsiya nomzodlari (to'liq sahifalash bilan).
-// MUHIM: bu KAFOLATLANGAN pul EMAS — farq sifat/markirovka rad etilishi HAM bo'lishi mumkin (Uzum API
-// `issue` maydonini bermaydi). Foydalanuvchi Uzum kabinetida har birini tekshirishi kerak.
+// 19-C (qayta yozildi): KOMPENSATSIYA NOMZODLARI — SKU darajasida, RE-SORT XABARDOR, sotuv−komissiya bo'yicha.
+//
+// DIAGNOSTIKA (2026-08-06) rasmiy Uzum hujjatidan + real ma'lumotdan aniqladi:
+//  1) Uzum kompensatsiyani SOTUV NARXI − KOMISSIYA bo'yicha to'laydi (tannarx EMAS).
+//  2) Uzum aralash qutini QAYTA SARALAB, yangi yuk xatida qabul qiladi: masalan [100→0] (rad),
+//     keyin bir necha kun ichida [100→100] (qabul). Bu tovar YO'QOLMAGAN — shunchaki qayta ishlangan.
+//     Oddiy Σyuborilgan−Σqabul buni ushlay olmaydi (yangi toStock ikki marta sanaladi).
+// Shuning uchun: har SKU uchun ACCEPTED yuk xatlarini vaqt tartibida ko'rib chiqamiz:
+//  - To'liq rad [X→0] keyin (RESORT_WINDOW_DAYS ichida) to'liq qabul [Y→Y] bilan moslashsa — qaytgan (chiqariladi).
+//  - Moslashuv qisman bo'lsa (Y<X) — qaytgan Y chiqariladi, qolgan (X−Y) "QISMAN aniqlanmagan" toifasiga.
+//  - Qisman kamomad [X→qabul, 0<qabul<X] va umuman qayta qabul qilinmagan to'liq rad — "ANIQ" (yuqori ishonch).
+const RESORT_WINDOW_DAYS = 60; // sozlanadigan: [X→0] keyin [Y→Y] shu kun ichida bo'lsa qayta saralash deb hisoblanadi
+
+// Barcha do'kon jonli mahsulotlaridan skuId → { sell, commPct, title, shopTitle } xaritasi (sotuv−komissiya uchun)
+async function buildSkuSellMap() {
+  const map = {};
+  for (const shop of (syncedState.shops || [])) {
+    const prod = await fetchLiveShopProducts(shop.shopId);
+    if (!prod.ok) continue;
+    prod.products.forEach(p => (p.skuList || []).forEach(sku => {
+      map[String(sku.skuId)] = {
+        sell: sku.purchasePrice || 0,
+        commPct: commissionPct(sku.skuId, sku, p.productId),
+        title: sku.skuTitle, shopTitle: shop.shopTitle
+      };
+    }));
+  }
+  return map;
+}
+
 async function computeCompensationCandidates() {
   const fetchRes = await fetchAllInvoices();
   if (!fetchRes.ok) return { ok: false, error: fetchRes.error };
-  const candidates = [];
-  let totalUnits = 0, totalValue = 0;
-  fetchRes.invoices
-    .filter(inv => inv.invoiceStatus && inv.invoiceStatus.value === 'ACCEPTED')
-    .forEach(inv => {
-      const items = invoiceMissingItems(inv);
-      if (!items.length) return;
-      const invUnits = items.reduce((a, m) => a + m.missing, 0);
-      const invValue = items.reduce((a, m) => a + m.value, 0);
-      totalUnits += invUnits; totalValue += invValue;
-      candidates.push({
-        invoiceId: inv.id, invoiceNumber: inv.invoiceNumber, shopId: inv.shopId, shopTitle: inv.shopTitle,
-        dateCreated: inv.dateCreated, missingUnits: invUnits, missingValue: invValue, items
-      });
+  const sellMap = await buildSkuSellMap();
+  const parseDate = d => { const [dd, mm, yy] = String(d).split('.').map(Number); return new Date(yy, mm - 1, dd).getTime(); };
+
+  // SKU bo'yicha ACCEPTED yuk xati qatorlarini yig'amiz
+  const bySku = {};
+  fetchRes.invoices.filter(i => i.invoiceStatus && i.invoiceStatus.value === 'ACCEPTED').forEach(inv => {
+    (inv.productForInvoiceDto || []).forEach(p => (p.skuForInvoiceDtoList || []).forEach(s => {
+      const id = String(s.id);
+      (bySku[id] = bySku[id] || []).push({ shopTitle: inv.shopTitle, invoiceNumber: inv.invoiceNumber, date: parseDate(inv.dateCreated), dateStr: inv.dateCreated, toStock: s.quantityToStock || 0, accepted: s.quantityAccepted || 0, title: s.skuTitle });
+    }));
+  });
+
+  const aniqItems = [], qismanItems = [];
+  for (const [id, lines] of Object.entries(bySku)) {
+    lines.sort((a, b) => a.date - b.date);
+    const lv = sellMap[id];
+    const perUnit = lv ? lv.sell * (1 - (lv.commPct || 0) / 100) : 0;
+    const title = lv ? lv.title : lines[0].title;
+    const shopTitle = lines[0].shopTitle;
+    const partialShort = [], fullRej = [], fullAcc = [];
+    lines.forEach(L => {
+      if (L.toStock > 0 && L.accepted === 0) fullRej.push({ ...L });
+      else if (L.accepted === L.toStock && L.toStock > 0) fullAcc.push({ ...L, avail: L.toStock });
+      else if (L.accepted > 0 && L.accepted < L.toStock) partialShort.push({ ...L, short: L.toStock - L.accepted });
     });
-  // eng katta summa birinchi
-  candidates.sort((a, b) => b.missingValue - a.missingValue);
-  return { ok: true, count: candidates.length, totalUnits, totalValue, candidates };
+    // Qisman kamomad = ANIQ intake yo'qotish (partiya qabul qilingan, dona yetishmagan)
+    partialShort.forEach(pS => aniqItems.push({ skuId: id, skuTitle: title, shopTitle, date: pS.dateStr, invoiceNumber: pS.invoiceNumber, units: pS.short, perUnit, value: pS.short * perUnit, kind: 'partial-shortfall', priced: !!lv }));
+    // To'liq rad: keyingi to'liq qabullar bilan (oyna ichida) ochko'zlik bilan moslashtiramiz
+    fullRej.forEach(R => {
+      let remaining = R.toStock;
+      for (const A of fullAcc) {
+        if (A.date >= R.date && (A.date - R.date) <= RESORT_WINDOW_DAYS * 86400000 && A.avail > 0) {
+          const take = Math.min(remaining, A.avail); remaining -= take; A.avail -= take;
+          if (remaining === 0) break;
+        }
+      }
+      const recovered = R.toStock - remaining;
+      if (remaining === 0) return; // to'liq qayta saralangan — yo'qotish yo'q
+      if (recovered > 0) qismanItems.push({ skuId: id, skuTitle: title, shopTitle, date: R.dateStr, invoiceNumber: R.invoiceNumber, orig: R.toStock, recovered, units: remaining, perUnit, value: remaining * perUnit, priced: !!lv });
+      else aniqItems.push({ skuId: id, skuTitle: title, shopTitle, date: R.dateStr, invoiceNumber: R.invoiceNumber, units: R.toStock, perUnit, value: R.toStock * perUnit, kind: 'full-reject-unrecovered', priced: !!lv });
+    });
+  }
+  aniqItems.sort((a, b) => b.value - a.value);
+  qismanItems.sort((a, b) => b.value - a.value);
+  const sum = arr => ({ units: arr.reduce((a, x) => a + x.units, 0), value: arr.reduce((a, x) => a + x.value, 0) });
+  const aniqSum = sum(aniqItems), qismanSum = sum(qismanItems);
+
+  // Eng katta partiya (bir sana bo'yicha eng ko'p summa) — birinchi ariza uchun
+  const byDate = {};
+  aniqItems.forEach(x => { byDate[x.date] = byDate[x.date] || { date: x.date, units: 0, value: 0, skus: [] }; byDate[x.date].units += x.units; byDate[x.date].value += x.value; byDate[x.date].skus.push(x.skuTitle); });
+  const topBatch = Object.values(byDate).sort((a, b) => b.value - a.value)[0] || null;
+
+  return {
+    ok: true, windowDays: RESORT_WINDOW_DAYS,
+    aniq: { count: aniqItems.length, units: aniqSum.units, value: aniqSum.value, items: aniqItems },
+    qisman: { count: qismanItems.length, units: qismanSum.units, value: qismanSum.value, items: qismanItems },
+    total: { units: aniqSum.units + qismanSum.units, value: aniqSum.value + qismanSum.value },
+    topBatch
+  };
 }
 
 // 19-D: Ta'minlashlar (yuk xatlari) ro'yxati — dashboard va AI konteksti uchun toza shakl.
@@ -2007,8 +2075,10 @@ async function runInvoiceSync() {
       let msg = `✅ *Uzum qabul qildi* #${numLabel} (${inv.shopTitle})\nJo'natilgan: ${fmtMoney(totalToStock)} · Qabul: ${fmtMoney(totalAccepted)} dona`;
       if (missing.length) {
         const totalMissing = missing.reduce((a, m) => a + m.missing, 0);
-        const totalVal = missing.reduce((a, m) => a + m.value, 0);
-        msg += `\n\n⚠️ *${fmtMoney(totalMissing)} dona farq* (~${fmtMoney(totalVal)} so'm) — kompensatsiya nomzodi:\n${missing.slice(0, 6).map(m => `   ${m.skuTitle}: ${m.toStock}→${m.accepted} (−${m.missing})`).join('\n')}\n\n→ Uzum kabinetida sababini tekshiring (sifat/markirovka rad etilishimi yoki yo'qolganmi). Bu KAFOLATLANGAN pul emas.`;
+        // Bu shu yuk xatidagi FARQ (dona). Aniq kompensatsiya summasi (sotuv−komissiya, qayta saralanganlar
+        // chiqarilgan holda) dashboard "Kompensatsiya nomzodlari" bo'limida — chunki farq keyingi yuk xatida
+        // qayta qabul qilinishi mumkin (hali aniq yo'qolgan degani emas).
+        msg += `\n\n⚠️ *${fmtMoney(totalMissing)} dona farq*:\n${missing.slice(0, 6).map(m => `   ${m.skuTitle}: ${m.toStock}→${m.accepted} (−${m.missing})`).join('\n')}\n\n→ Bu tovar keyingi yuk xatida qayta qabul qilinishi mumkin. Aniq kompensatsiya: dashboard → Moliya → Kompensatsiya nomzodlari. Uzum kabinetida sababini tekshiring — KAFOLATLANGAN pul emas.`;
       }
       messages.push(msg);
       acceptedNotified.add(inv.id);
@@ -2073,7 +2143,7 @@ async function runDailyReport() {
       const comp = await computeCompensationCandidates();
       const parts = [];
       if (invSum.ok && invSum.inTransitUnits > 0) parts.push(`📦 Yo'lda: ${fmtMoney(invSum.inTransitUnits)} dona`);
-      if (comp.ok && comp.count > 0) parts.push(`⚠️ Kompensatsiya nomzodi: ${comp.count} holat (~${fmtMoney(comp.totalValue)} so'm)`);
+      if (comp.ok && comp.aniq.units > 0) parts.push(`⚠️ Kompensatsiya nomzodi: ${fmtMoney(comp.aniq.units)} dona (~${fmtMoney(comp.aniq.value)} so'm)${comp.qisman.units ? ` +${fmtMoney(comp.qisman.units)} qisman` : ''}`);
       if (parts.length) invLine = '\n\n' + parts.join('\n');
     } catch (e) { /* invoice majburiy emas */ }
     if (finLine || warns.length || invLine) {
