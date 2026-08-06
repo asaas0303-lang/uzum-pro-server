@@ -1872,6 +1872,42 @@ async function fetchAllInvoices() {
 }
 
 // Bitta yuk xatining SKU'larini uy zaxirasi turlariga (productTypes) bog'lab, tur bo'yicha jami dona qaytaradi.
+// 19-FIX (2026-08-06, foydalanuvchi Uzum kabineti bilan solishtirgach TASDIQLANGAN):
+//  1) API invoiceNumber'ning OXIRGI RAQAMI tekshiruv/indeks xonasi — Uzum kabineti buni KO'RSATMAYDI.
+//     1100018000685 (API) -> 110001800068 (kabinet). Kabinet raqami = Math.floor(invoiceNumber/10).
+//  2) dateCreated — hujjat OLDINDAN BAND/YARATILGAN sanasi, Uzum kabineti esa REAL QABUL vaqtini
+//     (dateAccepted) ko'rsatadi — bular BIR NECHA KUNGACHA farq qilishi mumkin (misolda 18.12 -> 26.12,
+//     8 kun farq). Foydalanuvchiga har doim dateAccepted (bor bo'lsa, Tashkent vaqti) ko'rsatiladi —
+//     aks holda u Uzum'ga murojaat qilganda hujjatni sana bo'yicha topa olmaydi.
+// Bu ikkalasi TASDIQLANGAN: id=1800068/1800059/1800164 uchun kabinet #110001800068/59/164,
+// sana 26.12.2024 (05:19/05:23/05:39) — barchasi mos keldi.
+function invoiceDisplayNumber(inv) {
+  return (inv.invoiceNumber != null) ? Math.floor(inv.invoiceNumber / 10) : inv.id;
+}
+// Voqea vaqti (epoch ms) — tartiblash/oyna moslashtirish uchun. dateAccepted (aniq) ustuvor.
+function invoiceEventMs(inv) {
+  if (inv.dateAccepted) return inv.dateAccepted;
+  const [dd, mm, yyyy] = String(inv.dateCreated || '').split('.').map(Number);
+  return (dd && mm && yyyy) ? Date.UTC(yyyy, mm - 1, dd) : 0;
+}
+// Foydalanuvchiga ko'rsatiladigan sana — "DD.MM.YYYY HH:MM" (dateAccepted, Tashkent) yoki "DD.MM.YYYY" (dateCreated).
+function invoiceDisplayDate(inv) {
+  if (inv.dateAccepted) {
+    const d = new Date(inv.dateAccepted + 5 * 3600 * 1000); // Tashkent (UTC+5)
+    const p2 = n => String(n).padStart(2, '0');
+    return `${p2(d.getUTCDate())}.${p2(d.getUTCMonth() + 1)}.${d.getUTCFullYear()} ${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}`;
+  }
+  return inv.dateCreated || '?';
+}
+// Kun-darajasidagi guruhlash kaliti (Tashkent), "birinchi ariza/partiya" uchun — vaqtsiz, sana bo'yicha.
+function invoiceDayKey(inv) {
+  const ms = invoiceEventMs(inv);
+  if (!ms) return inv.dateCreated || '?';
+  const d = new Date(ms + (inv.dateAccepted ? 5 * 3600 * 1000 : 0));
+  const p2 = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}`;
+}
+
 // { typeId: qty } — faqat skuMappings'da bog'langan SKU'lar (bog'lanmaganlar uy zaxirasida yo'q, e'tiborsiz).
 function invoiceQtyByType(invoice, field) {
   const byType = {};
@@ -1927,14 +1963,18 @@ async function computeCompensationCandidates() {
   const fetchRes = await fetchAllInvoices();
   if (!fetchRes.ok) return { ok: false, error: fetchRes.error };
   const sellMap = await buildSkuSellMap();
-  const parseDate = d => { const [dd, mm, yy] = String(d).split('.').map(Number); return new Date(yy, mm - 1, dd).getTime(); };
 
-  // SKU bo'yicha ACCEPTED yuk xati qatorlarini yig'amiz
+  // SKU bo'yicha ACCEPTED yuk xati qatorlarini yig'amiz. Sana/raqam — invoiceDisplayDate/Number
+  // (Uzum kabinetiga MOS, 2026-08-06 tasdiqlangan) orqali; tartiblash — invoiceEventMs (aniq voqea vaqti).
   const bySku = {};
   fetchRes.invoices.filter(i => i.invoiceStatus && i.invoiceStatus.value === 'ACCEPTED').forEach(inv => {
+    const displayNum = invoiceDisplayNumber(inv);
+    const displayDate = invoiceDisplayDate(inv);
+    const dayKey = invoiceDayKey(inv);
+    const eventMs = invoiceEventMs(inv);
     (inv.productForInvoiceDto || []).forEach(p => (p.skuForInvoiceDtoList || []).forEach(s => {
       const id = String(s.id);
-      (bySku[id] = bySku[id] || []).push({ shopTitle: inv.shopTitle, invoiceNumber: inv.invoiceNumber, date: parseDate(inv.dateCreated), dateStr: inv.dateCreated, toStock: s.quantityToStock || 0, accepted: s.quantityAccepted || 0, title: s.skuTitle });
+      (bySku[id] = bySku[id] || []).push({ shopTitle: inv.shopTitle, invoiceNumber: displayNum, date: eventMs, dateStr: displayDate, dayKey, toStock: s.quantityToStock || 0, accepted: s.quantityAccepted || 0, title: s.skuTitle });
     }));
   });
 
@@ -1952,7 +1992,7 @@ async function computeCompensationCandidates() {
       else if (L.accepted > 0 && L.accepted < L.toStock) partialShort.push({ ...L, short: L.toStock - L.accepted });
     });
     // Qisman kamomad = ANIQ intake yo'qotish (partiya qabul qilingan, dona yetishmagan)
-    partialShort.forEach(pS => aniqItems.push({ skuId: id, skuTitle: title, shopTitle, date: pS.dateStr, invoiceNumber: pS.invoiceNumber, units: pS.short, perUnit, value: pS.short * perUnit, kind: 'partial-shortfall', priced: !!lv }));
+    partialShort.forEach(pS => aniqItems.push({ skuId: id, skuTitle: title, shopTitle, date: pS.dateStr, dayKey: pS.dayKey, invoiceNumber: pS.invoiceNumber, units: pS.short, perUnit, value: pS.short * perUnit, kind: 'partial-shortfall', priced: !!lv }));
     // To'liq rad: keyingi to'liq qabullar bilan (oyna ichida) ochko'zlik bilan moslashtiramiz
     fullRej.forEach(R => {
       let remaining = R.toStock;
@@ -1964,8 +2004,8 @@ async function computeCompensationCandidates() {
       }
       const recovered = R.toStock - remaining;
       if (remaining === 0) return; // to'liq qayta saralangan — yo'qotish yo'q
-      if (recovered > 0) qismanItems.push({ skuId: id, skuTitle: title, shopTitle, date: R.dateStr, invoiceNumber: R.invoiceNumber, orig: R.toStock, recovered, units: remaining, perUnit, value: remaining * perUnit, priced: !!lv });
-      else aniqItems.push({ skuId: id, skuTitle: title, shopTitle, date: R.dateStr, invoiceNumber: R.invoiceNumber, units: R.toStock, perUnit, value: R.toStock * perUnit, kind: 'full-reject-unrecovered', priced: !!lv });
+      if (recovered > 0) qismanItems.push({ skuId: id, skuTitle: title, shopTitle, date: R.dateStr, dayKey: R.dayKey, invoiceNumber: R.invoiceNumber, orig: R.toStock, recovered, units: remaining, perUnit, value: remaining * perUnit, priced: !!lv });
+      else aniqItems.push({ skuId: id, skuTitle: title, shopTitle, date: R.dateStr, dayKey: R.dayKey, invoiceNumber: R.invoiceNumber, units: R.toStock, perUnit, value: R.toStock * perUnit, kind: 'full-reject-unrecovered', priced: !!lv });
     });
   }
   aniqItems.sort((a, b) => b.value - a.value);
@@ -1973,10 +2013,20 @@ async function computeCompensationCandidates() {
   const sum = arr => ({ units: arr.reduce((a, x) => a + x.units, 0), value: arr.reduce((a, x) => a + x.value, 0) });
   const aniqSum = sum(aniqItems), qismanSum = sum(qismanItems);
 
-  // Eng katta partiya (bir sana bo'yicha eng ko'p summa) — birinchi ariza uchun
-  const byDate = {};
-  aniqItems.forEach(x => { byDate[x.date] = byDate[x.date] || { date: x.date, units: 0, value: 0, skus: [] }; byDate[x.date].units += x.units; byDate[x.date].value += x.value; byDate[x.date].skus.push(x.skuTitle); });
-  const topBatch = Object.values(byDate).sort((a, b) => b.value - a.value)[0] || null;
+  // Eng katta partiya (bir KUN bo'yicha eng ko'p summa, dayKey orqali) — birinchi ariza uchun.
+  // invoiceNumbers — foydalanuvchi Uzum kabinetida qidirishi uchun aniq hujjat raqamlari.
+  const byDay = {};
+  aniqItems.forEach(x => {
+    if (!byDay[x.dayKey]) byDay[x.dayKey] = { dayKey: x.dayKey, units: 0, value: 0, skus: [], invoiceNumbers: new Set() };
+    byDay[x.dayKey].units += x.units; byDay[x.dayKey].value += x.value;
+    byDay[x.dayKey].skus.push(x.skuTitle); byDay[x.dayKey].invoiceNumbers.add(x.invoiceNumber);
+  });
+  const topBatchRaw = Object.values(byDay).sort((a, b) => b.value - a.value)[0] || null;
+  const topBatch = topBatchRaw ? {
+    date: topBatchRaw.dayKey.split('-').reverse().join('.'), // YYYY-MM-DD -> DD.MM.YYYY
+    units: topBatchRaw.units, value: topBatchRaw.value, skus: topBatchRaw.skus,
+    invoiceNumbers: [...topBatchRaw.invoiceNumbers]
+  } : null;
 
   return {
     ok: true, windowDays: RESORT_WINDOW_DAYS,
@@ -2003,9 +2053,11 @@ async function computeInvoicesSummary() {
       items.push({ skuTitle: s.skuTitle, toStock: s.quantityToStock || 0, accepted: s.quantityAccepted || 0 });
     }));
     return {
-      id: inv.id, invoiceNumber: inv.invoiceNumber, shopId: inv.shopId, shopTitle: inv.shopTitle,
-      status, statusText: inv.invoiceStatus && inv.invoiceStatus.text, dateCreated: inv.dateCreated,
-      dateAccepted: inv.dateAccepted ? new Date(inv.dateAccepted).toISOString().slice(0, 10) : null,
+      id: inv.id, invoiceNumber: invoiceDisplayNumber(inv), shopId: inv.shopId, shopTitle: inv.shopTitle,
+      status, statusText: inv.invoiceStatus && inv.invoiceStatus.text,
+      dateCreated: inv.dateCreated, // hujjat yaratilgan sana (ma'lumot uchun)
+      dateAccepted: inv.dateAccepted ? invoiceDisplayDate(inv) : null, // "DD.MM.YYYY HH:MM", Tashkent — Uzum kabinetidagi sana
+      displayDate: invoiceDisplayDate(inv), // asosiy ko'rsatiladigan sana (qabul qilingan bo'lsa ustuvor)
       totalToStock: inv.totalToStock || 0, totalAccepted: inv.totalAccepted || 0, items
     };
   });
@@ -2039,7 +2091,7 @@ async function runInvoiceSync() {
 
   for (const inv of invoices) {
     const status = inv.invoiceStatus && inv.invoiceStatus.value;
-    const numLabel = inv.invoiceNumber || inv.id;
+    const numLabel = invoiceDisplayNumber(inv); // Uzum kabinetidagi raqam — tekshiruv xonasisiz
 
     // 1) YANGI yuk xati (CREATED yoki to'g'ridan ACCEPTED) hali ayirilmagan bo'lsa — uy zaxirasidan ayir.
     // MUHIM: CANCELED (bekor qilingan) yuk xati JISMONAN jo'natilmagan — zaxiraga TEGMAYMIZ, xabar YO'Q,
@@ -2072,7 +2124,7 @@ async function runInvoiceSync() {
     if (status === 'ACCEPTED' && !acceptedNotified.has(inv.id)) {
       const totalToStock = inv.totalToStock || 0, totalAccepted = inv.totalAccepted || 0;
       const missing = invoiceMissingItems(inv);
-      let msg = `✅ *Uzum qabul qildi* #${numLabel} (${inv.shopTitle})\nJo'natilgan: ${fmtMoney(totalToStock)} · Qabul: ${fmtMoney(totalAccepted)} dona`;
+      let msg = `✅ *Uzum qabul qildi* #${numLabel} (${inv.shopTitle})\n${invoiceDisplayDate(inv)}\nJo'natilgan: ${fmtMoney(totalToStock)} · Qabul: ${fmtMoney(totalAccepted)} dona`;
       if (missing.length) {
         const totalMissing = missing.reduce((a, m) => a + m.missing, 0);
         // Bu shu yuk xatidagi FARQ (dona). Aniq kompensatsiya summasi (sotuv−komissiya, qayta saralanganlar

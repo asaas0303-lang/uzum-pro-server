@@ -2325,7 +2325,7 @@ ${urgentSection}
                     ${statusBadge(iv.status)}
                   </div>
                   <div class="flex justify-between text-[9.5px] text-slate-500">
-                    <span>${iv.shopTitle} · ${iv.dateCreated}${iv.dateAccepted ? ' → ' + iv.dateAccepted : ''}</span>
+                    <span>${iv.shopTitle} · ${iv.displayDate}${iv.dateAccepted && iv.dateAccepted !== iv.dateCreated ? ` <span class="opacity-70">(yaratilgan: ${iv.dateCreated})</span>` : ''}</span>
                     <span class="font-mono">${fmtMoney(iv.totalToStock)}${iv.status === 'ACCEPTED' ? '→' + fmtMoney(iv.totalAccepted) : ''} dona${iv.status === 'ACCEPTED' && diff > 0 ? ` <span class="text-amber-400">(−${diff})</span>` : ''}</span>
                   </div>
                   <details class="mt-0.5">
@@ -2361,7 +2361,7 @@ ${urgentSection}
         <div class="flex justify-between text-[10px] ${cls} border-t border-darkBorder/30 py-1">
           <div class="flex flex-col min-w-0">
             <span class="truncate text-slate-300">${x.skuTitle}</span>
-            <span class="text-[9px] text-slate-500">${x.shopTitle || ''} · ${x.date}${x.recovered ? ` · ${x.orig}→0, ${x.recovered} qaytdi` : ''}</span>
+            <span class="text-[9px] text-slate-500">${x.shopTitle || ''} · #${x.invoiceNumber} · ${x.date}${x.recovered ? ` · ${x.orig}→0, ${x.recovered} qaytdi` : ''}</span>
           </div>
           <div class="text-right shrink-0 ml-2 font-mono">
             <div class="text-slate-200">${fmtMoney(x.units)} dona</div>
@@ -2380,7 +2380,7 @@ ${urgentSection}
             <span class="font-bold text-amber-300 font-mono">${fmtMoney(aniq.value)} so'm</span>
           </div>
           <div class="text-[9.5px] text-slate-500 mb-2">Qayta saralanganlar chiqarilgan · sotuv narxi − komissiya bo'yicha${c.windowDays ? ` · oyna ${c.windowDays} kun` : ''}</div>
-          ${topBatch ? `<div class="text-[10px] text-emerald-300/90 bg-emerald-950/20 border border-emerald-900/40 rounded-lg px-2 py-1.5 mb-2">🎯 Birinchi ariza: <b>${topBatch.date}</b> partiyasi — ${fmtMoney(topBatch.units)} dona (${fmtMoney(topBatch.value)} so'm). Eng katta va eng eski — shu bo'yicha boshlang.</div>` : ''}
+          ${topBatch ? `<div class="text-[10px] text-emerald-300/90 bg-emerald-950/20 border border-emerald-900/40 rounded-lg px-2 py-1.5 mb-2">🎯 Birinchi ariza: <b>${topBatch.date}</b> partiyasi — ${fmtMoney(topBatch.units)} dona (${fmtMoney(topBatch.value)} so'm).<br>Hujjatlar: ${topBatch.invoiceNumbers.map(n => '#' + n).join(', ')}<br>Eng katta va eng eski — shu bo'yicha boshlang.</div>` : ''}
           <div class="text-[10px] text-amber-400/90 bg-amber-950/30 border border-amber-900/40 rounded-lg px-2 py-1.5 mb-2 leading-relaxed">
             ⚠️ Bu <b>KAFOLATLANGAN pul EMAS</b>. Yo'qolgan/shikastlangan (kompensatsiya olsa bo'ladi) YOKI sifat/markirovka rad etilishi (olib bo'lmaydi) bo'lishi mumkin. Har birini Uzum kabinetida sababi bilan tekshiring.
           </div>
