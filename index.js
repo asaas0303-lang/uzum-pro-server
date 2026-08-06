@@ -1993,11 +1993,15 @@ async function computeCompensationCandidates() {
     });
     // Qisman kamomad = ANIQ intake yo'qotish (partiya qabul qilingan, dona yetishmagan)
     partialShort.forEach(pS => aniqItems.push({ skuId: id, skuTitle: title, shopTitle, date: pS.dateStr, dayKey: pS.dayKey, invoiceNumber: pS.invoiceNumber, units: pS.short, perUnit, value: pS.short * perUnit, kind: 'partial-shortfall', priced: !!lv }));
-    // To'liq rad: keyingi to'liq qabullar bilan (oyna ichida) ochko'zlik bilan moslashtiramiz
+    // To'liq rad: yaqin to'liq qabullar bilan (oyna ichida) ochko'zlik bilan moslashtiramiz.
+    // MUHIM (2026-08-06 tasdiqlangan): Uzum bir xil qayta saralash partiyasidagi hujjatlarni har doim
+    // "avval rad, keyin qabul" tartibida QAYD ETMAYDI — dateAccepted bo'yicha "qabul" hujjati "rad"
+    // hujjatidan bir necha soat OLDIN qayd etilgan holatlar kuzatildi (bir xil ombor seansi). Shuning
+    // uchun oyna SIMMETRIK: |farq| <= RESORT_WINDOW_DAYS, yo'nalishga qaramasdan.
     fullRej.forEach(R => {
       let remaining = R.toStock;
       for (const A of fullAcc) {
-        if (A.date >= R.date && (A.date - R.date) <= RESORT_WINDOW_DAYS * 86400000 && A.avail > 0) {
+        if (Math.abs(A.date - R.date) <= RESORT_WINDOW_DAYS * 86400000 && A.avail > 0) {
           const take = Math.min(remaining, A.avail); remaining -= take; A.avail -= take;
           if (remaining === 0) break;
         }
