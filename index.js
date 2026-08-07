@@ -2084,7 +2084,10 @@ async function runInvoiceSync() {
 
   if (firstRun) {
     // Bazaviy holat: hamma narsani "ishlangan" deb belgilaymiz — eski yuk xatlari zaxirani buzmasin, toshqin bo'lmasin.
-    invoices.forEach(inv => { deducted.add(inv.id); acceptedNotified.add(inv.id); });
+    invoices.forEach(inv => {
+      deducted.add(inv.id);
+      if (inv.invoiceStatus && inv.invoiceStatus.value === 'ACCEPTED') acceptedNotified.add(inv.id);
+    });
     writeJsonFile(INVOICE_STATE_FILE, { deducted: [...deducted], acceptedNotified: [...acceptedNotified] });
     console.log(`[INVOICE] Birinchi run — ${invoices.length} ta yuk xati bazaviy belgilandi (ayirish/xabar yo'q).`);
     return { ok: true, firstRun: true, baselined: invoices.length };
