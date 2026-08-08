@@ -96,6 +96,56 @@ function setLastReportDate(date) {
   writeJsonFile(REPORT_META_FILE, { lastReportDate: date });
 }
 
+// 19-F: Kunlik vazifalar xotirasi — POYDEVOR QATLAMI. Ertalabki xabar/AI/tugma HALI yo'q (keyingi bosqich),
+// faqat saqlash/o'qish. Tuzilma: { "YYYY-MM-DD": [{ id, text, status, createdAt, updatedAt }, ...] }.
+// status: "kutilmoqda" | "bajarildi" | "ertaga" | "imkonsiz".
+const DAILY_TASKS_FILE = path.join(DATA_DIR, 'daily-tasks.json');
+const DAILY_TASKS_RETENTION_DAYS = 60; // snapshot naqshiga o'xshab — ixtiyoriy tozalash
+const DAILY_TASK_STATUSES = ['kutilmoqda', 'bajarildi', 'ertaga', 'imkonsiz'];
+
+function getDailyTasks(sana) {
+  const all = readJsonFile(DAILY_TASKS_FILE, {});
+  return all[sana] || [];
+}
+
+function getRecentTasks(kunSoni) {
+  const all = readJsonFile(DAILY_TASKS_FILE, {});
+  const cutoff = new Date(Date.now() - kunSoni * 86400000).toISOString().slice(0, 10);
+  const result = {};
+  for (const d of Object.keys(all).sort()) { if (d >= cutoff) result[d] = all[d]; }
+  return result;
+}
+
+// Himoya: mavjud (bo'sh bo'lmagan) kunni bo'sh massiv bilan tasodifan almashtirib qo'ymaslik
+// (settings.json/finance-data'dagi bo'sh-yozuv himoyasi bilan bir xil naqsh).
+function saveDailyTasks(sana, vazifalar) {
+  const all = readJsonFile(DAILY_TASKS_FILE, {});
+  const currentlyHasData = (all[sana] || []).length > 0;
+  const willBeEmpty = !Array.isArray(vazifalar) || vazifalar.length === 0;
+  if (willBeEmpty && currentlyHasData) {
+    console.warn(`[DAILY-TASKS] RAD ETILDI: "${sana}" bo'sh yuborildi (${all[sana].length} ta yozuv bor edi) — himoya.`);
+    return false;
+  }
+  all[sana] = vazifalar;
+  const cutoff = new Date(Date.now() - DAILY_TASKS_RETENTION_DAYS * 86400000).toISOString().slice(0, 10);
+  for (const d of Object.keys(all)) { if (d < cutoff) delete all[d]; }
+  return writeJsonFile(DAILY_TASKS_FILE, all);
+}
+
+function updateTaskStatus(sana, taskId, yangiHolat) {
+  if (!DAILY_TASK_STATUSES.includes(yangiHolat)) {
+    console.warn(`[DAILY-TASKS] Noto'g'ri holat: "${yangiHolat}"`);
+    return false;
+  }
+  const all = readJsonFile(DAILY_TASKS_FILE, {});
+  const kunVazifalari = all[sana];
+  const task = kunVazifalari && kunVazifalari.find(t => t.id === taskId);
+  if (!task) return false;
+  task.status = yangiHolat;
+  task.updatedAt = Date.now();
+  return writeJsonFile(DAILY_TASKS_FILE, all);
+}
+
 // Diagnostika: joriy deploy qaysi Git commit'dan ekanini va APP_URL qanday sozlanganini ko'rsatadi
 app.get('/version', (req, res) => {
   res.json({ commit: process.env.RAILWAY_GIT_COMMIT_SHA || null, appUrl: process.env.APP_URL || null });
