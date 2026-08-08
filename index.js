@@ -2071,7 +2071,14 @@ async function computeInvoicesSummary() {
 // 19-B: yangi CREATED yuk xatlari uchun uy zaxirasidan AVTOMATIK ayirish (tasdiq so'ramasdan, lekin aniq xabar bilan),
 // va ACCEPTED holatga o'tganida alohida xabar (zaxiraga tegmasdan). Holat invoice_state.json'da — takror ayirmaslik.
 // Birinchi ishga tushishda (fayl yo'q) — barcha mavjud yuk xatlari BAZAVIY deb belgilanadi (ayirish/xabar YO'Q).
+let invoiceSyncInProgress = false; // 19-C: kunlik va 20-daqiqalik cron bir vaqtda ustma-ust tushmasin (bir xil invoice_state.json'ni o'qib-yozadi)
 async function runInvoiceSync() {
+  if (invoiceSyncInProgress) {
+    console.log('[INVOICE] Oldingi sinxron hali tugamagan — bu chaqiruv o\'tkazib yuborildi.');
+    return { ok: true, skipped: true };
+  }
+  invoiceSyncInProgress = true;
+  try {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const fetchRes = await fetchAllInvoices();
   if (!fetchRes.ok) { console.error('[INVOICE] olinmadi:', fetchRes.error); return { ok: false, error: fetchRes.error }; }
@@ -2156,6 +2163,9 @@ async function runInvoiceSync() {
   }
   console.log(`[INVOICE] Sinxron tugadi — ${deductedCount} yangi (ayirildi), ${acceptedCount} qabul qilindi, ${messages.length} xabar.`);
   return { ok: true, firstRun: false, deductedCount, acceptedCount, messagesSent: messages.length };
+  } finally {
+    invoiceSyncInProgress = false;
+  }
 }
 
 async function runDailyReport() {
@@ -2741,6 +2751,16 @@ if (process.env.UZUM_TOKEN) {
   console.log('[CRON] Kunlik snapshot rejalashtirildi: har kuni 04:50 Asia/Tashkent.');
 } else {
   console.warn('[CRON] UZUM_TOKEN yo\'q — snapshot rejalashtirilmadi.');
+}
+
+// 19-C: Invoice sinxron — qo'shimcha, har 20 daqiqada (kunlik 04:50 zanjirdan mustaqil,
+// unga tegmaydi). Maqsad — holat o'zgarishi (ACCEPTED/yangi yuk xati) haqidagi xabar
+// ertalabgacha kutmasdan, tezroq kelishi. invoiceSyncInProgress qulfi ustma-ust tushishni oldini oladi.
+if (process.env.UZUM_TOKEN) {
+  cron.schedule('*/20 * * * *', () => {
+    runInvoiceSync().catch(e => console.error('[CRON] 20-daqiqalik invoice sync xato:', e));
+  }, { timezone: 'Asia/Tashkent' });
+  console.log('[CRON] Invoice sinxron qo\'shimcha rejalashtirildi: har 20 daqiqada.');
 }
 
 // Scheduled daily report — har kuni 05:00 Toshkent vaqtida (timezone aniq ko'rsatilgan,
