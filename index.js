@@ -1899,6 +1899,14 @@ function invoiceDisplayDate(inv) {
   }
   return inv.dateCreated || '?';
 }
+// Hozirgi vaqt, Tashkent, "DD.MM.YYYY HH:MM". 19-D: FAQAT "bizning tizim payqagan vaqt" uchun —
+// Uzum API dateCreated'da soat bermaydi (faqat sana), shuning uchun bu Uzum'ning haqiqiy yaratilish
+// soati sifatida ko'rsatilmasin, "Aniqlangan" deb izohlansin.
+function fmtTashkentNow() {
+  const d = new Date(Date.now() + 5 * 3600 * 1000);
+  const p2 = n => String(n).padStart(2, '0');
+  return `${p2(d.getUTCDate())}.${p2(d.getUTCMonth() + 1)}.${d.getUTCFullYear()} ${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}`;
+}
 // Kun-darajasidagi guruhlash kaliti (Tashkent), "birinchi ariza/partiya" uchun — vaqtsiz, sana bo'yicha.
 function invoiceDayKey(inv) {
   const ms = invoiceEventMs(inv);
@@ -2108,11 +2116,17 @@ async function runInvoiceSync() {
     const numLabel = invoiceDisplayNumber(inv); // Uzum kabinetidagi raqam — tekshiruv xonasisiz
 
     // 1) YANGI yuk xati (CREATED yoki to'g'ridan ACCEPTED) hali ayirilmagan bo'lsa — uy zaxirasidan ayir.
-    // MUHIM: CANCELED (bekor qilingan) yuk xati JISMONAN jo'natilmagan — zaxiraga TEGMAYMIZ, xabar YO'Q,
-    // faqat "ishlangan" deb belgilaymiz (qayta tekshirmaslik uchun).
+    // MUHIM: CANCELED (bekor qilingan) yuk xati JISMONAN jo'natilmagan — zaxiraga TEGMAYMIZ,
+    // lekin foydalanuvchi bilishi uchun xabar YUBORILADI (19-D: avval bu holatda xabar umuman yo'q edi).
     if (!deducted.has(inv.id)) {
       if (status === 'CANCELED') {
-        deducted.add(inv.id); // bekor qilingan — hech qanday ayirish/xabar yo'q
+        deducted.add(inv.id); // bekor qilingan — zaxiraga tegilmaydi, faqat xabar beriladi
+        messages.push(
+          `❌ *Yuk xati bekor qilindi*\n` +
+          `➤ Raqami: #${numLabel}\n` +
+          `🏬 Do'kon: ${inv.shopTitle}\n` +
+          `📅 Yaratilgan: ${inv.dateCreated || '?'}`
+        );
       } else {
         const byType = invoiceQtyByType(inv, 'quantityToStock');
         const lines = [];
@@ -2124,8 +2138,19 @@ async function runInvoiceSync() {
           lines.push(`   ${type.name}: ${before} → ${type.stock} (−${qty})`);
           stockChanged = true;
         }
-        const totalToStock = inv.totalToStock || 0;
-        let msg = `📦 *Yangi yuk xati* #${numLabel} (${inv.shopTitle})\n${fmtMoney(totalToStock)} dona Uzum'ga jo'natildi.`;
+        const productNames = [...new Set((inv.productForInvoiceDto || []).map(p => p.productTitle).filter(Boolean))];
+        const skuItems = [];
+        (inv.productForInvoiceDto || []).forEach(p => (p.skuForInvoiceDtoList || []).forEach(s => {
+          skuItems.push({ skuTitle: s.skuTitle || 'SKU', qty: s.quantityToStock || 0 });
+        }));
+        let msg =
+          `📦 *Yangi yuk xati yaratildi!*\n` +
+          `➤ Raqami: #${numLabel}\n` +
+          `🏬 Do'kon: ${inv.shopTitle} (${inv.shopId})\n` +
+          `📅 Sana: ${inv.dateCreated || '?'}\n` +
+          `🕐 Aniqlangan: ${fmtTashkentNow()}\n` +
+          `📦 Jami: ${fmtMoney(inv.totalToStock || 0)} ta — ${productNames.join(', ') || inv.shopTitle}`;
+        if (skuItems.length) msg += `\n\nSKU bo'yicha:\n${skuItems.map(i => `- ${i.skuTitle}: ${fmtMoney(i.qty)} ta`).join('\n')}`;
         if (lines.length) msg += `\n\n🏠 Uy zaxirasidan ayirildi:\n${lines.join('\n')}`;
         else msg += `\n\n(Uy zaxirasiga bog'langan SKU topilmadi — zaxira o'zgarmadi)`;
         messages.push(msg);
@@ -2138,13 +2163,22 @@ async function runInvoiceSync() {
     if (status === 'ACCEPTED' && !acceptedNotified.has(inv.id)) {
       const totalToStock = inv.totalToStock || 0, totalAccepted = inv.totalAccepted || 0;
       const missing = invoiceMissingItems(inv);
-      let msg = `✅ *Uzum qabul qildi* #${numLabel} (${inv.shopTitle})\n${invoiceDisplayDate(inv)}\nJo'natilgan: ${fmtMoney(totalToStock)} · Qabul: ${fmtMoney(totalAccepted)} dona`;
+      let msg =
+        `✅ *Yuk xati qabul qilindi!*\n` +
+        `➤ Raqami: #${numLabel}\n` +
+        `🏬 Do'kon: ${inv.shopTitle}\n` +
+        `📅 Yaratilgan: ${inv.dateCreated || '?'}\n` +
+        `📅 Qabul qilingan: ${invoiceDisplayDate(inv)}\n` +
+        `➤ Yuborilgan: ${fmtMoney(totalToStock)} ta\n` +
+        `➤ Qabul qilingan: ${fmtMoney(totalAccepted)} ta\n` +
+        (totalAccepted === totalToStock
+          ? `💰 Umumiy qiymat: ${fmtMoney(inv.fullPrice || 0)} so'm`
+          : `💰 Yuborilgan partiya qiymati (${fmtMoney(totalToStock)} ta): ${fmtMoney(inv.fullPrice || 0)} so'm`); // fullPrice — Uzum'ning o'z maydoni, jo'natilgan (quantityToStock) shipment qiymati
       if (missing.length) {
-        const totalMissing = missing.reduce((a, m) => a + m.missing, 0);
         // Bu shu yuk xatidagi FARQ (dona). Aniq kompensatsiya summasi (sotuv−komissiya, qayta saralanganlar
         // chiqarilgan holda) dashboard "Kompensatsiya nomzodlari" bo'limida — chunki farq keyingi yuk xatida
         // qayta qabul qilinishi mumkin (hali aniq yo'qolgan degani emas).
-        msg += `\n\n⚠️ *${fmtMoney(totalMissing)} dona farq*:\n${missing.slice(0, 6).map(m => `   ${m.skuTitle}: ${m.toStock}→${m.accepted} (−${m.missing})`).join('\n')}\n\n→ Bu tovar keyingi yuk xatida qayta qabul qilinishi mumkin. Aniq kompensatsiya: dashboard → Moliya → Kompensatsiya nomzodlari. Uzum kabinetida sababini tekshiring — KAFOLATLANGAN pul emas.`;
+        msg += `\n\n⚠️ *Tafovutlar:*\n${missing.slice(0, 6).map(m => `- ${m.skuTitle} — ${m.accepted}/${m.toStock}`).join('\n')}\n\n→ Bu tovar keyingi yuk xatida qayta qabul qilinishi mumkin. Aniq kompensatsiya: dashboard → Moliya → Kompensatsiya nomzodlari. Uzum kabinetida sababini tekshiring — KAFOLATLANGAN pul emas.`;
       }
       messages.push(msg);
       acceptedNotified.add(inv.id);
