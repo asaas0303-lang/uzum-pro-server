@@ -22,6 +22,19 @@ function loadKnowledgeBase() {
   return _knowledgeBaseCache;
 }
 
+// 19-E: Biznes/moliya tamoyillari (knowledge/biznes-tamoyillari.md) — xuddi uzum-rules.md kabi keshlanib, AI kontekstiga qo'shiladi.
+let _businessPrinciplesCache = null;
+function loadBusinessPrinciples() {
+  if (_businessPrinciplesCache !== null) return _businessPrinciplesCache;
+  try {
+    _businessPrinciplesCache = fs.readFileSync(path.join(__dirname, 'knowledge', 'biznes-tamoyillari.md'), 'utf8');
+  } catch (err) {
+    console.warn('[KB] Biznes tamoyillari o\'qilmadi:', err.message);
+    _businessPrinciplesCache = '';
+  }
+  return _businessPrinciplesCache;
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -1367,6 +1380,7 @@ async function generateAiAdvice(shopId) {
   try {
     const ctx = await buildAiContext(shopId);
     const kb = loadKnowledgeBase().replace(/## 6\. RAQOBATCHILAR[\s\S]*?(?=\n## 7\.)/, ''); // raqobatchilar bo'limini token tejash uchun chiqaramiz
+    const biz = loadBusinessPrinciples();
 
     const ai = new GoogleGenAI({ apiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } });
 
@@ -1382,6 +1396,9 @@ QAT'IY QOIDALAR:
 
 === BILIMLAR BAZASI (Uzum qoidalari) ===
 ${kb}
+
+=== BIZNES VA MOLIYA TAMOYILLARI ===
+${biz}
 
 === JORIY HOLAT (real ma'lumot) ===
 ${ctx.text}
