@@ -1420,6 +1420,23 @@ async function buildAiContext(shopId) {
   return { text: lines.join('\n'), shopTitle, hasData: prod.ok, problems };
 }
 
+// 19-G: Gemini'ni chaqirib, JSON javobni parse qiladi. maxOutputTokens aniq belgilangan (avval yo'q edi —
+// uzun prompt ba'zan javobni chiqish limitiga yetkazib, JSON'ni kesib qo'yardi).
+async function callGeminiJson(ai, promptText) {
+  const response = await ai.models.generateContent({
+    model: 'gemini-3.5-flash',
+    contents: promptText,
+    config: { responseMimeType: 'application/json', maxOutputTokens: 8192 }
+  });
+  const responseText = response.text || '';
+  try {
+    return JSON.parse(responseText.trim());
+  } catch (parseErr) {
+    const cleanText = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
+    return JSON.parse(cleanText);
+  }
+}
+
 // 18-C: AI MOLIYAVIY MURABBIY — eski oddiy maslahatchi butunlay qayta yozildi.
 // Umumiy funksiya: ham /api/gemini/advice endpointi, ham bot /maslahat buyrug'i ishlatadi.
 async function generateAiAdvice(shopId) {
@@ -1461,19 +1478,15 @@ Quyidagi JSON formatida javob ber (faqat toza JSON, markdown kod bloki YO'Q):
   "xitoy_buyurtma": "Xitoydan buyurtma kerak bo'lgan SKU'lar: qaysi, qancha dona, taxminiy foyda. Yo'q bo'lsa 'Hozircha shoshilinch buyurtma kerak emas'."
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: prompt,
-      config: { responseMimeType: 'application/json' }
-    });
-
-    const responseText = response.text || '';
-    let parsedData = {};
+    let parsedData;
     try {
-      parsedData = JSON.parse(responseText.trim());
-    } catch (parseErr) {
-      const cleanText = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
-      parsedData = JSON.parse(cleanText);
+      parsedData = await callGeminiJson(ai, prompt);
+    } catch (firstErr) {
+      // 19-G: uzunroq prompt (biznes-tamoyillari qo'shilgach) ba'zan chiqish token limitiga yetib,
+      // JSON tugallanmay kesiladi. Bir marta, "qisqa yoz" ko'rsatmasi bilan qayta urinamiz.
+      console.warn('[AI] Birinchi urinish JSON parse xato, qayta urinilmoqda:', firstErr.message);
+      const retryPrompt = prompt + '\n\nMUHIM: Javobni albatta TO\'LIQ, QISQA va YOPIQ JSON qilib yakunlang, ortiqcha izoh yozmang.';
+      parsedData = await callGeminiJson(ai, retryPrompt);
     }
     return { ok: true, data: parsedData };
   } catch (err) {
