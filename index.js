@@ -35,6 +35,29 @@ function loadBusinessPrinciples() {
   return _businessPrinciplesCache;
 }
 
+// 19-H: VAQTINCHALIK qisqartirish — to'liq faylni har chaqiruvda yuborish Gemini javob vaqtini
+// uzaytirgan (26-81s). Qo'lda tanlangan eng muhim qismlar: "qanday ishlatish" qo'llanmasi (7-bo'lim,
+// doim kerak) + eng ko'p qo'llaniladigan 4 tamoyil. Relevance/so'rovga-qarab-tanlash algoritmi EMAS —
+// bilim bazasi yana kattalashsa, shunday mexanizm kerak bo'ladi, hozircha bu yetarli.
+let _businessPrinciplesCondensedCache = null;
+function loadBusinessPrinciplesCondensed() {
+  if (_businessPrinciplesCondensedCache !== null) return _businessPrinciplesCondensedCache;
+  const full = loadBusinessPrinciples();
+  const pick = (heading) => {
+    const m = full.match(new RegExp(heading + '[\\s\\S]*?(?=\\n### |\\n## |$)'));
+    return m ? m[0].trim() : '';
+  };
+  const parts = [
+    pick('### 1\\.1'), // Qarz — erkinlikni cheklaydi
+    pick('### 1\\.3'), // Qarzdan qutulish formulasi
+    pick('### 2\\.5'), // Marja aylanmadan muhim
+    pick('### 5\\.5'), // "Bugungi 3 ta ish" usuli
+    pick('## 7\\. AI MASLAHATCHI UCHUN') // qo'llash qo'llanmasi — fayl oxirigacha
+  ].filter(Boolean);
+  _businessPrinciplesCondensedCache = parts.join('\n\n');
+  return _businessPrinciplesCondensedCache;
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -1447,7 +1470,7 @@ async function generateAiAdvice(shopId) {
   try {
     const ctx = await buildAiContext(shopId);
     const kb = loadKnowledgeBase().replace(/## 6\. RAQOBATCHILAR[\s\S]*?(?=\n## 7\.)/, ''); // raqobatchilar bo'limini token tejash uchun chiqaramiz
-    const biz = loadBusinessPrinciples();
+    const biz = loadBusinessPrinciplesCondensed();
 
     const ai = new GoogleGenAI({ apiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } });
 
