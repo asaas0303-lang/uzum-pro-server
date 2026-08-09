@@ -2653,25 +2653,6 @@ app.get('/api/settings/status', (req, res) => {
   });
 });
 
-// B-bosqich VAQTINCHALIK diagnostika: computeTurnoverDays()ni real SKU'lar uchun to'g'ridan-to'g'ri
-// chaqiradi (proksisiz). Tekshirilgach OLIB TASHLANADI — doimiy endpoint emas.
-app.get('/api/diag/turnover/:shopId', async (req, res) => {
-  const shopId = req.params.shopId;
-  const prod = await fetchLiveShopProducts(shopId);
-  if (!prod.ok) return sendUzumError(res, prod.error);
-  const snapshots = loadSnapshots();
-  const rows = [];
-  prod.products.forEach(p => (p.skuList || []).forEach(sku => {
-    const t = computeTurnoverDays(shopId, sku.skuId, snapshots);
-    rows.push({
-      skuTitle: sku.skuTitle, avail: Math.max(0, sku.availableAmount || 0),
-      turnoverDays: t.days === Infinity ? 'Infinity' : t.days, partial: t.partial, noSales: t.noSales,
-      rate: computeStorageRate(t.days)
-    });
-  }));
-  res.json({ shopId, snapshotDays: Object.keys(snapshots[shopId] || {}).length, count: rows.length, rows });
-});
-
 // Diagnostika: joriy snapshot holatini ko'rsatadi (nechta kun, oxirgi delta)
 app.get('/api/snapshot/status', (req, res) => {
   const snapshots = loadSnapshots();
