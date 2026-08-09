@@ -681,6 +681,34 @@ function averageDailySales(shopId, days) {
   return { ready: true, spanDays, fromDate: window[0], toDate: window[window.length - 1], perSku };
 }
 
+// B-bosqich: Uzum rasmiy "aylanma kunlari" — oxirgi 15 kunlik O'RTACHA qoldiq ÷ O'RTACHA kunlik sotuv.
+// Bu kalendar yoshi EMAS: qoldiq sotuv tezligiga nisbatan necha kunga yetishini bildiradi (saqlash tarifi
+// shu ko'rsatkichga qarab bosqichlanadi). Snapshot: { sold(kumulyativ), returned, available }.
+// Qaytadi: { days, partial, noSales }. days=Infinity — oxirgi 15 kunda sotuv yo'q (Uzum: 361+ toifa).
+// days=null — do'kon uchun snapshot tarixi umuman yo'q. partial=true — 15 kunlik tarix hali to'liq emas.
+function computeTurnoverDays(shopId, skuId, snapshots) {
+  snapshots = snapshots || loadSnapshots();
+  const shopSnaps = snapshots[shopId] || {};
+  const dates = Object.keys(shopSnaps).sort();
+  const window = dates.slice(-15); // oxirgi 15 kun (mavjud bo'lganicha)
+  if (window.length === 0) return { days: null, partial: true, noSales: false };
+  // O'rtacha qoldiq — window ichida SKU uchragan kunlar bo'yicha
+  let sumAvail = 0, availDays = 0;
+  for (const d of window) {
+    const rec = shopSnaps[d][skuId];
+    if (rec && rec.available != null) { sumAvail += Math.max(0, rec.available); availDays++; }
+  }
+  const avgAvail = availDays > 0 ? sumAvail / availDays : 0;
+  // O'rtacha kunlik sotuv: (oxirgi.sold − birinchi.sold) / span — averageDailySales bilan bir xil usul
+  const spanDays = window.length - 1;
+  const firstSold = (shopSnaps[window[0]][skuId] || {}).sold || 0;
+  const lastSold = (shopSnaps[window[window.length - 1]][skuId] || {}).sold || 0;
+  const avgSold = spanDays >= 1 ? Math.max(0, lastSold - firstSold) / spanDays : 0;
+  const partial = window.length < 15;
+  if (avgSold <= 0) return { days: Infinity, partial, noSales: true }; // sotuvsiz → 361+ toifa (Uzum qoidasi)
+  return { days: avgAvail / avgSold, partial, noSales: false };
+}
+
 // 5.1/5.2/5.3/5.4: Har SKU uchun zaxira kunlari, ABC toifa, nolikvid va Xitoy buyurtma nuqtasi belgisi.
 // Jonli mahsulot ro'yxati + snapshot tarixidan hisoblanadi. Sotuv tarixi yo'q bo'lsa aniq "hisoblab bo'lmaydi" qaytadi.
 async function computeSkuMetrics(shopId) {
@@ -756,7 +784,8 @@ async function computeFinanceSummary(shopId, days = 30) {
     const productId = product ? product.productId : null;
     const commission = price * (commissionPct(skuId, sku, productId) / 100);
     const logi = resolveLogistics(skuId, productId, sku).val;
-    const stor = resolveStorage(skuId, productId, sku).val;
+    const turnover = computeTurnoverDays(shopId, skuId, snapshots).days;
+    const stor = resolveStorage(skuId, productId, sku, turnover).val;
     const tInfo = resolveTannarx(skuId, productId);
 
     totalSales += price * netSoldDelta;
@@ -1016,7 +1045,8 @@ async function computeForecast(shopId) {
     const productId = p.productId;
     const commission = price * (commissionPct(sku.skuId, sku, productId) / 100);
     const logi = resolveLogistics(sku.skuId, productId, sku).val;
-    const stor = resolveStorage(sku.skuId, productId, sku).val;
+    const turnover = computeTurnoverDays(shopId, sku.skuId, snapshots).days;
+    const stor = resolveStorage(sku.skuId, productId, sku, turnover).val;
     const tInfo = resolveTannarx(sku.skuId, productId);
     const profitPerUnit = price - commission - logi - stor - tInfo.tannarx;
 
@@ -1356,6 +1386,7 @@ async function buildAiContext(shopId) {
 
   const prod = await fetchLiveShopProducts(shopId);
   const metrics = await computeSkuMetrics(shopId);
+  const snapshots = loadSnapshots(); // B-bosqich: saqlash tarifi uchun aylanma kunlari
   const problems = []; // D0: faol Uzum muammolari
 
   if (prod.ok && metrics.ok) {
@@ -1369,7 +1400,8 @@ async function buildAiContext(shopId) {
         const productId = p.productId;
         const commission = price * (commissionPct(sku.skuId, sku, productId) / 100);
         const logi = resolveLogistics(sku.skuId, productId, sku).val;
-        const stor = resolveStorage(sku.skuId, productId, sku).val;
+        const turnover = computeTurnoverDays(shopId, sku.skuId, snapshots).days;
+        const stor = resolveStorage(sku.skuId, productId, sku, turnover).val;
         const tInfo = resolveTannarx(sku.skuId, productId);
         const profit = price - commission - logi - stor - tInfo.tannarx;
         const margin = price > 0 ? (profit / price) * 100 : 0;
@@ -1619,15 +1651,30 @@ function resolveLogistics(skuId, productId, sku) {
   return { val: 5250, source: 'default', litr: 1 }; // 4.1: hajm kiritilmagan — 1 litr deb hisoblanadi
 }
 
-// 4.2: Saqlash xarajati — Uzum 1 litr = 12 so'm/kun. Hajm bo'lmasa 1 litr deb hisoblanadi (logistika bilan bir xil default).
-const STORAGE_SOM_PER_LITER_DAY = 12;
+// B-bosqich: Uzum BOSQICHLI saqlash tarifi (so'm/litr/kun), aylanma kunlariga qarab.
+// STANDART tarif — maxsus (aksessuar/bolalar kiyimi/poyabzal) pasaytirilgan tariflarni AVTOMATIK
+// aniqlamaymiz (kategoriya taksonomiyasi kerak, xato xavfli). Standart maxsusdan qimmatroq — foydani
+// oshirib ko'rsatmaslik uchun xavfsiz tomon.
+function computeStorageRate(turnoverDays) {
+  if (turnoverDays == null) return 24; // tarix yo'q — eng ehtiyotkor (qimmat) toifa, foydani oshirib yubormaslik uchun
+  if (turnoverDays <= 60) return 0;    // 0-60 kun bepul
+  if (turnoverDays <= 180) return 12;
+  if (turnoverDays <= 360) return 18;
+  return 24;                           // 361+ (Infinity = sotuvsiz ham shu yerga tushadi)
+}
+
+// 4.2 / B-bosqich: Saqlash xarajati — bosqichli tarif × hajm, tovar uchun kuniga maks 5000 so'm.
+// Hajm manbai resolveVolumeL bilan bir xil (qo'lda kiritilgan hajm ustuvor). Alohida "qo'lda saqlash
+// narxi" maydoni yo'q — saqlash doim hajm+tarifdan hisoblanadi. turnoverDays = computeTurnoverDays(...).days.
 const STORAGE_DEFAULT_DAYS = 30;
-function resolveStorage(skuId, productId, sku) {
+const STORAGE_MAX_SOM_PER_ITEM_DAY = 5000; // Uzum: TOVAR uchun kuniga maksimal saqlash (litr uchun emas)
+function resolveStorage(skuId, productId, sku, turnoverDays) {
   const vol = resolveVolumeL(skuId, productId, sku);
   const litr = vol ? vol.litr : 1;
   const source = vol ? vol.source : 'default';
-  const days = STORAGE_DEFAULT_DAYS;
-  return { val: litr * STORAGE_SOM_PER_LITER_DAY * days, source, litr, days };
+  const rate = computeStorageRate(turnoverDays);
+  const perDay = Math.min(litr * rate, STORAGE_MAX_SOM_PER_ITEM_DAY); // 5000 chegara — tovar/kun
+  return { val: perDay * STORAGE_DEFAULT_DAYS, source, litr, days: STORAGE_DEFAULT_DAYS, rate, perDay };
 }
 
 // 3.4/3.5: Tannarx manbai ustuvorligi — SKU qo'lda > SKU turi > mahsulot qo'lda > mahsulot turi > bog'lanmagan
@@ -2606,6 +2653,25 @@ app.get('/api/settings/status', (req, res) => {
   });
 });
 
+// B-bosqich VAQTINCHALIK diagnostika: computeTurnoverDays()ni real SKU'lar uchun to'g'ridan-to'g'ri
+// chaqiradi (proksisiz). Tekshirilgach OLIB TASHLANADI — doimiy endpoint emas.
+app.get('/api/diag/turnover/:shopId', async (req, res) => {
+  const shopId = req.params.shopId;
+  const prod = await fetchLiveShopProducts(shopId);
+  if (!prod.ok) return sendUzumError(res, prod.error);
+  const snapshots = loadSnapshots();
+  const rows = [];
+  prod.products.forEach(p => (p.skuList || []).forEach(sku => {
+    const t = computeTurnoverDays(shopId, sku.skuId, snapshots);
+    rows.push({
+      skuTitle: sku.skuTitle, avail: Math.max(0, sku.availableAmount || 0),
+      turnoverDays: t.days === Infinity ? 'Infinity' : t.days, partial: t.partial, noSales: t.noSales,
+      rate: computeStorageRate(t.days)
+    });
+  }));
+  res.json({ shopId, snapshotDays: Object.keys(snapshots[shopId] || {}).length, count: rows.length, rows });
+});
+
 // Diagnostika: joriy snapshot holatini ko'rsatadi (nechta kun, oxirgi delta)
 app.get('/api/snapshot/status', (req, res) => {
   const snapshots = loadSnapshots();
@@ -2758,6 +2824,7 @@ app.get('/api/all-shops-summary', async (req, res) => {
   const shops = syncedState.shops || [];
   const results = [];
   const typeStats = {}; // typeId -> { sumPrice, sumProfit, count } — uy zaxirasi "sotilsa/foyda" taxmini uchun
+  const snapshots = loadSnapshots(); // B-bosqich: saqlash tarifi uchun aylanma kunlari (barcha do'kon shu obyektda)
   for (const shop of shops) {
     const prod = await fetchLiveShopProducts(shop.shopId);
     if (!prod.ok) { results.push({ shopId: shop.shopId, shopTitle: shop.shopTitle, ok: false, error: prod.error }); continue; }
@@ -2775,7 +2842,8 @@ app.get('/api/all-shops-summary', async (req, res) => {
         const tInfo = resolveTannarx(s.skuId, p.productId);
         const commission = price * (commissionPct(s.skuId, s, p.productId) / 100);
         const logi = resolveLogistics(s.skuId, p.productId, s).val;
-        const stor = resolveStorage(s.skuId, p.productId, s).val;
+        const turnover = computeTurnoverDays(shop.shopId, s.skuId, snapshots).days;
+        const stor = resolveStorage(s.skuId, p.productId, s, turnover).val;
         const profitPerUnit = price - commission - logi - stor - tInfo.tannarx; // reklama kiritilmagan (dona-darajasida ishonchli emas)
 
         stockValueTannarx += avail * tInfo.tannarx;
