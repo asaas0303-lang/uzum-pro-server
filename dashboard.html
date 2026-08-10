@@ -768,7 +768,7 @@ ${urgentSection}
               <input type="checkbox" class="util-item-check mt-0.5" data-idx="${i}">
               <div class="flex flex-col min-w-0">
                 <span class="font-semibold text-slate-200 truncate">akt №${it.returnId} — ${it.productTitle}</span>
-                <span class="text-[9.5px] text-slate-500">${it.shopTitle} · ${new Date(it.returnDate).toLocaleDateString('uz-UZ')} · 🏷 ${it.barcode || "shtrix-kod topilmadi"}</span>
+                <span class="text-[9.5px] text-slate-500">${it.shopTitle} · ${new Date(it.returnDate).toLocaleDateString('uz-UZ')} · 🏷 ${it.barcode || "shtrix-kod topilmadi"} · 📦 ${it.amount || 1} dona</span>
               </div>
             </label>`).join('');
       const hasCompany = !!(c && c.name);

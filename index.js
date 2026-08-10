@@ -530,9 +530,12 @@ async function getUtilizationCandidates() {
 
   return {
     ok: true,
+    // 19-N: amount — normalizeCustomerReturns() dagi it.amount (xom API'da amount===packedAmount,
+    // tasdiqlangan) — nechta dona shu SKU shu aktda utilizatsiya qilinishi kerak.
     items: assembled.map(r => ({
       returnId: r.returnId, skuId: r.skuId, productTitle: r.productTitle,
-      shopTitle: r.shopTitle, returnDate: r.returnDate, barcode: skuCodeMap[r.skuId] || null
+      shopTitle: r.shopTitle, returnDate: r.returnDate, barcode: skuCodeMap[r.skuId] || null,
+      amount: r.amount || 1
     }))
   };
 }
@@ -589,7 +592,11 @@ async function buildUtilizationDocx(company, actNumber, items) {
       new TextRun({ text: `${actNumber}` })
     ] }),
     new Paragraph({ children: [new TextRun({ text: 'Tovarlarning shtrix-kodlari:', bold: true })] }),
-    ...items.map(it => new Paragraph({ text: `- ${it.barcode || "noma'lum"}` })),
+    // 19-N: har shtrix-kod o'z "amount" (dona) sonicha TAKRORLANADI (tasdiqlangan, Uzum qabul qilgan
+    // eski arizadagi format bilan bir xil) — "x4" belgisi EMAS, alohida qatorlar.
+    ...items.flatMap(it => Array(Math.max(1, it.amount || 1)).fill(null).map(() =>
+      new Paragraph({ text: `- ${it.barcode || "noma'lum"}` })
+    )),
     new Paragraph({ text: '' }),
     new Paragraph({
       alignment: AlignmentType.RIGHT,
@@ -2743,8 +2750,11 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
       await sendTelegramMessage(token, chatId, "Hozircha utilizatsiyaga tayyor (\"Berishga tayyor\") tovar yo'q.");
     } else {
       utilizationSessions.set(chatId, { items: cand.items, expiresAt: Date.now() + UTILIZATION_SESSION_TTL_MS });
-      const lines = cand.items.map((it, i) => `${i + 1}. akt №${it.returnId} — ${it.productTitle} (${it.shopTitle})\n   📅 ${new Date(it.returnDate).toLocaleDateString('uz-UZ')} · 🏷 ${it.barcode || "shtrix-kod topilmadi"}`);
-      await sendTelegramMessage(token, chatId, `🗑 *Utilizatsiyaga tayyor tovarlar* (${cand.items.length} ta):\n\n${lines.join('\n\n')}\n\nKerakli akt(lar) RAQAMINI yuboring (masalan: 1 yoki 1,3):`);
+      // 19-N: akt bo'yicha jami dona soni (qulaylik uchun) + har qatorda o'zining dona soni
+      const groups = groupItemsByAct(cand.items);
+      const summaryLines = groups.map(g => `Akt №${g.returnId}: jami ${g.items.reduce((a, it) => a + (it.amount || 1), 0)} dona (${g.items.length} xil SKU)`);
+      const lines = cand.items.map((it, i) => `${i + 1}. akt №${it.returnId} — ${it.productTitle} (${it.shopTitle})\n   📅 ${new Date(it.returnDate).toLocaleDateString('uz-UZ')} · 🏷 ${it.barcode || "shtrix-kod topilmadi"} · 📦 ${it.amount || 1} dona`);
+      await sendTelegramMessage(token, chatId, `🗑 *Utilizatsiyaga tayyor tovarlar* (${cand.items.length} qator, ${groups.length} akt):\n\n${summaryLines.join('\n')}\n\n${lines.join('\n\n')}\n\nKerakli akt(lar) RAQAMINI yuboring (masalan: 1 yoki 1,3):`);
     }
   } else if (text.startsWith('/dashboard')) {
     await sendTelegramMessage(token, chatId, "Uzum Market sotuvchi hisobotlar panelini ochish uchun quyidagi tugmani bosing:", {
@@ -2812,16 +2822,6 @@ app.get('/api/compensation-candidates', async (req, res) => {
 });
 
 // 19-D: ta'minlashlar (yuk xatlari) ro'yxati — dashboard "Ta'minlashlar" bo'limi uchun
-// 19-M VAQTINCHALIK diagnostika: bitta returnId'ning XOM (normalizatsiyalanmagan) /v1/return yozuvini
-// ko'rsatadi — returnItems[] ichida amount/packedAmount maydonlarini aniqlash uchun. Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/raw-return/:returnId', async (req, res) => {
-  const returnId = req.params.returnId;
-  const ret = await fetchAllReturns();
-  if (!ret.ok) return sendUzumError(res, ret.error);
-  const found = ret.raw.find(r => String(r.id) === String(returnId));
-  res.json({ found: !!found, raw: found });
-});
-
 app.get('/api/invoices', async (req, res) => {
   const result = await computeInvoicesSummary();
   if (!result.ok) return sendUzumError(res, result.error);
