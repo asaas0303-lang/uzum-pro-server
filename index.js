@@ -2771,6 +2771,23 @@ app.get('/api/compensation-candidates', async (req, res) => {
 });
 
 // 19-D: ta'minlashlar (yuk xatlari) ro'yxati — dashboard "Ta'minlashlar" bo'limi uchun
+// 19-K VAQTINCHALIK diagnostika: bitta SKU'ning XOM (normalizatsiyalanmagan) Uzum javobini ko'rsatadi —
+// skuCode qaysi xom maydondan (sellerItemCode/article/barcode) kelayotganini aniqlash uchun. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/raw-sku/:shopId/:skuId', async (req, res) => {
+  const { shopId, skuId } = req.params;
+  const headers = getGetHeaders(req);
+  if (Object.keys(headers).length === 0) return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
+  const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/product/shop/${shopId}?page=0&size=100`, { headers });
+  if (!response.ok) return sendUzumError(res, `Uzum ${response.status}`);
+  const data = await response.json();
+  const list = data.productList || data.payload || [];
+  let found = null;
+  (Array.isArray(list) ? list : []).forEach(p => (p.skuList || []).forEach(s => {
+    if (String(s.skuId) === String(skuId)) found = s;
+  }));
+  res.json({ found: !!found, raw: found });
+});
+
 app.get('/api/invoices', async (req, res) => {
   const result = await computeInvoicesSummary();
   if (!result.ok) return sendUzumError(res, result.error);
