@@ -755,22 +755,33 @@ ${urgentSection}
         return;
       }
 
-      state.utilizationCandidates = candidates;
-      body.innerHTML = renderUtilizationModalBody(companyInfo, candidates);
+      // 19-O: checkbox ro'yxati endi har SKU emas, HAR AKT (returnId) uchun bitta qator.
+      const actsMap = {};
+      candidates.forEach(it => { (actsMap[it.returnId] = actsMap[it.returnId] || []).push(it); });
+      const acts = Object.keys(actsMap).map(returnId => ({ returnId, items: actsMap[returnId] }));
+
+      state.utilizationActs = acts;
+      body.innerHTML = renderUtilizationModalBody(companyInfo, acts);
       lucide.createIcons();
     }
 
-    function renderUtilizationModalBody(c, items) {
-      const rows = items.length === 0
+    function renderUtilizationModalBody(c, acts) {
+      const rows = acts.length === 0
         ? `<div class="text-[11px] text-slate-500 text-center py-3">Hozircha utilizatsiyaga tayyor ("Berishga tayyor") tovar yo'q.</div>`
-        : items.map((it, i) => `
+        : acts.map((g, i) => {
+            const totalAmount = g.items.reduce((a, it) => a + (it.amount || 1), 0);
+            const titles = [...new Set(g.items.map(it => it.productTitle))];
+            const productLabel = titles.length === 1 ? titles[0] : `${titles.length} xil mahsulot`;
+            const first = g.items[0];
+            return `
             <label class="flex items-start gap-2 p-2 rounded-lg bg-darkBg border border-darkBorder text-[11px] cursor-pointer">
               <input type="checkbox" class="util-item-check mt-0.5" data-idx="${i}">
               <div class="flex flex-col min-w-0">
-                <span class="font-semibold text-slate-200 truncate">akt №${it.returnId} — ${it.productTitle}</span>
-                <span class="text-[9.5px] text-slate-500">${it.shopTitle} · ${new Date(it.returnDate).toLocaleDateString('uz-UZ')} · 🏷 ${it.barcode || "shtrix-kod topilmadi"} · 📦 ${it.amount || 1} dona</span>
+                <span class="font-semibold text-slate-200 truncate">akt №${g.returnId} — ${productLabel}</span>
+                <span class="text-[9.5px] text-slate-500">${first.shopTitle} · ${new Date(first.returnDate).toLocaleDateString('uz-UZ')} · 📦 ${g.items.length} xil SKU, jami ${totalAmount} dona</span>
               </div>
-            </label>`).join('');
+            </label>`;
+          }).join('');
       const hasCompany = !!(c && c.name);
 
       return `
@@ -814,28 +825,22 @@ ${urgentSection}
       }
     }
 
-    // 19-K: har akt (returnId) uchun ALOHIDA .docx — Uzum qoidasi. Tanlangan qatorlar returnId
-    // bo'yicha guruhlanadi, har guruh uchun /api/utilization/generate alohida chaqiriladi va
-    // alohida fayl yuklab olinadi (bitta faylga birlashtirilmaydi).
+    // 19-O: checkbox endi bitta AKT — tanlangan har akt uchun (o'zining barcha SKU'lari bilan)
+    // /api/utilization/generate alohida chaqiriladi, alohida fayl yuklab olinadi.
     async function generateUtilizationDocx() {
       const checks = document.querySelectorAll('.util-item-check:checked');
       if (checks.length === 0) { alert("Kamida bitta akt tanlang."); return; }
-      const selected = [...checks].map(ch => {
-        const it = state.utilizationCandidates[Number(ch.dataset.idx)];
-        return { returnId: it.returnId, skuId: it.skuId };
-      });
-      const groups = {};
-      selected.forEach(s => { (groups[s.returnId] = groups[s.returnId] || []).push(s); });
-      const returnIds = Object.keys(groups);
+      const selectedActs = [...checks].map(ch => state.utilizationActs[Number(ch.dataset.idx)]);
       try {
-        for (const returnId of returnIds) {
-          const res = await fetch('/api/utilization/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: groups[returnId] }) });
-          if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(`Akt №${returnId}: ` + (err.error || ('HTTP ' + res.status))); }
+        for (const act of selectedActs) {
+          const items = act.items.map(it => ({ returnId: it.returnId, skuId: it.skuId }));
+          const res = await fetch('/api/utilization/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
+          if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(`Akt №${act.returnId}: ` + (err.error || ('HTTP ' + res.status))); }
           const blob = await res.blob();
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          a.download = `Utilizatsiya_${returnId}.docx`;
+          a.download = `Utilizatsiya_${act.returnId}.docx`;
           document.body.appendChild(a);
           a.click();
           a.remove();

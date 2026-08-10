@@ -2669,19 +2669,19 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
   const chatId = message.chat.id;
   const text = message.text.trim();
 
-  // 19-J: /utilizatsiya ro'yxati ko'rsatilgandan keyin kelgan "raqam(lar)" javobi — akt tanlash.
+  // 19-O: /utilizatsiya ro'yxati ko'rsatilgandan keyin kelgan "raqam(lar)" javobi — endi RAQAM = AKT
+  // (SKU emas). Session'da har element allaqachon bitta aktning barcha SKU'lari (guruhlangan).
   const utilSession = utilizationSessions.get(chatId);
   if (utilSession && Date.now() < utilSession.expiresAt && /^[\d,\s]+$/.test(text)) {
     const nums = [...new Set(text.split(/[,\s]+/).filter(Boolean).map(Number))];
-    const valid = nums.filter(n => n >= 1 && n <= utilSession.items.length);
+    const valid = nums.filter(n => n >= 1 && n <= utilSession.acts.length);
     if (valid.length === 0) {
-      await sendTelegramMessage(token, chatId, `Noto'g'ri raqam. Ro'yxatdan 1-${utilSession.items.length} oralig'ida raqam(lar) yuboring (masalan: 1 yoki 1,3).`);
+      await sendTelegramMessage(token, chatId, `Noto'g'ri raqam. Ro'yxatdan 1-${utilSession.acts.length} oralig'ida raqam(lar) yuboring (masalan: 1 yoki 1,3).`);
       return;
     }
-    const selected = valid.map(n => utilSession.items[n - 1]);
+    const groups = valid.map(n => utilSession.acts[n - 1]);
     utilizationSessions.delete(chatId);
     // 19-K: har akt (returnId) uchun ALOHIDA .docx — Uzum qoidasi, bitta faylga birlashtirilmaydi.
-    const groups = groupItemsByAct(selected);
     await sendTelegramMessage(token, chatId, `📄 ${groups.length} ta akt uchun ariza(lar) tayyorlanmoqda...`);
     for (const g of groups) {
       const buffer = await buildUtilizationDocx(syncedState.companyInfo, g.returnId, g.items);
@@ -2741,7 +2741,7 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
     // 18-D1: oylik aylanma maqsadi holati
     await sendTelegramMessage(token, chatId, await maqsadCommandText());
   } else if (text.startsWith('/utilizatsiya')) {
-    // 19-J: utilizatsiyaga tayyor (ASSEMBLED) tovarlar ro'yxati — raqam bilan tanlab .docx olish
+    // 19-O: utilizatsiyaga tayyor (ASSEMBLED) AKTLAR ro'yxati — endi har SKU emas, HAR AKT bitta qator.
     await sendTelegramMessage(token, chatId, "🔍 Utilizatsiyaga tayyor tovarlar qidirilmoqda...");
     const cand = await getUtilizationCandidates();
     if (!cand.ok) {
@@ -2749,12 +2749,16 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
     } else if (cand.items.length === 0) {
       await sendTelegramMessage(token, chatId, "Hozircha utilizatsiyaga tayyor (\"Berishga tayyor\") tovar yo'q.");
     } else {
-      utilizationSessions.set(chatId, { items: cand.items, expiresAt: Date.now() + UTILIZATION_SESSION_TTL_MS });
-      // 19-N: akt bo'yicha jami dona soni (qulaylik uchun) + har qatorda o'zining dona soni
-      const groups = groupItemsByAct(cand.items);
-      const summaryLines = groups.map(g => `Akt №${g.returnId}: jami ${g.items.reduce((a, it) => a + (it.amount || 1), 0)} dona (${g.items.length} xil SKU)`);
-      const lines = cand.items.map((it, i) => `${i + 1}. akt №${it.returnId} — ${it.productTitle} (${it.shopTitle})\n   📅 ${new Date(it.returnDate).toLocaleDateString('uz-UZ')} · 🏷 ${it.barcode || "shtrix-kod topilmadi"} · 📦 ${it.amount || 1} dona`);
-      await sendTelegramMessage(token, chatId, `🗑 *Utilizatsiyaga tayyor tovarlar* (${cand.items.length} qator, ${groups.length} akt):\n\n${summaryLines.join('\n')}\n\n${lines.join('\n\n')}\n\nKerakli akt(lar) RAQAMINI yuboring (masalan: 1 yoki 1,3):`);
+      const acts = groupItemsByAct(cand.items);
+      utilizationSessions.set(chatId, { acts, expiresAt: Date.now() + UTILIZATION_SESSION_TTL_MS });
+      const lines = acts.map((g, i) => {
+        const totalAmount = g.items.reduce((a, it) => a + (it.amount || 1), 0);
+        const titles = [...new Set(g.items.map(it => it.productTitle))];
+        const productLabel = titles.length === 1 ? titles[0] : `${titles.length} xil mahsulot`;
+        const first = g.items[0];
+        return `${i + 1}. akt №${g.returnId} — ${productLabel} (${first.shopTitle})\n   📅 ${new Date(first.returnDate).toLocaleDateString('uz-UZ')} · 📦 ${g.items.length} xil SKU, jami ${totalAmount} dona`;
+      });
+      await sendTelegramMessage(token, chatId, `🗑 *Utilizatsiyaga tayyor aktlar* (${acts.length} ta):\n\n${lines.join('\n\n')}\n\nKerakli akt(lar) RAQAMINI yuboring (masalan: 1 yoki 1,3):`);
     }
   } else if (text.startsWith('/dashboard')) {
     await sendTelegramMessage(token, chatId, "Uzum Market sotuvchi hisobotlar panelini ochish uchun quyidagi tugmani bosing:", {
