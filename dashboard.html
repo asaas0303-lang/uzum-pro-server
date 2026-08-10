@@ -733,6 +733,112 @@ ${urgentSection}
       document.getElementById('modal-container').classList.add('hidden');
     }
 
+    // 19-J: Utilizatsiya arizasi modal — rekvizit (bir marta) + tayyor akt ro'yxati (checkbox) + .docx generatsiya.
+    // Bot bilan bir xil backend (/api/company-info, /api/utilization/candidates, /api/utilization/generate).
+    async function openUtilizationModal() {
+      const modal = document.getElementById('modal-container');
+      const title = document.getElementById('modal-title');
+      const body = document.getElementById('modal-body');
+      title.textContent = "Utilizatsiya arizasi";
+      modal.classList.remove('hidden');
+      body.innerHTML = `<div class="text-xs text-slate-400 text-center py-6">Yuklanmoqda...</div>`;
+
+      let companyInfo = {};
+      try { companyInfo = await fetchFromProxy('/api/company-info'); } catch (e) { console.error("Rekvizit yuklashda xato:", e); }
+
+      let candidates = [];
+      try {
+        const cand = await fetchFromProxy('/api/utilization/candidates');
+        candidates = cand.items || [];
+      } catch (e) {
+        body.innerHTML = `<div class="text-xs text-rose-400 text-center py-6">Xato: ${e.message}</div>`;
+        return;
+      }
+
+      state.utilizationCandidates = candidates;
+      body.innerHTML = renderUtilizationModalBody(companyInfo, candidates);
+      lucide.createIcons();
+    }
+
+    function renderUtilizationModalBody(c, items) {
+      const rows = items.length === 0
+        ? `<div class="text-[11px] text-slate-500 text-center py-3">Hozircha utilizatsiyaga tayyor ("Berishga tayyor") tovar yo'q.</div>`
+        : items.map((it, i) => `
+            <label class="flex items-start gap-2 p-2 rounded-lg bg-darkBg border border-darkBorder text-[11px] cursor-pointer">
+              <input type="checkbox" class="util-item-check mt-0.5" data-idx="${i}">
+              <div class="flex flex-col min-w-0">
+                <span class="font-semibold text-slate-200 truncate">akt №${it.returnId} — ${it.productTitle}</span>
+                <span class="text-[9.5px] text-slate-500">${it.shopTitle} · ${new Date(it.returnDate).toLocaleDateString('uz-UZ')} · 🏷 ${it.barcode || "shtrix-kod topilmadi"}</span>
+              </div>
+            </label>`).join('');
+      const hasCompany = !!(c && c.name);
+
+      return `
+        <div class="flex flex-col gap-4">
+          <details class="rounded-xl border border-darkBorder" ${hasCompany ? '' : 'open'}>
+            <summary class="p-2.5 text-xs font-semibold text-slate-300 cursor-pointer">🏢 Rekvizitlar ${hasCompany ? '(saqlangan — o\'zgartirish uchun bosing)' : "(to'ldirilmagan)"}</summary>
+            <div class="p-2.5 pt-0 flex flex-col gap-2">
+              <input type="text" id="util-name" value="${c.name || ''}" placeholder="Tashkilot nomi" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <input type="text" id="util-inn" value="${c.inn || ''}" placeholder="STIR" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <input type="text" id="util-address" value="${c.address || ''}" placeholder="Manzil" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <input type="text" id="util-bank" value="${c.bank || ''}" placeholder="Bank nomi" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <input type="text" id="util-account" value="${c.account || ''}" placeholder="Hisob raqami" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <input type="text" id="util-mfo" value="${c.mfo || ''}" placeholder="MFO" class="p-2 rounded-lg bg-darkBg border border-darkBorder text-xs text-slate-200">
+              <button onclick="saveCompanyInfo()" class="text-xs bg-slate-800 border border-slate-700 text-slate-300 py-1.5 rounded-lg font-medium hover:bg-slate-700">Rekvizitlarni saqlash</button>
+            </div>
+          </details>
+
+          <div class="flex flex-col gap-2 max-h-[300px] overflow-y-auto">
+            ${rows}
+          </div>
+
+          <button onclick="generateUtilizationDocx()" class="w-full bg-brand text-xs font-bold py-2.5 rounded-xl text-darkBg badge-glow hover:bg-brandDark transition">📄 Ariza yaratish (.docx)</button>
+        </div>`;
+    }
+
+    async function saveCompanyInfo() {
+      const payload = {
+        name: document.getElementById('util-name').value.trim(),
+        inn: document.getElementById('util-inn').value.trim(),
+        address: document.getElementById('util-address').value.trim(),
+        bank: document.getElementById('util-bank').value.trim(),
+        account: document.getElementById('util-account').value.trim(),
+        mfo: document.getElementById('util-mfo').value.trim()
+      };
+      try {
+        const res = await fetch('/api/company-info', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        alert("Rekvizitlar saqlandi.");
+      } catch (e) {
+        alert("Xato: " + e.message);
+      }
+    }
+
+    async function generateUtilizationDocx() {
+      const checks = document.querySelectorAll('.util-item-check:checked');
+      if (checks.length === 0) { alert("Kamida bitta akt tanlang."); return; }
+      const items = [...checks].map(ch => {
+        const it = state.utilizationCandidates[Number(ch.dataset.idx)];
+        return { returnId: it.returnId, skuId: it.skuId };
+      });
+      try {
+        const res = await fetch('/api/utilization/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
+        if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || ('HTTP ' + res.status)); }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `utilizatsiya-arizasi-${new Date().toISOString().slice(0, 10)}.docx`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        closeModal();
+      } catch (e) {
+        alert("Xato: " + e.message);
+      }
+    }
+
     // Shop functions
     function renderShopPills() {
       const container = document.getElementById('shop-pills');
@@ -2338,6 +2444,7 @@ ${urgentSection}
               }).join('')}
             </div>
             <div class="text-[9.5px] text-slate-500 mt-2">📊 Manba: Uzum yuk xatlari. "Yo'lda" = uy zaxirasidan ayirilib, Uzum omboriga jo'natilgan.</div>
+            <button onclick="openUtilizationModal()" class="mt-2.5 w-full bg-darkBg border border-darkBorder text-slate-300 hover:border-rose-500/50 hover:text-rose-300 text-[11px] font-semibold py-2 rounded-lg transition">🗑️ Utilizatsiya arizasi yarat</button>
           </div>
         </div>`;
     }

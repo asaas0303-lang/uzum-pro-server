@@ -5,6 +5,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import cron from 'node-cron';
+import { Document, Packer, Paragraph, TextRun } from 'docx';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -201,12 +202,14 @@ let syncedState = {
   withdrawals: [], // { id, date, amount, shopId?, note, status: 'kutilmoqda'|'keldi' } — Uzum'dan yechib olingan pul
   userExpenses: [], // { id, date, amount, category, note } — real xarajatlar (ijara/ish haqi/transport...). "expenses" nomi Uzum uchun band.
   credits: [], // { id, name, totalAmount, remainingAmount, monthlyPayment, nextPaymentDate:'YYYY-MM-DD', interestRate?, endDate?, remainingPayments?, type:'fixed'|'decreasing'|'annuity', note } — eski kreditlarda paymentDay (1-28) bo'lishi mumkin, creditDaysUntilDue() orqaga moslikni saqlaydi
-  goals: [] // { id, type:'monthly_turnover', target, createdDate, milestones:[] } — moliyaviy maqsad
+  goals: [], // { id, type:'monthly_turnover', target, createdDate, milestones:[] } — moliyaviy maqsad
+  // 19-J: Utilizatsiya arizasi uchun rekvizitlar — bir marta kiritiladi, diskda saqlanadi.
+  companyInfo: { name: '', inn: '', address: '', bank: '', account: '', mfo: '' }
 };
 
 // Faqat foydalanuvchi sozlamalari diskda saqlanadi (2.1: sotuv/mahsulot ma'lumoti jonli tortiladi, saqlanmaydi)
 // 18-A: moliya ma'lumotlari (withdrawals/userExpenses/credits/goals) ham SHU YERDA — mavjud himoya ostida saqlanadi.
-const SETTINGS_KEYS = ['productTypes', 'skuMappings', 'costs', 'shops', 'activeShop', 'productSettings', 'withdrawals', 'userExpenses', 'credits', 'goals'];
+const SETTINGS_KEYS = ['productTypes', 'skuMappings', 'costs', 'shops', 'activeShop', 'productSettings', 'withdrawals', 'userExpenses', 'credits', 'goals', 'companyInfo'];
 const SETTINGS_BACKUP_FILE = path.join(DATA_DIR, 'settings.backup.json');
 const SETTINGS_BACKUP_RETENTION_DAYS = 7;
 
@@ -493,6 +496,74 @@ function normalizeCustomerReturns(data, shopIdFilter) {
     }
   });
   return { payload: rows };
+}
+
+// 19-J: /v1/return barcha sahifalarini yig'adi (fetchAllInvoices bilan bir xil naqsh) — bitta sahifa
+// (page=0,size=50) yetarli bo'lmasligi mumkin, chunki bitta "return" bir nechta SKU tarkib topishi mumkin.
+async function fetchAllReturns() {
+  const all = [];
+  for (let page = 0; page < 40; page++) {
+    const r = await uzumGet(`/v1/return?page=${page}&size=50`, process.env.UZUM_TOKEN);
+    if (!r.ok) { if (all.length) break; return { ok: false, error: r.error || `Uzum ${r.status}` }; }
+    const list = Array.isArray(r.data) ? r.data : (r.data && r.data.payload) || [];
+    all.push(...list);
+    if (list.length < 50) break;
+  }
+  return { ok: true, raw: all };
+}
+
+// 19-J: Utilizatsiyaga TAYYOR (ASSEMBLED — "Berishga tayyor") qaytarishlar, barcha sozlangan do'konlar
+// bo'yicha, shtrix-kod (skuCode) bilan birga. Status oqimi: COMPLETED (qaytdi) -> ASSEMBLED (tayyor) ->
+// UTILIZED (ariza qabul qilingan). Akt raqami = returnId, XOM holida (kesilmaydi — 19-I diagnostikada
+// tasdiqlangan: 10 xonali returnId'lar ham to'liq holida qabul qilinadi).
+async function getUtilizationCandidates() {
+  const ret = await fetchAllReturns();
+  if (!ret.ok) return { ok: false, error: ret.error };
+  const assembled = normalizeCustomerReturns(ret.raw, null).payload.filter(r => r.status === 'ASSEMBLED');
+
+  const skuCodeMap = {};
+  for (const shop of (syncedState.shops || [])) {
+    const prod = await fetchLiveShopProducts(shop.shopId);
+    if (!prod.ok) continue;
+    prod.products.forEach(p => (p.skuList || []).forEach(s => { skuCodeMap[s.skuId] = s.skuCode; }));
+  }
+
+  return {
+    ok: true,
+    items: assembled.map(r => ({
+      returnId: r.returnId, skuId: r.skuId, productTitle: r.productTitle,
+      shopTitle: r.shopTitle, returnDate: r.returnDate, barcode: skuCodeMap[r.skuId] || null
+    }))
+  };
+}
+
+// 19-J: Utilizatsiya arizasi .docx — foydalanuvchi bergan namuna formatida (rekvizit + akt/shtrix-kod
+// ro'yxati + sana, imzo/muhr uchun bo'sh joy). Bot va dashboard BIR XIL shu funksiyani ishlatadi.
+async function buildUtilizationDocx(company, items) {
+  const c = company || {};
+  const [yyyy, mm, dd] = todayTashkent().split('-');
+  const todayDisplay = `${dd}.${mm}.${yyyy}`;
+  const blank = '_______________________';
+
+  const paragraphs = [
+    new Paragraph({ children: [new TextRun({ text: `Kimdan: ${c.name || blank}`, bold: true })] }),
+    new Paragraph({ text: `STIR: ${c.inn || blank}` }),
+    new Paragraph({ text: `Manzil: ${c.address || blank}` }),
+    new Paragraph({ text: `Bank: ${c.bank || blank}` }),
+    new Paragraph({ text: `Hisob raqami: ${c.account || blank}` }),
+    new Paragraph({ text: `MFO: ${c.mfo || blank}` }),
+    new Paragraph({ text: '' }),
+    new Paragraph({ text: `Sizdan quyidagi tovarlarni utilizatsiya qilishni so'raymiz:` }),
+    new Paragraph({ text: '' }),
+    ...items.map(it => new Paragraph({ text: `akt № ${it.returnId} — shtrix-kod ${it.barcode || "noma'lum"}` })),
+    new Paragraph({ text: '' }),
+    new Paragraph({ text: `Sana: ${todayDisplay}` }),
+    new Paragraph({ text: '' }),
+    new Paragraph({ text: `Imzo: ${blank}` }),
+    new Paragraph({ text: `Muhr: ${blank}` })
+  ];
+  const doc = new Document({ sections: [{ children: paragraphs }] });
+  return Packer.toBuffer(doc);
 }
 
 // Uzum finance endpointlari sanani epoch millisekundda kutadi (YYYY-MM-DD emas).
@@ -1130,6 +1201,20 @@ app.post('/api/finance-data', (req, res) => {
   res.json({ success: true, withdrawals: syncedState.withdrawals.length, userExpenses: syncedState.userExpenses.length, credits: syncedState.credits.length, goals: syncedState.goals.length });
 });
 
+// 19-J: Utilizatsiya arizasi rekvizitlari — bir marta kiritiladi (nomi/STIR/manzil/bank/hisob/MFO).
+app.get('/api/company-info', (req, res) => {
+  res.json(syncedState.companyInfo || {});
+});
+app.post('/api/company-info', (req, res) => {
+  const { name, inn, address, bank, account, mfo } = req.body || {};
+  syncedState.companyInfo = {
+    name: name || '', inn: inn || '', address: address || '',
+    bank: bank || '', account: account || '', mfo: mfo || ''
+  };
+  saveSettings();
+  res.json({ success: true, companyInfo: syncedState.companyInfo });
+});
+
 // XAVFSIZLIK DIAGNOSTIKASI (vaqtinchalik): zaxira faylining moliya kalitlarini FAQAT O'QIYDI —
 // syncedState'ga TEGMAYDI, saveSettings() chaqirmaydi. /restore'dan farqli — bu hech narsani yozmaydi.
 app.get('/api/settings/backup-peek', (req, res) => {
@@ -1604,6 +1689,26 @@ async function sendTelegramMessage(token, chatId, text, replyMarkup = null) {
   } catch (err) {
     console.error("[TG] sendMessage exception:", err);
     return { ok: false, exception: err.message, chatIdSent: chatId };
+  }
+}
+
+// 19-J: Telegram sendDocument — .docx fayl yuborish uchun (multipart/form-data, Node native FormData/Blob).
+async function sendTelegramDocument(token, chatId, buffer, filename, caption) {
+  try {
+    const form = new FormData();
+    form.append('chat_id', String(chatId));
+    if (caption) form.append('caption', caption);
+    form.append('document', new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }), filename);
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: form });
+    const data = await response.json();
+    if (!data.ok) {
+      console.error(`[TG] sendDocument RAD ETILDI:`, JSON.stringify(data));
+      return { ok: false, description: data.description };
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error("[TG] sendDocument exception:", err);
+    return { ok: false, exception: err.message };
   }
 }
 
@@ -2229,6 +2334,11 @@ async function computeInvoicesSummary() {
 // 19-B: yangi CREATED yuk xatlari uchun uy zaxirasidan AVTOMATIK ayirish (tasdiq so'ramasdan, lekin aniq xabar bilan),
 // va ACCEPTED holatga o'tganida alohida xabar (zaxiraga tegmasdan). Holat invoice_state.json'da — takror ayirmaslik.
 // Birinchi ishga tushishda (fayl yo'q) — barcha mavjud yuk xatlari BAZAVIY deb belgilanadi (ayirish/xabar YO'Q).
+// 19-J: /utilizatsiya — foydalanuvchi ro'yxatdan raqam(lar) bilan tanlaguncha, chatId bo'yicha
+// vaqtinchalik xotira (xotirada, diskga yozilmaydi — qisqa umrli tanlov holati).
+const utilizationSessions = new Map(); // chatId -> { items, expiresAt }
+const UTILIZATION_SESSION_TTL_MS = 10 * 60 * 1000;
+
 let invoiceSyncInProgress = false; // 19-C: kunlik va 20-daqiqalik cron bir vaqtda ustma-ust tushmasin (bir xil invoice_state.json'ni o'qib-yozadi)
 async function runInvoiceSync() {
   if (invoiceSyncInProgress) {
@@ -2515,6 +2625,24 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
   const chatId = message.chat.id;
   const text = message.text.trim();
 
+  // 19-J: /utilizatsiya ro'yxati ko'rsatilgandan keyin kelgan "raqam(lar)" javobi — akt tanlash.
+  const utilSession = utilizationSessions.get(chatId);
+  if (utilSession && Date.now() < utilSession.expiresAt && /^[\d,\s]+$/.test(text)) {
+    const nums = [...new Set(text.split(/[,\s]+/).filter(Boolean).map(Number))];
+    const valid = nums.filter(n => n >= 1 && n <= utilSession.items.length);
+    if (valid.length === 0) {
+      await sendTelegramMessage(token, chatId, `Noto'g'ri raqam. Ro'yxatdan 1-${utilSession.items.length} oralig'ida raqam(lar) yuboring (masalan: 1 yoki 1,3).`);
+      return;
+    }
+    const selected = valid.map(n => utilSession.items[n - 1]);
+    utilizationSessions.delete(chatId);
+    await sendTelegramMessage(token, chatId, `📄 Ariza tayyorlanmoqda (${selected.length} ta akt)...`);
+    const buffer = await buildUtilizationDocx(syncedState.companyInfo, selected);
+    const sent = await sendTelegramDocument(token, chatId, buffer, `utilizatsiya-arizasi-${todayTashkent()}.docx`, `Aktlar: ${selected.map(s => s.returnId).join(', ')}`);
+    if (!sent.ok) await sendTelegramMessage(token, chatId, `⚠️ Fayl yuborilmadi: ${sent.description || sent.exception || 'noma\'lum xato'}`);
+    return;
+  }
+
   if (text.startsWith('/start')) {
     const replyText = `🟣 *Uzum Pro Dashboard — Telegram Mini App + Bot*
 
@@ -2525,6 +2653,7 @@ Mavjud buyruqlar:
 /moliya — Naqd oqim: bu oy foyda/zarar, xarajat, kredit, proyeksiya.
 /maslahat — AI moliyaviy murabbiy: bugungi 3 ta ish + Xitoy buyurtma.
 /maqsad — Oylik aylanma maqsadi va unga qanchalik yaqinligingiz.
+/utilizatsiya — Utilizatsiyaga tayyor tovarlar uchun ariza (.docx) yaratish.
 /dashboard — Do'konni vizual boshqarish va AI maslahat xonasi.
 
 Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz mumkin.`;
@@ -2563,6 +2692,19 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
   } else if (text.startsWith('/maqsad')) {
     // 18-D1: oylik aylanma maqsadi holati
     await sendTelegramMessage(token, chatId, await maqsadCommandText());
+  } else if (text.startsWith('/utilizatsiya')) {
+    // 19-J: utilizatsiyaga tayyor (ASSEMBLED) tovarlar ro'yxati — raqam bilan tanlab .docx olish
+    await sendTelegramMessage(token, chatId, "🔍 Utilizatsiyaga tayyor tovarlar qidirilmoqda...");
+    const cand = await getUtilizationCandidates();
+    if (!cand.ok) {
+      await sendTelegramMessage(token, chatId, `⚠️ Ma'lumot olinmadi: ${cand.error}`);
+    } else if (cand.items.length === 0) {
+      await sendTelegramMessage(token, chatId, "Hozircha utilizatsiyaga tayyor (\"Berishga tayyor\") tovar yo'q.");
+    } else {
+      utilizationSessions.set(chatId, { items: cand.items, expiresAt: Date.now() + UTILIZATION_SESSION_TTL_MS });
+      const lines = cand.items.map((it, i) => `${i + 1}. akt №${it.returnId} — ${it.productTitle} (${it.shopTitle})\n   📅 ${new Date(it.returnDate).toLocaleDateString('uz-UZ')} · 🏷 ${it.barcode || "shtrix-kod topilmadi"}`);
+      await sendTelegramMessage(token, chatId, `🗑 *Utilizatsiyaga tayyor tovarlar* (${cand.items.length} ta):\n\n${lines.join('\n\n')}\n\nKerakli akt(lar) RAQAMINI yuboring (masalan: 1 yoki 1,3):`);
+    }
   } else if (text.startsWith('/dashboard')) {
     await sendTelegramMessage(token, chatId, "Uzum Market sotuvchi hisobotlar panelini ochish uchun quyidagi tugmani bosing:", {
       inline_keyboard: [[
@@ -2633,6 +2775,26 @@ app.get('/api/invoices', async (req, res) => {
   const result = await computeInvoicesSummary();
   if (!result.ok) return sendUzumError(res, result.error);
   res.json(result);
+});
+
+// 19-J: Dashboard — utilizatsiya arizasi (bot bilan bir xil backend funksiyalari).
+app.get('/api/utilization/candidates', async (req, res) => {
+  const result = await getUtilizationCandidates();
+  if (!result.ok) return sendUzumError(res, result.error);
+  res.json(result);
+});
+app.post('/api/utilization/generate', async (req, res) => {
+  const selected = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (selected.length === 0) return res.status(400).json({ error: "Hech qanday akt tanlanmadi" });
+  const cand = await getUtilizationCandidates();
+  if (!cand.ok) return sendUzumError(res, cand.error);
+  const wanted = new Set(selected.map(s => `${s.returnId}:${s.skuId}`));
+  const items = cand.items.filter(it => wanted.has(`${it.returnId}:${it.skuId}`));
+  if (items.length === 0) return res.status(404).json({ error: "Tanlangan aktlar topilmadi (ehtimol allaqachon utilizatsiya qilingan)" });
+  const buffer = await buildUtilizationDocx(syncedState.companyInfo, items);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  res.setHeader('Content-Disposition', `attachment; filename="utilizatsiya-arizasi-${todayTashkent()}.docx"`);
+  res.send(buffer);
 });
 
 // Diagnostika: snapshotni qo'lda darhol oladi (cron kutmasdan sinash uchun)
@@ -2904,6 +3066,7 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
         { command: 'moliya', description: "Naqd oqim: foyda/zarar, xarajat, kredit" },
         { command: 'maslahat', description: "AI murabbiy: bugungi ishlar va tavsiyalar" },
         { command: 'maqsad', description: "Aylanma maqsadi va unga yaqinlik" },
+        { command: 'utilizatsiya', description: "Utilizatsiya arizasi (.docx) yaratish" },
         { command: 'dashboard', description: "Mini App ochish" }
       ];
       const response = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
