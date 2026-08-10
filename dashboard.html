@@ -2397,6 +2397,9 @@ ${urgentSection}
           <!-- 19-D: Ta'minlashlar (yuk xatlari ro'yxati) -->
           ${invoicesHTML()}
 
+          <!-- 19-J FIX: Utilizatsiya arizasi — mustaqil karta, state.invoices holatidan qat'iy nazar har doim ko'rinadi -->
+          ${utilizationCardHTML()}
+
         </div>
       `;
       lucide.createIcons();
@@ -2444,8 +2447,18 @@ ${urgentSection}
               }).join('')}
             </div>
             <div class="text-[9.5px] text-slate-500 mt-2">📊 Manba: Uzum yuk xatlari. "Yo'lda" = uy zaxirasidan ayirilib, Uzum omboriga jo'natilgan.</div>
-            <button onclick="openUtilizationModal()" class="mt-2.5 w-full bg-darkBg border border-darkBorder text-slate-300 hover:border-rose-500/50 hover:text-rose-300 text-[11px] font-semibold py-2 rounded-lg transition">🗑️ Utilizatsiya arizasi yarat</button>
           </div>
+        </div>`;
+    }
+
+    // 19-J FIX: Utilizatsiya arizasi — mustaqil karta, invoicesHTML()dan chiqarildi (u state.invoices
+    // bo'sh bo'lsa '' qaytarardi va tugma shu bilan birga yashirinardi). HAR DOIM ko'rinadi.
+    function utilizationCardHTML() {
+      return `
+        <div class="bg-darkCard border border-darkBorder rounded-2xl p-3.5 mb-3">
+          <span class="text-xs font-bold text-slate-200">🗑️ Utilizatsiya arizasi</span>
+          <button onclick="openUtilizationModal()" class="mt-2.5 w-full bg-darkBg border border-darkBorder text-slate-300 hover:border-rose-500/50 hover:text-rose-300 text-[11px] font-semibold py-2 rounded-lg transition">🗑️ Utilizatsiya arizasi yarat</button>
+          <div class="text-[9.5px] text-slate-500 mt-2 text-center">Rekvizitlar va akt tanlash shu yerda</div>
         </div>`;
     }
 
