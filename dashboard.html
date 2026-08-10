@@ -814,25 +814,34 @@ ${urgentSection}
       }
     }
 
+    // 19-K: har akt (returnId) uchun ALOHIDA .docx — Uzum qoidasi. Tanlangan qatorlar returnId
+    // bo'yicha guruhlanadi, har guruh uchun /api/utilization/generate alohida chaqiriladi va
+    // alohida fayl yuklab olinadi (bitta faylga birlashtirilmaydi).
     async function generateUtilizationDocx() {
       const checks = document.querySelectorAll('.util-item-check:checked');
       if (checks.length === 0) { alert("Kamida bitta akt tanlang."); return; }
-      const items = [...checks].map(ch => {
+      const selected = [...checks].map(ch => {
         const it = state.utilizationCandidates[Number(ch.dataset.idx)];
         return { returnId: it.returnId, skuId: it.skuId };
       });
+      const groups = {};
+      selected.forEach(s => { (groups[s.returnId] = groups[s.returnId] || []).push(s); });
+      const returnIds = Object.keys(groups);
       try {
-        const res = await fetch('/api/utilization/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
-        if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || ('HTTP ' + res.status)); }
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `utilizatsiya-arizasi-${new Date().toISOString().slice(0, 10)}.docx`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
+        for (const returnId of returnIds) {
+          const res = await fetch('/api/utilization/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: groups[returnId] }) });
+          if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(`Akt №${returnId}: ` + (err.error || ('HTTP ' + res.status))); }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `Utilizatsiya_${returnId}.docx`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+          await new Promise(r => setTimeout(r, 300)); // ketma-ket yuklashda brauzer bloklamasin
+        }
         closeModal();
       } catch (e) {
         alert("Xato: " + e.message);

@@ -537,9 +537,21 @@ async function getUtilizationCandidates() {
   };
 }
 
-// 19-J: Utilizatsiya arizasi .docx — foydalanuvchi bergan namuna formatida (rekvizit + akt/shtrix-kod
-// ro'yxati + sana, imzo/muhr uchun bo'sh joy). Bot va dashboard BIR XIL shu funksiyani ishlatadi.
-async function buildUtilizationDocx(company, items) {
+// 19-K: bir tekis items ro'yxatini akt (returnId) bo'yicha guruhlaydi — Uzum qoidasi: har akt uchun
+// alohida ariza kerak, bitta aktda bir nechta SKU/shtrix-kod bo'lishi mumkin.
+function groupItemsByAct(items) {
+  const map = new Map();
+  for (const it of items) {
+    if (!map.has(it.returnId)) map.set(it.returnId, []);
+    map.get(it.returnId).push(it);
+  }
+  return [...map.entries()].map(([returnId, actItems]) => ({ returnId, items: actItems }));
+}
+
+// 19-J/19-K: Utilizatsiya arizasi .docx — BITTA akt uchun (namuna formatida: rekvizit + Akt raqami +
+// shu aktning barcha shtrix-kodlari + sana, imzo/muhr uchun bo'sh joy). Bot va dashboard BIR XIL shu
+// funksiyani ishlatadi; bir nechta akt tanlansa, chaqiruvchi HAR akt uchun bu funksiyani alohida chaqiradi.
+async function buildUtilizationDocx(company, actNumber, items) {
   const c = company || {};
   const [yyyy, mm, dd] = todayTashkent().split('-');
   const todayDisplay = `${dd}.${mm}.${yyyy}`;
@@ -553,9 +565,11 @@ async function buildUtilizationDocx(company, items) {
     new Paragraph({ text: `Hisob raqami: ${c.account || blank}` }),
     new Paragraph({ text: `MFO: ${c.mfo || blank}` }),
     new Paragraph({ text: '' }),
-    new Paragraph({ text: `Sizdan quyidagi tovarlarni utilizatsiya qilishni so'raymiz:` }),
+    new Paragraph({ text: `Sizdan quyidagi tovarni utilizatsiya qilishni so'raymiz:` }),
     new Paragraph({ text: '' }),
-    ...items.map(it => new Paragraph({ text: `akt № ${it.returnId} — shtrix-kod ${it.barcode || "noma'lum"}` })),
+    new Paragraph({ children: [new TextRun({ text: `Akt raqami: ${actNumber}`, bold: true })] }),
+    new Paragraph({ text: `Tovarlarning shtrix-kodlari:` }),
+    ...items.map(it => new Paragraph({ text: `- ${it.barcode || "noma'lum"}` })),
     new Paragraph({ text: '' }),
     new Paragraph({ text: `Sana: ${todayDisplay}` }),
     new Paragraph({ text: '' }),
@@ -2636,10 +2650,14 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
     }
     const selected = valid.map(n => utilSession.items[n - 1]);
     utilizationSessions.delete(chatId);
-    await sendTelegramMessage(token, chatId, `📄 Ariza tayyorlanmoqda (${selected.length} ta akt)...`);
-    const buffer = await buildUtilizationDocx(syncedState.companyInfo, selected);
-    const sent = await sendTelegramDocument(token, chatId, buffer, `utilizatsiya-arizasi-${todayTashkent()}.docx`, `Aktlar: ${selected.map(s => s.returnId).join(', ')}`);
-    if (!sent.ok) await sendTelegramMessage(token, chatId, `⚠️ Fayl yuborilmadi: ${sent.description || sent.exception || 'noma\'lum xato'}`);
+    // 19-K: har akt (returnId) uchun ALOHIDA .docx — Uzum qoidasi, bitta faylga birlashtirilmaydi.
+    const groups = groupItemsByAct(selected);
+    await sendTelegramMessage(token, chatId, `📄 ${groups.length} ta akt uchun ariza(lar) tayyorlanmoqda...`);
+    for (const g of groups) {
+      const buffer = await buildUtilizationDocx(syncedState.companyInfo, g.returnId, g.items);
+      const sent = await sendTelegramDocument(token, chatId, buffer, `Utilizatsiya_${g.returnId}.docx`, `Akt №${g.returnId} (${g.items.length} ta mahsulot)`);
+      if (!sent.ok) await sendTelegramMessage(token, chatId, `⚠️ Akt №${g.returnId} fayli yuborilmadi: ${sent.description || sent.exception || "noma'lum xato"}`);
+    }
     return;
   }
 
@@ -2771,23 +2789,6 @@ app.get('/api/compensation-candidates', async (req, res) => {
 });
 
 // 19-D: ta'minlashlar (yuk xatlari) ro'yxati — dashboard "Ta'minlashlar" bo'limi uchun
-// 19-K VAQTINCHALIK diagnostika: bitta SKU'ning XOM (normalizatsiyalanmagan) Uzum javobini ko'rsatadi —
-// skuCode qaysi xom maydondan (sellerItemCode/article/barcode) kelayotganini aniqlash uchun. Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/raw-sku/:shopId/:skuId', async (req, res) => {
-  const { shopId, skuId } = req.params;
-  const headers = getGetHeaders(req);
-  if (Object.keys(headers).length === 0) return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
-  const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/product/shop/${shopId}?page=0&size=100`, { headers });
-  if (!response.ok) return sendUzumError(res, `Uzum ${response.status}`);
-  const data = await response.json();
-  const list = data.productList || data.payload || [];
-  let found = null;
-  (Array.isArray(list) ? list : []).forEach(p => (p.skuList || []).forEach(s => {
-    if (String(s.skuId) === String(skuId)) found = s;
-  }));
-  res.json({ found: !!found, raw: found });
-});
-
 app.get('/api/invoices', async (req, res) => {
   const result = await computeInvoicesSummary();
   if (!result.ok) return sendUzumError(res, result.error);
@@ -2800,17 +2801,23 @@ app.get('/api/utilization/candidates', async (req, res) => {
   if (!result.ok) return sendUzumError(res, result.error);
   res.json(result);
 });
+// 19-K: bitta so'rov = bitta AKT (Uzum qoidasi: har akt uchun alohida ariza). Bir nechta akt kerak
+// bo'lsa, chaqiruvchi (dashboard JS) har akt uchun bu endpointni ALOHIDA chaqiradi.
 app.post('/api/utilization/generate', async (req, res) => {
   const selected = Array.isArray(req.body?.items) ? req.body.items : [];
   if (selected.length === 0) return res.status(400).json({ error: "Hech qanday akt tanlanmadi" });
+  const returnIds = new Set(selected.map(s => s.returnId));
+  if (returnIds.size > 1) return res.status(400).json({ error: "Bitta so'rovda faqat BITTA akt bo'lishi kerak — har akt uchun alohida chaqiring" });
+  const actNumber = selected[0].returnId;
+
   const cand = await getUtilizationCandidates();
   if (!cand.ok) return sendUzumError(res, cand.error);
   const wanted = new Set(selected.map(s => `${s.returnId}:${s.skuId}`));
   const items = cand.items.filter(it => wanted.has(`${it.returnId}:${it.skuId}`));
-  if (items.length === 0) return res.status(404).json({ error: "Tanlangan aktlar topilmadi (ehtimol allaqachon utilizatsiya qilingan)" });
-  const buffer = await buildUtilizationDocx(syncedState.companyInfo, items);
+  if (items.length === 0) return res.status(404).json({ error: "Tanlangan akt topilmadi (ehtimol allaqachon utilizatsiya qilingan)" });
+  const buffer = await buildUtilizationDocx(syncedState.companyInfo, actNumber, items);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-  res.setHeader('Content-Disposition', `attachment; filename="utilizatsiya-arizasi-${todayTashkent()}.docx"`);
+  res.setHeader('Content-Disposition', `attachment; filename="Utilizatsiya_${actNumber}.docx"`);
   res.send(buffer);
 });
 
