@@ -5,7 +5,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import cron from 'node-cron';
-import { Document, Packer, Paragraph, TextRun } from 'docx';
+import { Document, Packer, Paragraph, TextRun, AlignmentType } from 'docx';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -557,26 +557,49 @@ async function buildUtilizationDocx(company, actNumber, items) {
   const todayDisplay = `${dd}.${mm}.${yyyy}`;
   const blank = '_______________________';
 
+  // 19-L: rekvizit qatori — o'ngga tekislangan, butun qator (label+qiymat) qalin.
+  const reqLine = (label, value) => new Paragraph({
+    alignment: AlignmentType.RIGHT,
+    children: [new TextRun({ text: `${label}: ${value || blank}`, bold: true })]
+  });
+
   const paragraphs = [
-    new Paragraph({ children: [new TextRun({ text: `Kimdan: ${c.name || blank}`, bold: true })] }),
-    new Paragraph({ text: `STIR: ${c.inn || blank}` }),
-    new Paragraph({ text: `Manzil: ${c.address || blank}` }),
-    new Paragraph({ text: `Bank: ${c.bank || blank}` }),
-    new Paragraph({ text: `Hisob raqami: ${c.account || blank}` }),
-    new Paragraph({ text: `MFO: ${c.mfo || blank}` }),
+    new Paragraph({ text: '' }),
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      children: [new TextRun({ text: 'Utilizatsiya qilishga ariza', bold: true, size: 26 })] // 13pt (rekvizitdan kattaroq)
+    }),
+    new Paragraph({ text: '' }),
+    reqLine('Kimdan', c.name),
+    new Paragraph({ text: '' }),
+    reqLine('STIR', c.inn),
+    new Paragraph({ text: '' }),
+    reqLine('Manzil', c.address),
+    new Paragraph({ text: '' }),
+    reqLine('Bank', c.bank),
+    new Paragraph({ text: '' }),
+    reqLine('Hisob raqami', c.account),
+    new Paragraph({ text: '' }),
+    reqLine('MFO', c.mfo),
     new Paragraph({ text: '' }),
     new Paragraph({ text: `Sizdan quyidagi tovarni utilizatsiya qilishni so'raymiz:` }),
     new Paragraph({ text: '' }),
-    new Paragraph({ children: [new TextRun({ text: `Akt raqami: ${actNumber}`, bold: true })] }),
-    new Paragraph({ text: `Tovarlarning shtrix-kodlari:` }),
+    new Paragraph({ children: [
+      new TextRun({ text: 'Akt raqami: ', bold: true }),
+      new TextRun({ text: `${actNumber}` })
+    ] }),
+    new Paragraph({ children: [new TextRun({ text: 'Tovarlarning shtrix-kodlari:', bold: true })] }),
     ...items.map(it => new Paragraph({ text: `- ${it.barcode || "noma'lum"}` })),
     new Paragraph({ text: '' }),
-    new Paragraph({ text: `Sana: ${todayDisplay}` }),
-    new Paragraph({ text: '' }),
-    new Paragraph({ text: `Imzo: ${blank}` }),
-    new Paragraph({ text: `Muhr: ${blank}` })
+    new Paragraph({
+      alignment: AlignmentType.RIGHT,
+      children: [new TextRun({ text: `Sana: ${todayDisplay}          Imzo: ${blank}`, bold: true, italics: true })]
+    })
   ];
-  const doc = new Document({ sections: [{ children: paragraphs }] });
+  const doc = new Document({
+    styles: { default: { document: { run: { font: 'Times New Roman', size: 24 } } } }, // 12pt, butun hujjat
+    sections: [{ children: paragraphs }]
+  });
   return Packer.toBuffer(doc);
 }
 
@@ -2789,6 +2812,16 @@ app.get('/api/compensation-candidates', async (req, res) => {
 });
 
 // 19-D: ta'minlashlar (yuk xatlari) ro'yxati — dashboard "Ta'minlashlar" bo'limi uchun
+// 19-M VAQTINCHALIK diagnostika: bitta returnId'ning XOM (normalizatsiyalanmagan) /v1/return yozuvini
+// ko'rsatadi — returnItems[] ichida amount/packedAmount maydonlarini aniqlash uchun. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/raw-return/:returnId', async (req, res) => {
+  const returnId = req.params.returnId;
+  const ret = await fetchAllReturns();
+  if (!ret.ok) return sendUzumError(res, ret.error);
+  const found = ret.raw.find(r => String(r.id) === String(returnId));
+  res.json({ found: !!found, raw: found });
+});
+
 app.get('/api/invoices', async (req, res) => {
   const result = await computeInvoicesSummary();
   if (!result.ok) return sendUzumError(res, result.error);
