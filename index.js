@@ -2541,6 +2541,54 @@ async function runInvoiceSync() {
   }
 }
 
+// 19-Q: Return statusi kuzatuvi — runInvoiceSync() bilan bir xil naqsh (holat fayli + diff + xabar),
+// lekin "firstRun/baseline" mantig'i YO'Q (invoice tizimidagi shu joydagi xato takrorlanmasin — bu yerda
+// har safar shunchaki HAQIQIY joriy statusni so'raymiz, oldindan hech narsani "bilingan" deb hisoblamaymiz).
+let returnSyncInProgress = false;
+async function runReturnSync() {
+  if (returnSyncInProgress) {
+    console.log('[RETURN] Oldingi sinxron hali tugamagan — bu chaqiruv o\'tkazib yuborildi.');
+    return { ok: true, skipped: true };
+  }
+  returnSyncInProgress = true;
+  try {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const decisions = readJsonFile(UTILIZATION_DECISIONS_FILE, {});
+    const pendingIds = Object.keys(decisions).filter(id => decisions[id] && decisions[id].decision && !decisions[id].notified);
+    if (pendingIds.length === 0) return { ok: true, checked: 0, notified: 0 };
+
+    const ret = await fetchAllReturns();
+    if (!ret.ok) { console.error('[RETURN] olinmadi:', ret.error); return { ok: false, error: ret.error }; }
+    const statusById = {};
+    ret.raw.forEach(r => { statusById[String(r.id)] = r.status; });
+
+    let notifiedCount = 0;
+    for (const returnId of pendingIds) {
+      const status = statusById[returnId];
+      let msg = null;
+      if (status === 'UTILIZED') {
+        msg = `✅ Akt №${returnId} — utilizatsiya qilindi (Uzum tomonidan tasdiqlandi)`;
+      } else if (status === 'COMPLETED') {
+        msg = `🎉 Mahsulotni qaytarib oldingiz! Akt №${returnId} yakunlandi va ro'yxatdan olib tashlandi`;
+      }
+      // status === 'ASSEMBLED' (yoki topilmadi) — hech narsa qilinmaydi, keyingi tsiklda qayta tekshiriladi.
+      if (msg) {
+        if (token && ADMIN_CHAT_ID) {
+          try { await sendTelegramMessage(token, ADMIN_CHAT_ID, msg); }
+          catch (e) { console.error('[RETURN] xabar yuborilmadi:', e.message); }
+        }
+        decisions[returnId] = { ...decisions[returnId], notified: true };
+        notifiedCount++;
+      }
+    }
+    if (notifiedCount > 0) writeJsonFile(UTILIZATION_DECISIONS_FILE, decisions);
+    console.log(`[RETURN] Sinxron tugadi — ${pendingIds.length} ta tekshirildi, ${notifiedCount} ta xabar berildi.`);
+    return { ok: true, checked: pendingIds.length, notified: notifiedCount };
+  } finally {
+    returnSyncInProgress = false;
+  }
+}
+
 async function runDailyReport() {
   console.log(`[CRON] Kunlik hisobot boshlandi: ${new Date().toISOString()}`);
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -2811,11 +2859,15 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
     } else if (cand.items.length === 0) {
       await sendTelegramMessage(token, chatId, "Hozircha utilizatsiyaga tayyor (\"Berishga tayyor\") tovar yo'q.");
     } else {
-      // 19-P: qaror qilingan aktlar asosiy (tanlanadigan) ro'yxatdan chiqariladi, alohida ko'rsatiladi.
+      // 19-P/19-Q: qaror qilingan aktlar asosiy (tanlanadigan) ro'yxatdan chiqariladi, alohida
+      // ko'rsatiladi. notified:true (runReturnSync yakunlagan) bo'lsa — HECH QAYERDA ko'rinmaydi
+      // (amalda bunday akt allaqachon ASSEMBLED bo'lmagani uchun cand.items'da ham bo'lmaydi —
+      // bu qo'shimcha himoya, chetlab o'tish holatlariga qarshi).
       const acts = groupItemsByAct(cand.items);
       const pending = [], selectable = [];
       acts.forEach(g => {
         const dec = getUtilizationDecision(g.returnId);
+        if (dec && dec.notified) return;
         if (dec) pending.push({ ...g, decision: dec }); else selectable.push(g);
       });
 
@@ -2889,6 +2941,12 @@ app.get('/api/tg-bot/trigger-problem-check', async (req, res) => {
 // 19-B diagnostika: invoice sinxronni qo'lda ishga tushiradi (cron kutmasdan)
 app.get('/api/invoice/trigger-sync', async (req, res) => {
   const result = await runInvoiceSync();
+  res.json(result);
+});
+
+// 19-Q diagnostika: return sinxronni qo'lda ishga tushiradi (cron kutmasdan — 20 daqiqa kutmasdan sinash uchun)
+app.get('/api/return/trigger-sync', async (req, res) => {
+  const result = await runReturnSync();
   res.json(result);
 });
 
@@ -3247,14 +3305,17 @@ if (process.env.UZUM_TOKEN) {
   console.warn('[CRON] UZUM_TOKEN yo\'q — snapshot rejalashtirilmadi.');
 }
 
-// 19-C: Invoice sinxron — qo'shimcha, har 20 daqiqada (kunlik 04:50 zanjirdan mustaqil,
-// unga tegmaydi). Maqsad — holat o'zgarishi (ACCEPTED/yangi yuk xati) haqidagi xabar
-// ertalabgacha kutmasdan, tezroq kelishi. invoiceSyncInProgress qulfi ustma-ust tushishni oldini oladi.
+// 19-C/19-Q: Invoice + Return sinxron — qo'shimcha, har 20 daqiqada (kunlik 04:50 zanjirdan mustaqil,
+// unga tegmaydi). Ketma-ket chaqiriladi (biri xato bersa ham, ikkinchisi baribir ishga tushadi).
+// invoiceSyncInProgress/returnSyncInProgress qulflari ustma-ust tushishni oldini oladi.
 if (process.env.UZUM_TOKEN) {
   cron.schedule('*/20 * * * *', () => {
-    runInvoiceSync().catch(e => console.error('[CRON] 20-daqiqalik invoice sync xato:', e));
+    runInvoiceSync()
+      .catch(e => console.error('[CRON] 20-daqiqalik invoice sync xato:', e))
+      .then(() => runReturnSync())
+      .catch(e => console.error('[CRON] 20-daqiqalik return sync xato:', e));
   }, { timezone: 'Asia/Tashkent' });
-  console.log('[CRON] Invoice sinxron qo\'shimcha rejalashtirildi: har 20 daqiqada.');
+  console.log('[CRON] Invoice + Return sinxron qo\'shimcha rejalashtirildi: har 20 daqiqada.');
 }
 
 // Scheduled daily report — har kuni 05:00 Toshkent vaqtida (timezone aniq ko'rsatilgan,
