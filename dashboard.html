@@ -766,6 +766,7 @@ ${urgentSection}
     }
 
     function renderUtilizationModalBody(c, acts) {
+      // 19-P: qaror qilingan aktlar checkbox'siz, "kutilmoqda" belgisi bilan (tanlab bo'lmaydi)
       const rows = acts.length === 0
         ? `<div class="text-[11px] text-slate-500 text-center py-3">Hozircha utilizatsiyaga tayyor ("Berishga tayyor") tovar yo'q.</div>`
         : acts.map((g, i) => {
@@ -773,6 +774,17 @@ ${urgentSection}
             const titles = [...new Set(g.items.map(it => it.productTitle))];
             const productLabel = titles.length === 1 ? titles[0] : `${titles.length} xil mahsulot`;
             const first = g.items[0];
+            const decision = first.decision;
+            if (decision) {
+              const label = decision.decision === 'utilizatsiya' ? '⏳ Utilizatsiya kutilmoqda' : '⏳ Qaytarish kutilyapti';
+              return `
+              <div class="flex items-start gap-2 p-2 rounded-lg bg-darkBg/50 border border-darkBorder opacity-60 text-[11px]">
+                <div class="flex flex-col min-w-0">
+                  <span class="font-semibold text-slate-400 truncate">akt №${g.returnId} — ${productLabel}</span>
+                  <span class="text-[9.5px] text-slate-500">${first.shopTitle} · 📦 ${g.items.length} xil SKU, jami ${totalAmount} dona · ${label}</span>
+                </div>
+              </div>`;
+            }
             return `
             <label class="flex items-start gap-2 p-2 rounded-lg bg-darkBg border border-darkBorder text-[11px] cursor-pointer">
               <input type="checkbox" class="util-item-check mt-0.5" data-idx="${i}">

@@ -79,6 +79,18 @@ const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const SNAPSHOTS_FILE = path.join(DATA_DIR, 'snapshots.json');
 const PROBLEMS_FILE = path.join(DATA_DIR, 'problems.json'); // 18-D0: faol muammo holati (takroriy ogohlantirmaslik uchun)
 const INVOICE_STATE_FILE = path.join(DATA_DIR, 'invoice_state.json'); // 19-B: { deducted:[invoiceId], acceptedNotified:[invoiceId] } — bir yuk xatini ikki marta qayta ishlamaslik uchun
+const UTILIZATION_DECISIONS_FILE = path.join(DATA_DIR, 'utilization_decisions.json'); // 19-P: { <returnId>: { decision, decidedAt, notified } } — INVOICE_STATE_FILE bilan bir xil oddiy holat-fayli naqshi
+
+// 19-P: bitta akt bo'yicha qabul qilingan qaror ("utilizatsiya"|"qaytarish") — bo'lmasa null.
+function getUtilizationDecision(returnId) {
+  const all = readJsonFile(UTILIZATION_DECISIONS_FILE, {});
+  return all[returnId] || null;
+}
+function saveUtilizationDecision(returnId, decision) {
+  const all = readJsonFile(UTILIZATION_DECISIONS_FILE, {});
+  all[returnId] = { decision, decidedAt: new Date().toISOString(), notified: false };
+  writeJsonFile(UTILIZATION_DECISIONS_FILE, all);
+}
 const SNAPSHOT_RETENTION_DAYS = 60;
 
 function ensureDataDir() {
@@ -532,10 +544,12 @@ async function getUtilizationCandidates() {
     ok: true,
     // 19-N: amount — normalizeCustomerReturns() dagi it.amount (xom API'da amount===packedAmount,
     // tasdiqlangan) — nechta dona shu SKU shu aktda utilizatsiya qilinishi kerak.
+    // 19-P: price — returnItems[].purchasePrice (xom API, hujjatlashtirilgan) — taxminiy tannarx uchun.
+    // 19-P: decision — dashboard uchun ham bir xil qaror holatini ko'rish (bot bilan bitta manba).
     items: assembled.map(r => ({
       returnId: r.returnId, skuId: r.skuId, productTitle: r.productTitle,
       shopTitle: r.shopTitle, returnDate: r.returnDate, barcode: skuCodeMap[r.skuId] || null,
-      amount: r.amount || 1
+      amount: r.amount || 1, price: r.price || 0, decision: getUtilizationDecision(r.returnId)
     }))
   };
 }
@@ -1756,6 +1770,27 @@ async function sendTelegramDocument(token, chatId, buffer, filename, caption) {
   }
 }
 
+// 19-P: Telegram editMessageText — qaror tugmasi bosilgach, xabar matnini yangilash va tugmalarni
+// olib tashlash uchun. replyMarkup=null bo'lsa mavjud tugmalar o'zgarishsiz qoladi; { inline_keyboard: [] }
+// yuborilsa tugmalar olib tashlanadi.
+async function editTelegramMessage(token, chatId, messageId, text, replyMarkup = null) {
+  try {
+    const body = { chat_id: chatId, message_id: messageId, text, parse_mode: 'Markdown' };
+    if (replyMarkup !== null) body.reply_markup = replyMarkup;
+    const response = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!data.ok) console.error('[TG] editMessageText RAD ETILDI:', JSON.stringify(data));
+    return data.ok;
+  } catch (err) {
+    console.error("[TG] editMessageText exception:", err);
+    return false;
+  }
+}
+
 // Per-SKU iqtisod (3.1): komissiya % ustuvorligi — (a) SKU qo'lda, (b) mahsulot qo'lda (3.4),
 // (c) SKU/API, (d) 18% default
 function commissionPct(skuId, sku, productId) {
@@ -2636,6 +2671,19 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
     await answerCallbackQuery(token, cq.id);
     if (!chatId) return;
 
+    if (cq.data.startsWith('util_decide:')) {
+      // 19-P: utilizatsiya/qaytarish qarori — saqlash + xabarni tahrirlash (tugmalar olib tashlanadi)
+      const [, decision, returnIdStr] = cq.data.split(':');
+      const returnId = returnIdStr;
+      saveUtilizationDecision(returnId, decision);
+      const label = decision === 'utilizatsiya'
+        ? `⏳ Akt №${returnId} — Utilizatsiya kutilmoqda (arizani Uzumga yuborganingizda kuzatiladi)`
+        : `⏳ Akt №${returnId} — Qaytarish kutilyapti`;
+      const messageId = cq.message?.message_id;
+      if (messageId) await editTelegramMessage(token, chatId, messageId, label, { inline_keyboard: [] });
+      return;
+    }
+
     if (cq.data.startsWith('shop:')) {
       const shopSel = cq.data.slice('shop:'.length);
       await sendTelegramMessage(token, chatId, "Qaysi davr uchun hisobot kerak?", periodSelectionKeyboard(shopSel));
@@ -2686,7 +2734,21 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
     for (const g of groups) {
       const buffer = await buildUtilizationDocx(syncedState.companyInfo, g.returnId, g.items);
       const sent = await sendTelegramDocument(token, chatId, buffer, `Utilizatsiya_${g.returnId}.docx`, `Akt №${g.returnId} (${g.items.length} ta mahsulot)`);
-      if (!sent.ok) await sendTelegramMessage(token, chatId, `⚠️ Akt №${g.returnId} fayli yuborilmadi: ${sent.description || sent.exception || "noma'lum xato"}`);
+      if (!sent.ok) {
+        await sendTelegramMessage(token, chatId, `⚠️ Akt №${g.returnId} fayli yuborilmadi: ${sent.description || sent.exception || "noma'lum xato"}`);
+        continue;
+      }
+      // 19-P: fayl yuborilgach — qaror so'rovi (tannarx faqat BARCHA item narxi ma'lum bo'lsa hisoblanadi)
+      const totalAmount = g.items.reduce((a, it) => a + (it.amount || 1), 0);
+      const allPriced = g.items.every(it => (it.price || 0) > 0);
+      const totalCost = allPriced ? g.items.reduce((a, it) => a + (it.price * (it.amount || 1)), 0) : null;
+      const decisionMsg = `📦 Akt №${g.returnId}\nMahsulotlar: ${totalAmount} dona (${g.items.length} xil SKU)\nTannarx (taxminiy): ${totalCost != null ? fmtMoney(totalCost) + " so'm" : "noma'lum"}\n\nQaror qiling:`;
+      await sendTelegramMessage(token, chatId, decisionMsg, {
+        inline_keyboard: [[
+          { text: '✅ Utilizatsiya', callback_data: `util_decide:utilizatsiya:${g.returnId}` },
+          { text: '↩️ Qaytarish', callback_data: `util_decide:qaytarish:${g.returnId}` }
+        ]]
+      });
     }
     return;
   }
@@ -2749,16 +2811,38 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
     } else if (cand.items.length === 0) {
       await sendTelegramMessage(token, chatId, "Hozircha utilizatsiyaga tayyor (\"Berishga tayyor\") tovar yo'q.");
     } else {
+      // 19-P: qaror qilingan aktlar asosiy (tanlanadigan) ro'yxatdan chiqariladi, alohida ko'rsatiladi.
       const acts = groupItemsByAct(cand.items);
-      utilizationSessions.set(chatId, { acts, expiresAt: Date.now() + UTILIZATION_SESSION_TTL_MS });
-      const lines = acts.map((g, i) => {
-        const totalAmount = g.items.reduce((a, it) => a + (it.amount || 1), 0);
-        const titles = [...new Set(g.items.map(it => it.productTitle))];
-        const productLabel = titles.length === 1 ? titles[0] : `${titles.length} xil mahsulot`;
-        const first = g.items[0];
-        return `${i + 1}. akt №${g.returnId} — ${productLabel} (${first.shopTitle})\n   📅 ${new Date(first.returnDate).toLocaleDateString('uz-UZ')} · 📦 ${g.items.length} xil SKU, jami ${totalAmount} dona`;
+      const pending = [], selectable = [];
+      acts.forEach(g => {
+        const dec = getUtilizationDecision(g.returnId);
+        if (dec) pending.push({ ...g, decision: dec }); else selectable.push(g);
       });
-      await sendTelegramMessage(token, chatId, `🗑 *Utilizatsiyaga tayyor aktlar* (${acts.length} ta):\n\n${lines.join('\n\n')}\n\nKerakli akt(lar) RAQAMINI yuboring (masalan: 1 yoki 1,3):`);
+
+      let msg;
+      if (selectable.length > 0) {
+        utilizationSessions.set(chatId, { acts: selectable, expiresAt: Date.now() + UTILIZATION_SESSION_TTL_MS });
+        const lines = selectable.map((g, i) => {
+          const totalAmount = g.items.reduce((a, it) => a + (it.amount || 1), 0);
+          const titles = [...new Set(g.items.map(it => it.productTitle))];
+          const productLabel = titles.length === 1 ? titles[0] : `${titles.length} xil mahsulot`;
+          const first = g.items[0];
+          return `${i + 1}. akt №${g.returnId} — ${productLabel} (${first.shopTitle})\n   📅 ${new Date(first.returnDate).toLocaleDateString('uz-UZ')} · 📦 ${g.items.length} xil SKU, jami ${totalAmount} dona`;
+        });
+        msg = `🗑 *Utilizatsiyaga tayyor aktlar* (${selectable.length} ta):\n\n${lines.join('\n\n')}\n\nKerakli akt(lar) RAQAMINI yuboring (masalan: 1 yoki 1,3):`;
+      } else {
+        utilizationSessions.delete(chatId);
+        msg = "Barcha topilgan aktlar allaqachon qaror qilingan (pastga qarang).";
+      }
+      if (pending.length > 0) {
+        const pendingLines = pending.map(p => {
+          const label = p.decision.decision === 'utilizatsiya' ? 'Utilizatsiya kutilmoqda' : 'Qaytarish kutilyapti';
+          const dateStr = new Date(p.decision.decidedAt).toLocaleDateString('uz-UZ');
+          return `- Akt №${p.returnId} — ${label} (${dateStr} dan beri)`;
+        });
+        msg += `\n\n⏳ *Kutilayotgan aktlar:*\n${pendingLines.join('\n')}`;
+      }
+      await sendTelegramMessage(token, chatId, msg);
     }
   } else if (text.startsWith('/dashboard')) {
     await sendTelegramMessage(token, chatId, "Uzum Market sotuvchi hisobotlar panelini ochish uchun quyidagi tugmani bosing:", {
