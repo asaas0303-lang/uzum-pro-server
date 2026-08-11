@@ -565,6 +565,28 @@ function groupItemsByAct(items) {
   return [...map.entries()].map(([returnId, actItems]) => ({ returnId, items: actItems }));
 }
 
+// 19-R: Akt bo'yicha umumiy tannarx (Σ narx×miqdor) — FAQAT barcha SKU narxi ma'lum bo'lsa hisoblanadi,
+// aks holda null ("noma'lum" ko'rsatiladi, taxmin qilinmaydi).
+function computeActTotalCost(items) {
+  const allPriced = items.every(it => (it.price || 0) > 0);
+  return allPriced ? items.reduce((a, it) => a + it.price * (it.amount || 1), 0) : null;
+}
+
+// 19-R: DD/MM/YYYY sana formati (Telegram xabar uslubi uchun) — UTC komponentlar, vaqt qismisiz.
+function fmtDateSlash(isoOrDate) {
+  const d = new Date(isoOrDate);
+  const p2 = n => String(n).padStart(2, '0');
+  return `${p2(d.getUTCDate())}/${p2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+}
+
+// 19-R: 1-10 oralig'i uchun keycap emoji, undan katta bo'lsa oddiy "N." — Telegram ro'yxat raqamlash.
+function numberEmoji(n) {
+  const map = ['0️⃣', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣'];
+  if (n === 10) return '🔟';
+  if (n >= 0 && n <= 9) return map[n];
+  return `${n}.`;
+}
+
 // 19-J/19-K: Utilizatsiya arizasi .docx — BITTA akt uchun (namuna formatida: rekvizit + Akt raqami +
 // shu aktning barcha shtrix-kodlari + sana, imzo/muhr uchun bo'sh joy). Bot va dashboard BIR XIL shu
 // funksiyani ishlatadi; bir nechta akt tanlansa, chaqiruvchi HAR akt uchun bu funksiyani alohida chaqiradi.
@@ -2786,10 +2808,9 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
         await sendTelegramMessage(token, chatId, `⚠️ Akt №${g.returnId} fayli yuborilmadi: ${sent.description || sent.exception || "noma'lum xato"}`);
         continue;
       }
-      // 19-P: fayl yuborilgach — qaror so'rovi (tannarx faqat BARCHA item narxi ma'lum bo'lsa hisoblanadi)
+      // 19-P/19-R: fayl yuborilgach — qaror so'rovi (tannarx computeActTotalCost() orqali, real hisoblangan)
       const totalAmount = g.items.reduce((a, it) => a + (it.amount || 1), 0);
-      const allPriced = g.items.every(it => (it.price || 0) > 0);
-      const totalCost = allPriced ? g.items.reduce((a, it) => a + (it.price * (it.amount || 1)), 0) : null;
+      const totalCost = computeActTotalCost(g.items);
       const decisionMsg = `📦 Akt №${g.returnId}\nMahsulotlar: ${totalAmount} dona (${g.items.length} xil SKU)\nTannarx (taxminiy): ${totalCost != null ? fmtMoney(totalCost) + " so'm" : "noma'lum"}\n\nQaror qiling:`;
       await sendTelegramMessage(token, chatId, decisionMsg, {
         inline_keyboard: [[
@@ -2871,17 +2892,21 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
         if (dec) pending.push({ ...g, decision: dec }); else selectable.push(g);
       });
 
+      // 19-R: uslub — sarlavha/akt-raqami qalin, umumiy summa (REAL hisoblangan, computeActTotalCost())
+      // qalin, sana/SKU/dona qatori oddiy, tanlash ko'rsatmasi kursiv, raqam misollari monospace.
       let msg;
       if (selectable.length > 0) {
         utilizationSessions.set(chatId, { acts: selectable, expiresAt: Date.now() + UTILIZATION_SESSION_TTL_MS });
         const lines = selectable.map((g, i) => {
           const totalAmount = g.items.reduce((a, it) => a + (it.amount || 1), 0);
-          const titles = [...new Set(g.items.map(it => it.productTitle))];
-          const productLabel = titles.length === 1 ? titles[0] : `${titles.length} xil mahsulot`;
           const first = g.items[0];
-          return `${i + 1}. akt №${g.returnId} — ${productLabel} (${first.shopTitle})\n   📅 ${new Date(first.returnDate).toLocaleDateString('uz-UZ')} · 📦 ${g.items.length} xil SKU, jami ${totalAmount} dona`;
+          const totalCost = computeActTotalCost(g.items);
+          const costLine = totalCost != null ? `${fmtMoney(totalCost)} so'm` : "noma'lum";
+          return `${numberEmoji(i + 1)} *Akt №${g.returnId}*\n📅 ${fmtDateSlash(first.returnDate)} | 📦 ${g.items.length} xil SKU | 🔢 Jami: ${totalAmount} dona\n💰 *Umumiy summa: ${costLine}*`;
         });
-        msg = `🗑 *Utilizatsiyaga tayyor aktlar* (${selectable.length} ta):\n\n${lines.join('\n\n')}\n\nKerakli akt(lar) RAQAMINI yuboring (masalan: 1 yoki 1,3):`;
+        // Eslatma: legacy Markdown'da monospace'ni kursiv ICHIGA joylashtirish (nested entity) 400 xato
+        // xavfi tug'diradi — shuning uchun ketma-ket (nested bo'lmagan) bo'laklarga bo'lingan.
+        msg = `♻️ *Utilizatsiyaga tayyor aktlar (${selectable.length} ta):*\n\n${lines.join('\n\n')}\n\n──────────────\n\n_Kerakli akt(lar) RAQAMINI yuboring (masalan:_ \`1\` _yoki_ \`1, 3\` _):_`;
       } else {
         utilizationSessions.delete(chatId);
         msg = "Barcha topilgan aktlar allaqachon qaror qilingan (pastga qarang).";
@@ -2889,8 +2914,7 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
       if (pending.length > 0) {
         const pendingLines = pending.map(p => {
           const label = p.decision.decision === 'utilizatsiya' ? 'Utilizatsiya kutilmoqda' : 'Qaytarish kutilyapti';
-          const dateStr = new Date(p.decision.decidedAt).toLocaleDateString('uz-UZ');
-          return `- Akt №${p.returnId} — ${label} (${dateStr} dan beri)`;
+          return `▪️ Akt №${p.returnId} — ${label} _(${fmtDateSlash(p.decision.decidedAt)} dan beri)_`;
         });
         msg += `\n\n⏳ *Kutilayotgan aktlar:*\n${pendingLines.join('\n')}`;
       }
@@ -2968,6 +2992,12 @@ app.get('/api/compensation-candidates', async (req, res) => {
 });
 
 // 19-D: ta'minlashlar (yuk xatlari) ro'yxati — dashboard "Ta'minlashlar" bo'limi uchun
+// 19-R VAQTINCHALIK diagnostika (faqat o'qish): utilization_decisions.json tarkibini ko'rsatadi —
+// /utilizatsiya xabarining "Kutilayotgan aktlar" bo'limini aniq matn bilan ko'rsatish uchun. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/utilization-decisions', (req, res) => {
+  res.json(readJsonFile(UTILIZATION_DECISIONS_FILE, {}));
+});
+
 app.get('/api/invoices', async (req, res) => {
   const result = await computeInvoicesSummary();
   if (!result.ok) return sendUzumError(res, result.error);
