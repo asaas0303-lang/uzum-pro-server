@@ -1553,9 +1553,10 @@ async function buildAiContext(shopId) {
   const metrics = await computeSkuMetrics(shopId);
   const snapshots = loadSnapshots(); // B-bosqich: saqlash tarifi uchun aylanma kunlari
   const problems = []; // D0: faol Uzum muammolari
+  let skuRows = []; // 19-S: tashqariga chiqariladi (formatXitoyBlock uchun) — hasData=false bo'lsa bo'sh qoladi
 
   if (prod.ok && metrics.ok) {
-    const skuRows = [];
+    skuRows = [];
     prod.products.forEach(p => {
       const isBanned = p.status?.value === 'PERM_BANNED';
       (p.skuList || []).forEach(sku => {
@@ -1637,7 +1638,49 @@ async function buildAiContext(shopId) {
     if (comp.ok && comp.total.units > 0) lines.push(`## KOMPENSATSIYA NOMZODI: ~${comp.aniq.units} dona haqiqiy yo'qolgan (~${fmtMoney(comp.aniq.value)} so'm, sotuv−komissiya; qayta saralanganlar chiqarilgan)${comp.qisman.units ? ` + ${comp.qisman.units} dona qisman aniqlanmagan` : ''} — Uzum kabinetida tekshirish tavsiya etiladi (kafolatlangan emas).`);
   } catch (e) { /* invoice AI kontekstga majburiy emas */ }
 
-  return { text: lines.join('\n'), shopTitle, hasData: prod.ok, problems };
+  return {
+    text: lines.join('\n'), shopTitle, hasData: prod.ok, problems,
+    // 19-S: deterministik formatlash uchun struktura ma'lumot — Gemini matnidan MUSTAQIL, allaqachon
+    // hisoblangan qiymatlarning o'zi (formatMoliyaBlock/formatMaqsadBlock/formatXitoyBlock ishlatadi).
+    raw: {
+      fin, cf, goal, credits: syncedState.credits || [],
+      reorderSkus: skuRows.filter(r => r.needsReorder).map(r => ({ title: r.title, stockDays: r.stockDays }))
+    }
+  };
+}
+
+// 19-S: uchta deterministik blok — FAQAT kod ichida hisoblangan sonlardan, Gemini javobidan mustaqil.
+// Qiymat yo'q bo'lsa qator butunlay o'tkazib yuboriladi (taxmin/nol ko'rsatilmaydi).
+function formatMoliyaBlock(raw) {
+  const lines = [];
+  if (raw.fin && raw.fin.ok) lines.push(`💵 Sof foyda (bu oy): *${fmtMoney(raw.fin.profit)} so'm*`);
+  if (raw.cf && raw.cf.ok) {
+    const sign = raw.cf.netCashFlow >= 0 ? '+' : '−';
+    lines.push(`💳 Naqd oqim: *${sign}${fmtMoney(Math.abs(raw.cf.netCashFlow))} so'm*`);
+  }
+  const credits = raw.credits || [];
+  if (credits.length) {
+    const nearest = credits.reduce((a, c) => (creditDaysUntilDue(c) < creditDaysUntilDue(a) ? c : a));
+    lines.push(`📅 Yaqin kredit to'lovi: *${fmtMoney(nearest.monthlyPayment)} so'm* — ${nearest.name} (${nearest.nextPaymentDate || '?'})`);
+  }
+  if (raw.cf && raw.cf.ok && raw.cf.creditRemaining > 0) lines.push(`📉 Umumiy qarz: *${fmtMoney(raw.cf.creditRemaining)} so'm*`);
+  return lines.length ? lines.join('\n') : null;
+}
+function formatMaqsadBlock(raw) {
+  if (!raw.goal || !raw.fin || !raw.fin.ok) return null;
+  const current = raw.fin.revenue || 0;
+  const target = raw.goal.target || 0;
+  if (target <= 0) return null;
+  const pct = (current / target) * 100;
+  const remaining = Math.max(0, target - current);
+  const lines = [`📈 Bajarildi: *${pct.toFixed(1)}%*`, `💰 Hozirgi aylanma: *${fmtMoney(current)} so'm*`];
+  if (remaining > 0) lines.push(`🎯 Maqsadgacha qoldi: *${fmtMoney(remaining)} so'm*`);
+  return lines.join('\n');
+}
+function formatXitoyBlock(raw) {
+  const skus = raw.reorderSkus || [];
+  if (!skus.length) return "Hozircha shoshilinch buyurtma kerak emas";
+  return skus.slice(0, 10).map(s => `🔴 *${s.title}* — ${s.stockDays != null ? s.stockDays.toFixed(0) + ' kunga yetadi' : "aylanma noma'lum"}`).join('\n');
 }
 
 // 19-G: Gemini'ni chaqirib, JSON javobni parse qiladi. maxOutputTokens aniq belgilangan (avval yo'q edi —
@@ -1671,14 +1714,17 @@ async function generateAiAdvice(shopId) {
 
     const ai = new GoogleGenAI({ apiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } });
 
+    // 19-S: JSON sxemasi qasddan KICHIK — raqamlar (sof foyda, naqd oqim, foiz, muddat) endi kod
+    // tomonidan alohida hisoblanadi (formatMoliyaBlock/formatMaqsadBlock/formatXitoyBlock), Gemini
+    // faqat FIKR-MULOHAZA yozadi. Bonus: kichikroq javob — JSON kesilish (500 xato) ehtimoli kamayadi.
     const prompt = `Sen Uzum Market sotuvchisining shaxsiy MOLIYAVIY MURABBIYIsan. O'zbek tilida javob ber.
 Foydalanuvchi maqsadi: "sinyapmanmi yoki botyapmanmi — aniq raqamlarda bilish" va moliyaviy erkinlikka chiqish.
 
 QAT'IY QOIDALAR:
-- Har tavsiya ANIQ PUL raqami bilan (necha so'm yutiladi/yo'qotiladi).
-- Ma'lumot yo'q bo'lsa "ma'lumot yo'q" deb yoz — SOXTA RAQAM BERMA, taxmin qilma.
 - "Bugungi ishlar" — eng ko'pi 3 ta, ustuvorlik bo'yicha (eng ko'p pul yo'qotilayotgani birinchi).
-- Har ish: NIMA qilish + NEGA (xavf) + kechiksa NIMA bo'ladi (pul).
+- Har ish uchun: qisqa sarlavha, shoshilinchmi (true/false), aniq VAZIFA (nima qilish kerak) va XAVF
+  (kechiksa nima bo'ladi — kontekstdagi haqiqiy raqamlardan erkin foydalanib yozishing mumkin).
+- Ma'lumot yo'q bo'lsa "ma'lumot yo'q" deb yoz — SOXTA RAQAM BERMA, taxmin qilma.
 - Xitoy buyurtma mantig'i: zaxira_tugash_kuni = zaxira ÷ kunlik_sotuv. Yetkazish 28 kun (21 yo'l + 5 sotuvga chiqish + 2 zaxira). Agar zaxira_tugash ≤ 28 → hozir buyurtma ber, tavsiya miqdor = kunlik × 30.
 
 === BILIMLAR BAZASI (Uzum qoidalari) ===
@@ -1690,12 +1736,16 @@ ${biz}
 === JORIY HOLAT (real ma'lumot) ===
 ${ctx.text}
 
-Quyidagi JSON formatida javob ber (faqat toza JSON, markdown kod bloki YO'Q):
+Quyidagi JSON formatida javob ber (faqat toza JSON, markdown kod bloki YO'Q). MUHIM: alohida raqam
+maydoni QO'SHMA — sof foyda/naqd oqim/foiz kabi raqamlar allaqachon kod tomonidan alohida
+ko'rsatiladi, sen faqat FIKR-MULOHAZA yoz:
 {
-  "moliya_holati": "Bu oy foyda/zarar holati aniq raqamda + keyingi kredit to'lovi ogohlantirishi (agar bor bo'lsa). 2-3 jumla.",
-  "bugungi_ishlar": ["1. [belgi] NIMA — nega xavfli, kechiksa qancha pul yo'qoladi", "2. ...", "3. ..."],
-  "maqsad": "Agar maqsad qo'yilgan bo'lsa: hozirgi holat vs maqsad, keyingi bosqich, qachon erishish mumkin. Yo'q bo'lsa bo'sh string.",
-  "xitoy_buyurtma": "Xitoydan buyurtma kerak bo'lgan SKU'lar: qaysi, qancha dona, taxminiy foyda. Yo'q bo'lsa 'Hozircha shoshilinch buyurtma kerak emas'."
+  "bugungi_ishlar": [
+    { "sarlavha": "qisqa nom", "shoshilinch": true yoki false, "vazifa": "nima qilish kerak", "xavf": "kechiksa nima bo'ladi" }
+  ],
+  "maqsad_reja": "Agar maqsad qo'yilgan bo'lsa: unga erishish uchun qisqa strategik reja (1-2 jumla). Yo'q bo'lsa bo'sh string.",
+  "moliya_sharh": "Naqd oqim/kredit holati haqida 1 qisqa jumla (masalan taqchillik xavfi bo'lsa). Yo'q bo'lsa bo'sh string.",
+  "xitoy_izoh": "Xitoy buyurtma haqida qisqa izoh, yoki 'Hozircha shoshilinch buyurtma kerak emas'."
 }`;
 
     let parsedData;
@@ -1708,22 +1758,53 @@ Quyidagi JSON formatida javob ber (faqat toza JSON, markdown kod bloki YO'Q):
       const retryPrompt = prompt + '\n\nMUHIM: Javobni albatta TO\'LIQ, QISQA va YOPIQ JSON qilib yakunlang, ortiqcha izoh yozmang.';
       parsedData = await callGeminiJson(ai, retryPrompt);
     }
-    return { ok: true, data: parsedData };
+    return { ok: true, data: parsedData, raw: ctx.raw };
   } catch (err) {
     console.error("AI murabbiy xato:", err);
     return { ok: false, error: "AI murabbiy bilan bog'lanishda xato: " + err.message };
   }
 }
 
-// 18-D1: AI murabbiy JSON javobini Telegram matniga aylantirish (/maslahat buyrug'i uchun)
-function aiAdviceToText(d) {
+// 18-D1/19-S: AI murabbiy JSON javobini Telegram matniga aylantirish (/maslahat buyrug'i uchun).
+// Raqamlar (moliya/maqsad/xitoy bloklari) TO'LIQ kod ichidagi `raw` orqali, Gemini matnidan mustaqil;
+// `d` faqat fikr-mulohaza (bugungi_ishlar/maqsad_reja/moliya_sharh/xitoy_izoh) beradi.
+function aiAdviceToText(d, raw) {
   if (!d || typeof d !== 'object') return '⚠️ AI javobi bo\'sh.';
+  raw = raw || {};
   const lines = ['🤖 *AI Moliyaviy Murabbiy*', ''];
-  if (d.moliya_holati) { lines.push('💰 *Moliya holati:*', d.moliya_holati, ''); }
+
+  const moliyaBlock = formatMoliyaBlock(raw);
+  if (moliyaBlock || d.moliya_sharh) {
+    lines.push('📊 *MOLIYA HOLATI*');
+    if (moliyaBlock) lines.push(moliyaBlock);
+    if (d.moliya_sharh) lines.push(`_${d.moliya_sharh}_`);
+    lines.push('');
+  }
+
   const ishlar = Array.isArray(d.bugungi_ishlar) ? d.bugungi_ishlar.filter(Boolean) : [];
-  if (ishlar.length) { lines.push('📋 *Bugungi ishlar:*'); ishlar.forEach(x => lines.push(x)); lines.push(''); }
-  if (d.maqsad) { lines.push('🎯 *Maqsad:*', d.maqsad, ''); }
-  if (d.xitoy_buyurtma) { lines.push('🇨🇳 *Xitoy buyurtma:*', d.xitoy_buyurtma); }
+  if (ishlar.length) {
+    lines.push('📋 *BUGUNGI VAZIFALAR*');
+    ishlar.forEach((x, i) => {
+      const belgi = x.shoshilinch ? '🚨' : '🔸';
+      lines.push(`${belgi} *${i + 1}. ${x.sarlavha || ''}*`);
+      if (x.vazifa) lines.push(`   Vazifa: ${x.vazifa}`);
+      if (x.xavf) lines.push(`   Xavf: *${x.xavf}*`);
+      lines.push('');
+    });
+  }
+
+  const maqsadBlock = formatMaqsadBlock(raw);
+  if (maqsadBlock) {
+    lines.push('🎯 *OYLIK MAQSAD*');
+    lines.push(maqsadBlock);
+    if (d.maqsad_reja) lines.push(`_Reja: ${d.maqsad_reja}_`);
+    lines.push('');
+  }
+
+  lines.push('🇨🇳 *XITOYDAN BUYURTMA*');
+  lines.push(formatXitoyBlock(raw));
+  if (d.xitoy_izoh) lines.push(`_Izoh: ${d.xitoy_izoh}_`);
+
   return lines.join('\n').trim();
 }
 
@@ -1731,7 +1812,22 @@ app.post('/api/gemini/advice', async (req, res) => {
   const shopId = req.body?.shopId || syncedState.activeShop;
   const result = await generateAiAdvice(shopId);
   if (result.ok) {
-    res.json(result.data);
+    // 19-S: dashboard renderAiCoach() eski sxemani (moliya_holati/maqsad/xitoy_buyurtma satr,
+    // bugungi_ishlar satrlar massivi) kutadi — bu yerda yangi struktura + kod-hisoblangan bloklardan
+    // moslashtirib beramiz (dashboard.html'ga tegmasdan). Markdown "*" belgilari HTML uchun olib tashlanadi.
+    const raw = result.raw || {};
+    const d = result.data || {};
+    const strip = s => (s || '').replace(/\*/g, '');
+    const moliyaBlock = strip(formatMoliyaBlock(raw));
+    const maqsadBlock = strip(formatMaqsadBlock(raw));
+    res.json({
+      moliya_holati: [moliyaBlock, d.moliya_sharh].filter(Boolean).join('\n') || null,
+      bugungi_ishlar: (Array.isArray(d.bugungi_ishlar) ? d.bugungi_ishlar : []).filter(Boolean).map(x =>
+        `${x.shoshilinch ? '🚨' : '🔸'} ${x.sarlavha || ''}\nVazifa: ${x.vazifa || ''}\nXavf: ${x.xavf || ''}`
+      ),
+      maqsad: [maqsadBlock, d.maqsad_reja].filter(Boolean).join('\n') || null,
+      xitoy_buyurtma: [strip(formatXitoyBlock(raw)), d.xitoy_izoh].filter(Boolean).join('\n')
+    });
   } else {
     const code = result.error.includes('sozlanmagan') ? 400 : 500;
     res.status(code).json({ error: result.error });
@@ -2864,7 +2960,7 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
     await sendTelegramMessage(token, chatId, "🤖 AI murabbiy tahlil qilyapti... (10-20 soniya)");
     const result = await generateAiAdvice(syncedState.activeShop);
     if (result.ok) {
-      await sendTelegramMessage(token, chatId, aiAdviceToText(result.data));
+      await sendTelegramMessage(token, chatId, aiAdviceToText(result.data, result.raw));
     } else {
       await sendTelegramMessage(token, chatId, `⚠️ AI murabbiy javob bermadi: ${result.error}`);
     }
