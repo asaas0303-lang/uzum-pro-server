@@ -2992,12 +2992,6 @@ app.get('/api/compensation-candidates', async (req, res) => {
 });
 
 // 19-D: ta'minlashlar (yuk xatlari) ro'yxati — dashboard "Ta'minlashlar" bo'limi uchun
-// 19-R VAQTINCHALIK diagnostika (faqat o'qish): utilization_decisions.json tarkibini ko'rsatadi —
-// /utilizatsiya xabarining "Kutilayotgan aktlar" bo'limini aniq matn bilan ko'rsatish uchun. Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/utilization-decisions', (req, res) => {
-  res.json(readJsonFile(UTILIZATION_DECISIONS_FILE, {}));
-});
-
 app.get('/api/invoices', async (req, res) => {
   const result = await computeInvoicesSummary();
   if (!result.ok) return sendUzumError(res, result.error);
