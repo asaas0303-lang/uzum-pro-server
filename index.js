@@ -1644,7 +1644,10 @@ async function buildAiContext(shopId) {
     // hisoblangan qiymatlarning o'zi (formatMoliyaBlock/formatMaqsadBlock/formatXitoyBlock ishlatadi).
     raw: {
       fin, cf, goal, credits: syncedState.credits || [],
-      reorderSkus: skuRows.filter(r => r.needsReorder).map(r => ({ title: r.title, stockDays: r.stockDays }))
+      reorderSkus: skuRows.filter(r => r.needsReorder).map(r => ({ title: r.title, stockDays: r.stockDays })),
+      // 19-T: barcha hisoblanadigan SKU (needsReorder'dan qat'iy nazar) — Xitoy bo'limida "eng yaqin
+      // muddat" ko'rsatish uchun, computeSkuMetrics()dagi stockDays'dan (qayta hisob YO'Q).
+      skusByStockDays: skuRows.filter(r => r.stockDays != null).map(r => ({ title: r.title, stockDays: r.stockDays }))
     }
   };
 }
@@ -1653,17 +1656,18 @@ async function buildAiContext(shopId) {
 // Qiymat yo'q bo'lsa qator butunlay o'tkazib yuboriladi (taxmin/nol ko'rsatilmaydi).
 function formatMoliyaBlock(raw) {
   const lines = [];
-  if (raw.fin && raw.fin.ok) lines.push(`💵 Sof foyda (bu oy): *${fmtMoney(raw.fin.profit)} so'm*`);
+  if (raw.fin && raw.fin.ok) lines.push(`• 💵 Sof foyda (bu oy): *${fmtMoney(raw.fin.profit)} so'm*`);
   if (raw.cf && raw.cf.ok) {
     const sign = raw.cf.netCashFlow >= 0 ? '+' : '−';
-    lines.push(`💳 Naqd oqim: *${sign}${fmtMoney(Math.abs(raw.cf.netCashFlow))} so'm*`);
+    const holat = raw.cf.netCashFlow >= 0 ? 'Barqaror' : 'Xavfli';
+    lines.push(`• 💸 Naqd oqim: *${sign}${fmtMoney(Math.abs(raw.cf.netCashFlow))} so'm* (Holat: ${holat})`);
   }
   const credits = raw.credits || [];
   if (credits.length) {
     const nearest = credits.reduce((a, c) => (creditDaysUntilDue(c) < creditDaysUntilDue(a) ? c : a));
-    lines.push(`📅 Yaqin kredit to'lovi: *${fmtMoney(nearest.monthlyPayment)} so'm* — ${nearest.name} (${nearest.nextPaymentDate || '?'})`);
+    lines.push(`• 📅 Yaqin kredit to'lovi: *${fmtMoney(nearest.monthlyPayment)} so'm* — ${nearest.name} (${nearest.nextPaymentDate || '?'})`);
   }
-  if (raw.cf && raw.cf.ok && raw.cf.creditRemaining > 0) lines.push(`📉 Umumiy qarz: *${fmtMoney(raw.cf.creditRemaining)} so'm*`);
+  if (raw.cf && raw.cf.ok && raw.cf.creditRemaining > 0) lines.push(`• 📉 Umumiy qarz: *${fmtMoney(raw.cf.creditRemaining)} so'm*`);
   return lines.length ? lines.join('\n') : null;
 }
 function formatMaqsadBlock(raw) {
@@ -1673,14 +1677,16 @@ function formatMaqsadBlock(raw) {
   if (target <= 0) return null;
   const pct = (current / target) * 100;
   const remaining = Math.max(0, target - current);
-  const lines = [`📈 Bajarildi: *${pct.toFixed(1)}%*`, `💰 Hozirgi aylanma: *${fmtMoney(current)} so'm*`];
-  if (remaining > 0) lines.push(`🎯 Maqsadgacha qoldi: *${fmtMoney(remaining)} so'm*`);
+  const lines = [`• 📈 Bajarildi: *${pct.toFixed(1)}%*`, `• 💰 Hozirgi aylanma: *${fmtMoney(current)} so'm*`];
+  if (remaining > 0) lines.push(`• 🎯 Maqsadgacha qoldi: *${fmtMoney(remaining)} so'm*`);
   return lines.join('\n');
 }
+// 19-T: eng kam zaxira-kun qolgan 2-3 ta SKU (needsReorder'dan qat'iy nazar — maqsad eng yaqin
+// muddatni ko'rsatish). SKU ma'lumoti umuman bo'lmasa — eski oddiy gap (taxmin qilinmaydi).
 function formatXitoyBlock(raw) {
-  const skus = raw.reorderSkus || [];
+  const skus = (raw.skusByStockDays || []).slice().sort((a, b) => a.stockDays - b.stockDays).slice(0, 3);
   if (!skus.length) return "Hozircha shoshilinch buyurtma kerak emas";
-  return skus.slice(0, 10).map(s => `🔴 *${s.title}* — ${s.stockDays != null ? s.stockDays.toFixed(0) + ' kunga yetadi' : "aylanma noma'lum"}`).join('\n');
+  return skus.map(s => `• 🔹 "${s.title}": Zaxira ${s.stockDays.toFixed(0)} kunga yetadi`).join('\n');
 }
 
 // 19-G: Gemini'ni chaqirib, JSON javobni parse qiladi. maxOutputTokens aniq belgilangan (avval yo'q edi —
@@ -1777,18 +1783,19 @@ function aiAdviceToText(d, raw) {
   if (moliyaBlock || d.moliya_sharh) {
     lines.push('📊 *MOLIYA HOLATI*');
     if (moliyaBlock) lines.push(moliyaBlock);
-    if (d.moliya_sharh) lines.push(`_${d.moliya_sharh}_`);
+    if (d.moliya_sharh) lines.push(`• ${d.moliya_sharh}`);
     lines.push('');
   }
 
   const ishlar = Array.isArray(d.bugungi_ishlar) ? d.bugungi_ishlar.filter(Boolean) : [];
   if (ishlar.length) {
-    lines.push('📋 *BUGUNGI VAZIFALAR*');
+    lines.push("📋 *BUGUNGI VAZIFALAR (Muhimlilik bo'yicha)*");
     ishlar.forEach((x, i) => {
       const belgi = x.shoshilinch ? '🚨' : '🔸';
-      lines.push(`${belgi} *${i + 1}. ${x.sarlavha || ''}*`);
-      if (x.vazifa) lines.push(`   Vazifa: ${x.vazifa}`);
-      if (x.xavf) lines.push(`   Xavf: *${x.xavf}*`);
+      const shoshTag = x.shoshilinch ? ' (Shoshilinch!)' : '';
+      lines.push(`${belgi} *${i + 1}. ${x.sarlavha || ''}${shoshTag}*`);
+      if (x.vazifa) lines.push(`   • Vazifa: ${x.vazifa}`);
+      if (x.xavf) lines.push(`   • Xavf: *${x.xavf}*`);
       lines.push('');
     });
   }
@@ -1797,13 +1804,14 @@ function aiAdviceToText(d, raw) {
   if (maqsadBlock) {
     lines.push('🎯 *OYLIK MAQSAD*');
     lines.push(maqsadBlock);
-    if (d.maqsad_reja) lines.push(`_Reja: ${d.maqsad_reja}_`);
+    if (d.maqsad_reja) lines.push(`• Reja: ${d.maqsad_reja}`);
     lines.push('');
   }
 
-  lines.push('🇨🇳 *XITOYDAN BUYURTMA*');
+  const xitoyHolat = (raw.reorderSkus || []).length > 0 ? 'Shoshilinch' : 'Yaxshi';
+  lines.push(`📦 *XITOYDAN BUYURTMA (Holat: ${xitoyHolat})*`);
   lines.push(formatXitoyBlock(raw));
-  if (d.xitoy_izoh) lines.push(`_Izoh: ${d.xitoy_izoh}_`);
+  if (d.xitoy_izoh) lines.push(`• Izoh: ${d.xitoy_izoh}`);
 
   return lines.join('\n').trim();
 }
