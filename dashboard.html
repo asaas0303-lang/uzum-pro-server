@@ -2912,8 +2912,10 @@ ${urgentSection}
       }, 500);
     }
 
-    // 18-C: AI moliyaviy murabbiy — server to'liq kontekstni o'zi yig'adi (faqat shopId yuboramiz)
-    async function askGeminiAdvice() {
+    // 19-V: Gemini'ga endi jonli murojaat qilinmaydi — bugungi kesh (05:30 croni) ko'rsatiladi, raqamlar
+    // har doim jonli. Kesh yo'q bo'lsa "pending" — foydalanuvchi aniq ogohlantirilib, force:true bilan
+    // qayta chaqirsa jonli generatsiya qiladi (kunlik limitdan sarflaydi).
+    async function askGeminiAdvice(force) {
       const btn = document.getElementById('gemini-trigger-btn');
       btn.disabled = true;
       btn.innerHTML = `<i class="w-4 h-4 animate-spin inline-block mr-1"></i> Murabbiy tahlil qilmoqda...`;
@@ -2921,14 +2923,25 @@ ${urgentSection}
         const response = await fetch('/api/gemini/advice', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ shopId: state.activeShop })
+          body: JSON.stringify({ shopId: state.activeShop, force: !!force })
         });
-        if (!response.ok) {
-          const errRes = await response.json().catch(() => ({}));
-          throw new Error(errRes.error || "AI murabbiy xatosi");
+        const resData = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(resData.error || "AI murabbiy xatosi");
+        if (resData.pending) {
+          state.aiResults = null;
+          const panel = document.getElementById('ai-results-panel');
+          if (panel) {
+            panel.classList.remove('hidden');
+            panel.innerHTML = `
+              <div class="bg-darkBg/95 border border-darkBorder rounded-2xl p-3.5 text-center">
+                <div class="text-xs text-slate-300 mb-2">⏳ ${resData.message || "Bugungi tahlil hali tayyorlanmagan."}</div>
+                <button onclick="askGeminiAdvice(true)" class="text-xs bg-slate-800 border border-slate-700 text-slate-300 py-1.5 px-3 rounded-lg font-medium hover:bg-slate-700">🔄 Hoziroq to'liq generatsiya qilish (1 ta kunlik so'rov sarflaydi)</button>
+              </div>`;
+          }
+        } else {
+          state.aiResults = resData;
+          renderAiCoach();
         }
-        state.aiResults = await response.json();
-        renderAiCoach();
       } catch (err) {
         alert(err.message || "Xatolik yuz berdi. Qayta urinib ko'ring.");
       } finally {

@@ -80,6 +80,7 @@ const SNAPSHOTS_FILE = path.join(DATA_DIR, 'snapshots.json');
 const PROBLEMS_FILE = path.join(DATA_DIR, 'problems.json'); // 18-D0: faol muammo holati (takroriy ogohlantirmaslik uchun)
 const INVOICE_STATE_FILE = path.join(DATA_DIR, 'invoice_state.json'); // 19-B: { deducted:[invoiceId], acceptedNotified:[invoiceId] } — bir yuk xatini ikki marta qayta ishlamaslik uchun
 const UTILIZATION_DECISIONS_FILE = path.join(DATA_DIR, 'utilization_decisions.json'); // 19-P: { <returnId>: { decision, decidedAt, notified } } — INVOICE_STATE_FILE bilan bir xil oddiy holat-fayli naqshi
+const DAILY_ADVICE_FILE = path.join(DATA_DIR, 'daily_advice.json'); // 19-V: { "<YYYY-MM-DD>": { shopId, data:{bugungi_ishlar,maqsad_reja,moliya_sharh,xitoy_izoh}, generatedAt } } — kuniga 1 marta Gemini natijasi
 
 // 19-P: bitta akt bo'yicha qabul qilingan qaror ("utilizatsiya"|"qaytarish") — bo'lmasa null.
 function getUtilizationDecision(returnId) {
@@ -90,6 +91,18 @@ function saveUtilizationDecision(returnId, decision) {
   const all = readJsonFile(UTILIZATION_DECISIONS_FILE, {});
   all[returnId] = { decision, decidedAt: new Date().toISOString(), notified: false };
   writeJsonFile(UTILIZATION_DECISIONS_FILE, all);
+}
+
+// 19-V: kunlik AI matni keshi — FAQAT Gemini yozgan matn (raqamlar HECH QACHON bu yerda saqlanmaydi,
+// har chaqiruvda buildAiContext() orqali jonli qayta hisoblanadi).
+function getDailyAdvice(date) {
+  const all = readJsonFile(DAILY_ADVICE_FILE, {});
+  return all[date] || null;
+}
+function saveDailyAdvice(date, data, shopId) {
+  const all = readJsonFile(DAILY_ADVICE_FILE, {});
+  all[date] = { shopId, data, generatedAt: new Date().toISOString() };
+  writeJsonFile(DAILY_ADVICE_FILE, all);
 }
 const SNAPSHOT_RETENTION_DAYS = 60;
 
@@ -1843,30 +1856,99 @@ function aiAdviceToText(d, raw) {
   return lines.join('\n').trim();
 }
 
+// 19-V: Gemini'ni chaqirib (kuniga bir marta), natijani keshga saqlaydi. Ertalabki cron va "hoziroq
+// generatsiya qilish" tugmasi ikkalasi ham shu funksiyani ishlatadi — bir xil kesh yozish naqshi.
+async function generateAndCacheDailyAdvice(shopId) {
+  const result = await generateAiAdvice(shopId);
+  if (result.ok) saveDailyAdvice(todayTashkent(), result.data, shopId);
+  return result;
+}
+
+// 19-V: kun davomidagi 6 ta bosqichdan BITTASINI yuboradi (bugungi keshdan matn + JONLI raqamlar,
+// Gemini chaqirilmaydi). Kesh topilmasa yoki shu bo'lim uchun ma'lumot bo'lmasa — JIM o'tkazib
+// yuboriladi (xato xabari yo'q, keyingi kunga normal davom etadi).
+async function sendStaggeredAdvice(part) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || !ADMIN_CHAT_ID) return;
+  const cached = getDailyAdvice(todayTashkent());
+  if (!cached) { console.log(`[AI-STAGGER] "${part}": bugungi kesh topilmadi, o'tkazib yuborildi.`); return; }
+  const shopId = cached.shopId || syncedState.activeShop;
+  const d = cached.data || {};
+  const raw = (await buildAiContext(shopId)).raw; // raqamlar HAR DOIM jonli, Gemini kerak emas
+
+  let msg = null;
+  if (part === 'ish0' || part === 'ish1' || part === 'ish2') {
+    const idx = { ish0: 0, ish1: 1, ish2: 2 }[part];
+    const ishlar = Array.isArray(d.bugungi_ishlar) ? d.bugungi_ishlar.filter(Boolean) : [];
+    const x = ishlar[idx];
+    if (!x) return; // bugun shu tartib raqamli vazifa yo'q
+    const belgi = x.shoshilinch ? '🚨' : '🔸';
+    const shoshTag = x.shoshilinch ? ' (Shoshilinch!)' : '';
+    const lines = [`${belgi} *${idx + 1}. ${x.sarlavha || ''}${shoshTag}*`];
+    if (x.vazifa) lines.push(`   • Vazifa: ${x.vazifa}`);
+    if (x.xavf) lines.push(`   • Xavf: *${x.xavf}*`);
+    msg = lines.join('\n');
+  } else if (part === 'moliya') {
+    const block = formatMoliyaBlock(raw);
+    if (!block && !d.moliya_sharh) return;
+    const lines = ['📊 *MOLIYA HOLATI*'];
+    if (block) lines.push(block);
+    if (d.moliya_sharh) lines.push(`• ${d.moliya_sharh}`);
+    msg = lines.join('\n');
+  } else if (part === 'maqsad') {
+    const block = formatMaqsadBlock(raw);
+    if (!block) return; // maqsad qo'yilmagan
+    const lines = ['🎯 *OYLIK MAQSAD*', block];
+    if (d.maqsad_reja) lines.push(`• Reja: ${d.maqsad_reja}`);
+    msg = lines.join('\n');
+  } else if (part === 'xitoy') {
+    const xitoyHolat = (raw.reorderSkus || []).length > 0 ? 'Shoshilinch' : 'Yaxshi';
+    const lines = [`📦 *XITOYDAN BUYURTMA (Holat: ${xitoyHolat})*`, formatXitoyBlock(raw)];
+    if (d.xitoy_izoh) lines.push(`• Izoh: ${d.xitoy_izoh}`);
+    lines.push('', "Ertaga yana ko'rishguncha! 👋");
+    msg = lines.join('\n');
+  }
+  if (msg) await sendTelegramMessage(token, ADMIN_CHAT_ID, msg);
+}
+
+// 19-V: dashboard eski sxemasiga (moliya_holati/maqsad/xitoy_buyurtma satr, bugungi_ishlar satrlar
+// massivi) moslab qaytaradi — d (kesh matni) + raw (jonli raqamlar)dan. dashboard.html'ga tegilmadi.
+function buildDashboardAdviceShape(d, raw) {
+  const strip = s => (s || '').replace(/\*/g, '');
+  const moliyaBlock = strip(formatMoliyaBlock(raw));
+  const maqsadBlock = strip(formatMaqsadBlock(raw));
+  return {
+    moliya_holati: [moliyaBlock, d.moliya_sharh].filter(Boolean).join('\n') || null,
+    bugungi_ishlar: (Array.isArray(d.bugungi_ishlar) ? d.bugungi_ishlar : []).filter(Boolean).map(x =>
+      `${x.shoshilinch ? '🚨' : '🔸'} ${x.sarlavha || ''}\nVazifa: ${x.vazifa || ''}\nXavf: ${x.xavf || ''}`
+    ),
+    maqsad: [maqsadBlock, d.maqsad_reja].filter(Boolean).join('\n') || null,
+    xitoy_buyurtma: [strip(formatXitoyBlock(raw)), d.xitoy_izoh].filter(Boolean).join('\n')
+  };
+}
+
+// 19-V: endi Gemini'ga kuniga FAQAT 1 marta (05:30 croni) murojaat qilinadi. Bu endpoint sukut bo'yicha
+// bugungi keshdan o'qiydi (raqamlar har doim jonli); kesh yo'q bo'lsa "pending" qaytaradi — dashboard
+// foydalanuvchiga aniq ogohlantirib, faqat u tasdiqlasa (force:true) jonli chaqiradi.
 app.post('/api/gemini/advice', async (req, res) => {
   const shopId = req.body?.shopId || syncedState.activeShop;
-  const result = await generateAiAdvice(shopId);
-  if (result.ok) {
-    // 19-S: dashboard renderAiCoach() eski sxemani (moliya_holati/maqsad/xitoy_buyurtma satr,
-    // bugungi_ishlar satrlar massivi) kutadi — bu yerda yangi struktura + kod-hisoblangan bloklardan
-    // moslashtirib beramiz (dashboard.html'ga tegmasdan). Markdown "*" belgilari HTML uchun olib tashlanadi.
-    const raw = result.raw || {};
-    const d = result.data || {};
-    const strip = s => (s || '').replace(/\*/g, '');
-    const moliyaBlock = strip(formatMoliyaBlock(raw));
-    const maqsadBlock = strip(formatMaqsadBlock(raw));
-    res.json({
-      moliya_holati: [moliyaBlock, d.moliya_sharh].filter(Boolean).join('\n') || null,
-      bugungi_ishlar: (Array.isArray(d.bugungi_ishlar) ? d.bugungi_ishlar : []).filter(Boolean).map(x =>
-        `${x.shoshilinch ? '🚨' : '🔸'} ${x.sarlavha || ''}\nVazifa: ${x.vazifa || ''}\nXavf: ${x.xavf || ''}`
-      ),
-      maqsad: [maqsadBlock, d.maqsad_reja].filter(Boolean).join('\n') || null,
-      xitoy_buyurtma: [strip(formatXitoyBlock(raw)), d.xitoy_izoh].filter(Boolean).join('\n')
-    });
-  } else {
-    const code = result.error.includes('sozlanmagan') ? 400 : 500;
-    res.status(code).json({ error: result.error });
+  const force = req.body?.force === true;
+
+  if (force) {
+    const result = await generateAndCacheDailyAdvice(shopId);
+    if (!result.ok) {
+      const code = result.error.includes('sozlanmagan') ? 400 : 500;
+      return res.status(code).json({ error: result.error });
+    }
+    return res.json(buildDashboardAdviceShape(result.data, result.raw));
   }
+
+  const cached = getDailyAdvice(todayTashkent());
+  if (!cached) {
+    return res.json({ pending: true, message: "Bugungi tahlil hali tayyorlanmagan, soat 06:00dan boshlab bosqichma-bosqich keladi." });
+  }
+  const raw = (await buildAiContext(cached.shopId || shopId)).raw;
+  res.json(buildDashboardAdviceShape(cached.data || {}, raw));
 });
 
 // Helper for Telegram messages
@@ -2885,6 +2967,32 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
       return;
     }
 
+    if (cq.data === 'ai_gen_now:ask') {
+      // 19-V: "hoziroq generatsiya" — avval aniq ogohlantirish (kunlik limitdan sarflaydi), keyin tasdiq
+      const messageId = cq.message?.message_id;
+      if (messageId) await editTelegramMessage(token, chatId, messageId,
+        "Bu kunlik limitdan 1 ta so'rov sarflaydi. Davom etilsinmi?",
+        { inline_keyboard: [[
+          { text: '✅ Ha', callback_data: 'ai_gen_now:confirm' },
+          { text: "❌ Yo'q", callback_data: 'ai_gen_now:cancel' }
+        ]] });
+      return;
+    }
+    if (cq.data === 'ai_gen_now:cancel') {
+      const messageId = cq.message?.message_id;
+      if (messageId) await editTelegramMessage(token, chatId, messageId, 'Bekor qilindi.', { inline_keyboard: [] });
+      return;
+    }
+    if (cq.data === 'ai_gen_now:confirm') {
+      const messageId = cq.message?.message_id;
+      if (messageId) await editTelegramMessage(token, chatId, messageId, "🤖 AI murabbiy tahlil qilyapti... (10-20 soniya)", { inline_keyboard: [] });
+      const shopId = syncedState.activeShop;
+      const result = await generateAndCacheDailyAdvice(shopId);
+      if (result.ok) await sendTelegramMessage(token, chatId, aiAdviceToText(result.data, result.raw));
+      else await sendTelegramMessage(token, chatId, `⚠️ AI murabbiy javob bermadi: ${result.error}`);
+      return;
+    }
+
     if (cq.data.startsWith('shop:')) {
       const shopSel = cq.data.slice('shop:'.length);
       await sendTelegramMessage(token, chatId, "Qaysi davr uchun hisobot kerak?", periodSelectionKeyboard(shopSel));
@@ -2991,13 +3099,17 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
     // 18-D1: pul holati — naqd oqim + proyeksiya + kredit
     await sendTelegramMessage(token, chatId, await moliyaCommandText());
   } else if (text.startsWith('/maslahat')) {
-    // 18-D1: AI moliyaviy murabbiy
-    await sendTelegramMessage(token, chatId, "🤖 AI murabbiy tahlil qilyapti... (10-20 soniya)");
-    const result = await generateAiAdvice(syncedState.activeShop);
-    if (result.ok) {
-      await sendTelegramMessage(token, chatId, aiAdviceToText(result.data, result.raw));
+    // 19-V: Gemini'ga endi jonli murojaat qilinmaydi — bugungi kesh (05:30 croni to'ldiradi) ko'rsatiladi,
+    // raqamlar esa har doim jonli hisoblanadi. Kesh yo'q bo'lsa — aniq ogohlantirish bilan tugma beriladi.
+    const cached = getDailyAdvice(todayTashkent());
+    if (!cached) {
+      await sendTelegramMessage(token, chatId, "⏳ Bugungi tahlil hali tayyorlanmagan, soat 06:00dan boshlab bosqichma-bosqich keladi.", {
+        inline_keyboard: [[{ text: "🔄 Hoziroq to'liq generatsiya qilish", callback_data: 'ai_gen_now:ask' }]]
+      });
     } else {
-      await sendTelegramMessage(token, chatId, `⚠️ AI murabbiy javob bermadi: ${result.error}`);
+      const shopId = cached.shopId || syncedState.activeShop;
+      const raw = (await buildAiContext(shopId)).raw;
+      await sendTelegramMessage(token, chatId, aiAdviceToText(cached.data, raw));
     }
   } else if (text.startsWith('/maqsad')) {
     // 18-D1: oylik aylanma maqsadi holati
@@ -3480,6 +3592,23 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
   console.log('[CRON] Kunlik hisobot rejalashtirildi: har kuni 05:00 Asia/Tashkent vaqtida.');
 } else {
   console.warn('[CRON] TELEGRAM_BOT_TOKEN yo\'q — kunlik hisobot rejalashtirilmadi.');
+}
+
+// 19-V: AI murabbiy — kuniga FAQAT 1 marta (05:30) Gemini'ga murojaat, natija keshlanadi, keyin kun
+// davomida 6 bosqichda (mavjud croplardan alohida vaqtlarda) shu keshdan bo'lib-bo'lib yuboriladi.
+// Har bosqichda raqamlar (moliya/maqsad/xitoy) JONLI qayta hisoblanadi — Gemini qayta chaqirilmaydi.
+if (process.env.UZUM_TOKEN && process.env.GEMINI_API_KEY) {
+  cron.schedule('30 5 * * *', () => {
+    generateAndCacheDailyAdvice(syncedState.activeShop).catch(e => console.error('[CRON] 05:30 AI generatsiya xato:', e));
+  }, { timezone: 'Asia/Tashkent' });
+  console.log('[CRON] Kunlik AI generatsiya rejalashtirildi: har kuni 05:30 Asia/Tashkent vaqtida.');
+}
+if (process.env.TELEGRAM_BOT_TOKEN) {
+  const stages = [['0 6 * * *', 'ish0'], ['0 9 * * *', 'ish1'], ['0 12 * * *', 'ish2'], ['0 15 * * *', 'moliya'], ['0 18 * * *', 'maqsad'], ['0 21 * * *', 'xitoy']];
+  stages.forEach(([spec, part]) => {
+    cron.schedule(spec, () => sendStaggeredAdvice(part).catch(e => console.error(`[CRON] AI bosqich "${part}" xato:`, e)), { timezone: 'Asia/Tashkent' });
+  });
+  console.log('[CRON] AI bosqichma-bosqich yuborish rejalashtirildi: 06:00, 09:00, 12:00, 15:00, 18:00, 21:00 Asia/Tashkent.');
 }
 
 // Serve Telegram UI directly
