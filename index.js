@@ -809,29 +809,6 @@ function getDailyDelta(shopId) {
   return { ready: true, snapshotCount: dates.length, fromDate: dates[dates.length - 2], toDate: dates[dates.length - 1], totalSold, totalSoldNet, totalReturned, perSku };
 }
 
-// 5.1: Berilgan do'kon uchun so'nggi N kunlik (yoki mavjud bo'lganicha) SKU bo'yicha o'rtacha kunlik sotuv.
-// Ikkita snapshot yetarli emas — kamida shu bor snapshotlar orasidagi haqiqiy kun oralig'iga bo'linadi.
-function averageDailySales(shopId, days) {
-  const snapshots = loadSnapshots();
-  const shopSnaps = snapshots[shopId] || {};
-  const dates = Object.keys(shopSnaps).sort();
-  if (dates.length < 2) return { ready: false, perSku: {} };
-  const window = dates.slice(-Math.min(days + 1, dates.length));
-  if (window.length < 2) return { ready: false, perSku: {} };
-  const first = shopSnaps[window[0]];
-  const last = shopSnaps[window[window.length - 1]];
-  const spanDays = window.length - 1;
-  const perSku = {};
-  const allSkuIds = new Set([...Object.keys(first), ...Object.keys(last)]);
-  for (const skuId of allSkuIds) {
-    const f = first[skuId] || { sold: 0 };
-    const l = last[skuId] || { sold: 0 };
-    const soldDelta = Math.max(0, (l.sold || 0) - (f.sold || 0));
-    perSku[skuId] = soldDelta / spanDays;
-  }
-  return { ready: true, spanDays, fromDate: window[0], toDate: window[window.length - 1], perSku };
-}
-
 // B-bosqich: Uzum rasmiy "aylanma kunlari" — oxirgi 15 kunlik O'RTACHA qoldiq ÷ O'RTACHA kunlik sotuv.
 // Bu kalendar yoshi EMAS: qoldiq sotuv tezligiga nisbatan necha kunga yetishini bildiradi (saqlash tarifi
 // shu ko'rsatkichga qarab bosqichlanadi). Snapshot: { sold(kumulyativ), returned, available }.
@@ -850,7 +827,9 @@ function computeTurnoverDays(shopId, skuId, snapshots) {
     if (rec && rec.available != null) { sumAvail += Math.max(0, rec.available); availDays++; }
   }
   const avgAvail = availDays > 0 ? sumAvail / availDays : 0;
-  // O'rtacha kunlik sotuv: (oxirgi.sold − birinchi.sold) / span — averageDailySales bilan bir xil usul
+  // O'rtacha kunlik sotuv: (oxirgi.sold − birinchi.sold) / span — FAQAT saqlash tarifi (aylanma kunlari)
+  // uchun, snapshot manbasida qoladi (Uzum'ning rasmiy 15-kunlik formulasi shuni talab qiladi — 19-U
+  // bashorat/zaxira-kunlari uchun finance/orders'ga o'tkazildi, bu funksiya ULARDAN mustaqil).
   const spanDays = window.length - 1;
   const firstSold = (shopSnaps[window[0]][skuId] || {}).sold || 0;
   const lastSold = (shopSnaps[window[window.length - 1]][skuId] || {}).sold || 0;
@@ -865,19 +844,20 @@ function computeTurnoverDays(shopId, skuId, snapshots) {
 async function computeSkuMetrics(shopId) {
   const prod = await fetchLiveShopProducts(shopId);
   if (!prod.ok) return { ok: false, error: prod.error };
-  const avg7 = averageDailySales(shopId, 7);
-  const avg30 = averageDailySales(shopId, 30);
+  // 19-U: endi finance/orders'dan (real vaqtli, aniq) — snapshot/quantitySold (kechikuvchi) EMAS.
+  const velocity = await computeSkuDailyVelocity(shopId);
   const perSku = {};
   prod.products.forEach(p => (p.skuList || []).forEach(sku => {
     const avail = Math.max(0, sku.availableAmount || 0); // 13.1: manfiy zaxira 0
-    const a7 = avg7.ready ? avg7.perSku[sku.skuId] : undefined;
-    const a30 = avg30.ready ? avg30.perSku[sku.skuId] : undefined;
+    const v = velocity.ready ? velocity.perSku[sku.skuId] : undefined;
+    const a7 = v ? v.avgDaily7 : undefined;
+    const a30 = v ? v.avgDaily30 : undefined;
     const stockDays7 = (a7 != null && a7 > 0) ? avail / a7 : null;
     const stockDays30 = (a30 != null && a30 > 0) ? avail / a30 : null;
     // 5.4: Xitoy buyurtma nuqtasi — eng ishonchli mavjud ko'rsatkich (30 kunlik, bo'lmasa 7 kunlik)
     const stockDaysBest = stockDays30 != null ? stockDays30 : stockDays7;
     // 5.3: nolikvid — 30 kunlik oyna to'liq va aniq shu SKU uchun ma'lum, oxirgi 30 kunda 0 sotilgan, hozir zaxirasi bor
-    const isDeadStock = avg30.ready && a30 != null && a30 === 0 && avail > 0;
+    const isDeadStock = velocity.ready && a30 != null && a30 === 0 && avail > 0;
     perSku[sku.skuId] = {
       productId: p.productId,
       avgDaily7: a7 != null ? a7 : null,
@@ -890,7 +870,7 @@ async function computeSkuMetrics(shopId) {
       rank: sku.rank || null // 5.2
     };
   }));
-  return { ok: true, ready7: avg7.ready, ready30: avg30.ready, spanDays7: avg7.spanDays || 0, spanDays30: avg30.spanDays || 0, perSku };
+  return { ok: true, ready7: velocity.ready, ready30: velocity.ready, spanDays7: velocity.spanDays7 || 0, spanDays30: velocity.spanDays30 || 0, perSku };
 }
 
 // B1/14A1: Moliya bo'limi uchun N kunlik (yoki mavjud snapshot oralig'icha) xulosa.
@@ -1125,6 +1105,57 @@ async function computeSalesFromOrders(shopId, period) {
   };
 }
 
+// 19-U: bitta davr uchun finance/orders'dan SKU (skuId) bo'yicha sotilgan dona yig'indisi.
+// computeSalesFromOrders() bilan bir xil manba/filtr mantig'i (fetchFinanceOrders, periodToDayRange,
+// CANCELED chiqarib tashlash) — lekin computeSalesFromOrders() perSku'si title bo'yicha kalitlaydi
+// (finance/orders'da skuId yo'q), bashorat/zaxira-kunlari esa skuId bo'yicha qidiradi. Shuning uchun
+// shu yordamchi orqali productId+skuTitle → skuId bog'lanadi (xuddi resolveOrderCost() qiladigan kabi).
+async function skuUnitsInPeriod(shopId, period, matchSkuId) {
+  const range = periodToDayRange(period);
+  const fo = await fetchFinanceOrders(shopId);
+  if (!fo.ok) return null;
+  const inRange = fo.orders.filter(o => o.orderId != null && o.date != null);
+  const dayOrders = inRange.filter(o => { const d = tashDayOf(o.date); return d >= range.fromDay && d <= range.toDay; });
+  const valid = dayOrders.filter(o => o.status !== 'CANCELED');
+  const unitsBySkuId = {};
+  for (const o of valid) {
+    const skuId = matchSkuId(o.productId, o.skuTitle);
+    if (skuId == null) continue;
+    unitsBySkuId[skuId] = (unitsBySkuId[skuId] || 0) + (o.amount || 0);
+  }
+  return { unitsBySkuId, spanDays: range.spanDays };
+}
+
+// 19-U: HAR SKU uchun kunlik sotuv tezligi — finance/orders'dan (real vaqtli, aniq), snapshot/
+// quantitySold (kechikuvchi) EMAS. avg7/avg30 alohida, vaznli o'rtacha: 0.6×avg7 + 0.4×avg30
+// (so'nggi tezlanishni aks ettirish uchun). Bittasi yo'q bo'lsa — ikkinchisi, ikkalasi ham yo'q
+// bo'lsa (finance/orders o'qilmasa) — null ("hisoblab bo'lmaydi").
+async function computeSkuDailyVelocity(shopId) {
+  const prod = await fetchLiveShopProducts(shopId);
+  if (!prod.ok) return { ready: false, perSku: {} };
+  const matchSkuId = buildSkuMatcher(prod.products);
+
+  const [w, m] = await Promise.all([
+    skuUnitsInPeriod(shopId, 'week', matchSkuId),
+    skuUnitsInPeriod(shopId, 'month', matchSkuId)
+  ]);
+  if (!w && !m) return { ready: false, perSku: {} };
+
+  const skuIds = new Set([...(w ? Object.keys(w.unitsBySkuId) : []), ...(m ? Object.keys(m.unitsBySkuId) : [])]);
+  const perSku = {};
+  for (const skuId of skuIds) {
+    const a7 = w ? (w.unitsBySkuId[skuId] || 0) / w.spanDays : null;
+    const a30 = m ? (m.unitsBySkuId[skuId] || 0) / m.spanDays : null;
+    let avgDaily;
+    if (a7 != null && a30 != null) avgDaily = 0.6 * a7 + 0.4 * a30;
+    else if (a30 != null) avgDaily = a30;
+    else if (a7 != null) avgDaily = a7;
+    else avgDaily = null;
+    perSku[skuId] = { avgDaily7: a7, avgDaily30: a30, avgDaily };
+  }
+  return { ready: true, spanDays7: w ? w.spanDays : 0, spanDays30: m ? m.spanDays : 0, perSku };
+}
+
 // 14A3: barcha davrlar uchun YAGONA javob shakli — bot va dashboard bir xil renderer ishlatsin.
 // period: today | yesterday | week | month
 async function computePeriodReport(shopId, period) {
@@ -1157,40 +1188,34 @@ function daysSinceLastSale(shopId, skuId) {
   return Math.round(diffMs / (24 * 60 * 60 * 1000));
 }
 
-// E: Keyingi 30 kunlik bashorat — 7 va 30 kunlik o'rtacha sotuvning O'RTACHASI (bir kunlik sakrash
-// bashoratni buzmasin), faqat hozir zaxirasi bor SKU'lar hisobga olinadi. Ishonch darajasi umumiy
-// snapshot tarixi uzunligiga qarab belgilanadi (E2, majburiy).
-function forecastConfidence(snapshotDays) {
-  if (snapshotDays < 7) return { level: 'none', pct: null };
-  if (snapshotDays <= 14) return { level: 'low', pct: 40 };
-  if (snapshotDays <= 30) return { level: 'medium', pct: 25 };
-  return { level: 'good', pct: 15 };
+// E/19-U: Keyingi 30 kunlik bashorat — finance/orders'dan (real vaqtli, aniq) HAR SKU kunlik tezligi
+// (computeSkuDailyVelocity(), 0.6×avg7+0.4×avg30), 30 kunlik proyeksiya ZAXIRADAN OSHMAYDI. Ishonch —
+// finance/orders qamrab olgan haqiqiy kun soniga qarab (endi doim ~30, snapshot ramp-up emas).
+function forecastConfidence(dataDays) {
+  if (!dataDays || dataDays < 7) return { level: 'none', pct: null };
+  return { level: 'good', pct: 15 }; // finance/orders real vaqtli — "ramp-up" muammosi yo'q
 }
 
 async function computeForecast(shopId) {
   const prod = await fetchLiveShopProducts(shopId);
   if (!prod.ok) return { ok: false, error: prod.error };
-  const snapshots = loadSnapshots();
-  const shopSnaps = snapshots[shopId] || {};
-  const snapshotDays = Object.keys(shopSnaps).length;
-  const confidence = forecastConfidence(snapshotDays);
-  if (confidence.level === 'none') {
-    return { ok: true, ready: false, snapshotDays, confidence: confidence.level };
+  const snapshots = loadSnapshots(); // B-bosqich: FAQAT saqlash tarifi (aylanma kunlari) uchun — sotuv manbai emas
+  const velocity = await computeSkuDailyVelocity(shopId);
+  // snapshotDays nomi saqlanadi (dashboard shu maydonni "N kunlik ma'lumot asosida" deb ko'rsatadi) —
+  // endi finance/orders qamrab olgan haqiqiy kun soni (odatda 30), ramp-up bilan bog'liq emas.
+  const dataDays = velocity.spanDays30 || velocity.spanDays7 || 0;
+  const confidence = forecastConfidence(velocity.ready ? dataDays : 0);
+  if (!velocity.ready || confidence.level === 'none') {
+    return { ok: true, ready: false, snapshotDays: dataDays, confidence: confidence.level };
   }
 
-  const avg7 = averageDailySales(shopId, 7);
-  const avg30 = averageDailySales(shopId, 30);
-  let dailySales = 0, dailyProfit = 0;
+  let forecastSales = 0, forecastProfit = 0;
   prod.products.forEach(p => (p.skuList || []).forEach(sku => {
-    if ((sku.availableAmount || 0) <= 0) return; // faqat zaxirasi bor SKU'lar
-    const a7 = avg7.ready ? avg7.perSku[sku.skuId] : undefined;
-    const a30 = avg30.ready ? avg30.perSku[sku.skuId] : undefined;
-    let avgDaily;
-    if (a7 != null && a30 != null) avgDaily = (a7 + a30) / 2;
-    else if (a7 != null) avgDaily = a7;
-    else if (a30 != null) avgDaily = a30;
-    else return;
-    if (avgDaily <= 0) return;
+    const available = sku.availableAmount || 0;
+    if (available <= 0) return; // faqat zaxirasi bor SKU'lar
+    const v = velocity.perSku[sku.skuId];
+    const avgDaily = v ? v.avgDaily : null;
+    if (avgDaily == null || avgDaily <= 0) return;
 
     const price = sku.purchasePrice || 0;
     const productId = p.productId;
@@ -1201,13 +1226,15 @@ async function computeForecast(shopId) {
     const tInfo = resolveTannarx(sku.skuId, productId);
     const profitPerUnit = price - commission - logi - stor - tInfo.tannarx;
 
-    dailySales += avgDaily * price;
-    dailyProfit += avgDaily * profitPerUnit;
+    // 19-U: 30 kunlik proyeksiya zaxiradan OSHMAYDI — zaxira tugasa, tugaguncha sotiladi deb hisoblanadi.
+    const projectedUnits = Math.min(avgDaily * 30, available);
+    forecastSales += projectedUnits * price;
+    forecastProfit += projectedUnits * profitPerUnit;
   }));
 
   return {
-    ok: true, ready: true, snapshotDays, confidence: confidence.level, confidencePct: confidence.pct,
-    forecastSales: dailySales * 30, forecastProfit: dailyProfit * 30
+    ok: true, ready: true, snapshotDays: dataDays, confidence: confidence.level, confidencePct: confidence.pct,
+    forecastSales, forecastProfit
   };
 }
 
