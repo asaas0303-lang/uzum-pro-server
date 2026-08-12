@@ -3235,13 +3235,6 @@ app.get('/api/compensation-candidates', async (req, res) => {
 });
 
 // 19-D: ta'minlashlar (yuk xatlari) ro'yxati — dashboard "Ta'minlashlar" bo'limi uchun
-// 19-W VAQTINCHALIK diagnostika: GEMINI_EXPENSE_API_KEY mavjudligini tekshiradi — QIYMATNI HECH QACHON
-// qaytarmaydi, faqat bor/yo'qligi va uzunligi. Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/expense-key-check', (req, res) => {
-  const key = process.env.GEMINI_EXPENSE_API_KEY;
-  res.json({ exists: !!key, length: key ? key.length : 0 });
-});
-
 app.get('/api/invoices', async (req, res) => {
   const result = await computeInvoicesSummary();
   if (!result.ok) return sendUzumError(res, result.error);
