@@ -3439,7 +3439,7 @@ function addOneMonthISO(dateStr) {
 
 // ============ 19-X: ERKIN MATN — XARAJAT/KREDIT PARSING (lokal, Gemini'siz) ============
 // Standart xarajat kategoriyalari (dashboard <select> bilan bir xil) + userExpenses'da avval saqlangan boshqalar.
-const EXPENSE_CATEGORIES = ['Xitoy tovar', 'Logistika', 'Reklama', 'Ijara', 'Ish haqi', 'Soliq', 'Boshqa'];
+const EXPENSE_CATEGORIES = ['Xitoy tovar', 'Logistika', 'Yoqilg\'i', 'Reklama', 'Ijara', 'Ish haqi', 'Soliq', 'Boshqa'];
 function getExpenseCategories() {
   const extra = [...new Set((syncedState.userExpenses || []).map(e => e.category).filter(Boolean))];
   return [...new Set([...EXPENSE_CATEGORIES, ...extra])];
@@ -3492,7 +3492,8 @@ function parseAmountFromText(text) {
 
 // Turi (xarajat/kredit) + kategoriya/bank aniqlaydi. Kalit so'z → kategoriya lug'ati.
 const EXPENSE_KEYWORDS = {
-  Logistika: ['gaz', 'benzin', 'yoqilgi', 'yoqilg', 'transport', 'yetkazish', 'dostavka', 'logistika', 'pochta'],
+  'Yoqilg\'i': ['gaz', 'benzin', 'yoqilgi', 'yoqilg', 'zapravka', 'moshinaga', 'avtomobilga'],
+  Logistika: ['transport', 'yetkaz', 'dostavka', 'logistika', 'pochta'], // "yetkaz" — yetkazish/yetkazib barcha shakllarni qamrab oladi
   Reklama: ['reklama', 'ads', 'target', 'blogger'],
   Ijara: ['ijara', 'arenda', 'ofis'],
   'Ish haqi': ['ish haqi', 'oylik', 'maosh', 'zarplata', 'ishchi'],
@@ -3542,6 +3543,7 @@ Matn: "${text}"
 
 Mavjud xarajat kategoriyalari: ${cats.join(', ')}.
 AVVAL shu ro'yxatdan eng mos kelganini tanla. Faqat CHINDAN yangi (ro'yxatda umuman mos kelmaydigan) bo'lsa yangi qisqa nom taklif qil.
+"Boshqa" kategoriyasini FAQAT chindan hech qanday mazmunli nom topib bo'lmaganda ishlating — bu LENGROQ (dangasa) tanlov emas. Aks holda, xarajat nima uchun ekanligini aniq ifodalaydigan QISQA (1-2 so'z) yangi kategoriya nomi taklif qiling (masalan "Kommunal", "Aloqa", "Ta'mirlash").
 Kredit banklari: "TBC" yoki "Uzum Bank".
 
 Faqat toza JSON qaytar (markdown YO'Q):
@@ -3613,7 +3615,11 @@ async function routeFreeTextFinance(token, chatId, text) {
   }
   if (parsed.type === 'xarajat') {
     const rec = saveUserExpenseRecord(parsed.amount, parsed.category, text);
-    await sendTelegramMessage(token, chatId, `✅ Xarajat qo'shildi: ${fmtMoney(rec.amount)} so'm — ${rec.category}\n✏️ Noto'g'ri bo'lsa, /oxirgi_xarajat buyrug'i bilan o'chiring`);
+    // 19-Z: "/oxirgi_xarajat" dagi juftsiz "_" legacy Markdown'da kursiv boshlanishi deb talqin qilinib,
+    // BUTUN xabarni 400 xato bilan rad ettirar edi (sendTelegramMessage natijasi tekshirilmagani uchun
+    // foydalanuvchi jim qolardi). "\_" — legacy Markdown'ning rasmiy escape'i: haqiqiy buyruq nomi
+    // ("/oxirgi_xarajat", chiziqcha bilan — nusxa ko'chirib yuborsa ishlashi uchun) saqlanib qoladi.
+    await sendTelegramMessage(token, chatId, `✅ Xarajat qo'shildi: ${fmtMoney(rec.amount)} so'm — ${rec.category}\n✏️ Noto'g'ri bo'lsa, /oxirgi\\_xarajat buyrug'i bilan o'chiring`);
   } else {
     const terms = computeCreditTerms(parsed.bank, parsed.amount, todayTashkent());
     if (!terms) { await sendTelegramMessage(token, chatId, "Bankni aniqlay olmadim (TBC yoki Uzum Bank). Qaytadan yozing."); return; }
