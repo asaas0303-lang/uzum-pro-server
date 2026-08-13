@@ -3392,6 +3392,19 @@ app.get('/api/invoice/sync-status', (req, res) => {
   });
 });
 
+// 19-BB VAQTINCHALIK diagnostika (faqat o'qish): berilgan invoice id'lar deducted/acceptedNotified
+// ro'yxatida bormi tekshiradi. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/invoice-deducted-check', (req, res) => {
+  const st = readJsonFile(INVOICE_STATE_FILE, { deducted: [], acceptedNotified: [] });
+  const ids = (req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean).map(Number);
+  const deducted = new Set(st.deducted || []);
+  const acceptedNotified = new Set(st.acceptedNotified || []);
+  res.json({
+    totalDeducted: (st.deducted || []).length,
+    results: ids.map(id => ({ id, deducted: deducted.has(id), acceptedNotified: acceptedNotified.has(id) }))
+  });
+});
+
 // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar) — barcha ACCEPTED yuk xatlari bo'yicha
 app.get('/api/compensation-candidates', async (req, res) => {
   const result = await computeCompensationCandidates();
