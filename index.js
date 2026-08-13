@@ -81,6 +81,8 @@ const PROBLEMS_FILE = path.join(DATA_DIR, 'problems.json'); // 18-D0: faol muamm
 const INVOICE_STATE_FILE = path.join(DATA_DIR, 'invoice_state.json'); // 19-B: { deducted:[invoiceId], acceptedNotified:[invoiceId] } — bir yuk xatini ikki marta qayta ishlamaslik uchun
 const UTILIZATION_DECISIONS_FILE = path.join(DATA_DIR, 'utilization_decisions.json'); // 19-P: { <returnId>: { decision, decidedAt, notified } } — INVOICE_STATE_FILE bilan bir xil oddiy holat-fayli naqshi
 const DAILY_ADVICE_FILE = path.join(DATA_DIR, 'daily_advice.json'); // 19-V: { "<YYYY-MM-DD>": { shopId, data:{bugungi_ishlar,maqsad_reja,moliya_sharh,xitoy_izoh}, generatedAt } } — kuniga 1 marta Gemini natijasi
+const LENT_LOANS_FILE = path.join(DATA_DIR, 'lent_loans.json'); // 19-AA: [{ id, amount, remainingAmount, note, dateGiven, status, nextReminderDate }] — berilgan qarz
+const BORROWED_DEBTS_FILE = path.join(DATA_DIR, 'borrowed_debts.json'); // 19-AA: [{ id, amount, remainingAmount, source, dateTaken, status, nextReminderDate }] — olingan norasmiy qarz
 
 // 19-P: bitta akt bo'yicha qabul qilingan qaror ("utilizatsiya"|"qaytarish") — bo'lmasa null.
 function getUtilizationDecision(returnId) {
@@ -2659,6 +2661,12 @@ const CREDIT_CONFIRM_TTL_MS = 10 * 60 * 1000;
 // 19-Y: /oxirgi_xarajat o'chirish tasdiqi — o'chiriladigan aniq yozuv id'si (oxirgisi tanlangan paytda qulflanadi).
 const pendingExpenseDelete = new Map(); // chatId -> { id, amount, category, expiresAt }
 
+// 19-AA: berilgan/olingan norasmiy qarz tasdiqlashini kutayotgan sessiyalar (pendingCreditConfirm naqshida).
+const pendingLoanConfirm = new Map(); // chatId -> { amount, rawText, expiresAt }
+const pendingDebtConfirm = new Map(); // chatId -> { amount, source, expiresAt }
+// 19-AA: qisman to'lov/qaytarish summasini kutayotgan javob — eslatma "🔄 Qisman" tugmasi bosilganda o'rnatiladi.
+const pendingPartialAmount = new Map(); // chatId -> { id, kind: 'lent'|'debt', expiresAt }
+
 // 19-Y: server tomonda oddiy ID generatori (dashboard finId() naqshiga o'xshash).
 function finId() { return 'f_' + Date.now() + '_' + Math.floor(Math.random() * 1000); }
 
@@ -3041,6 +3049,75 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
       return;
     }
 
+    if (cq.data.startsWith('loan_confirm:')) {
+      // 19-AA: berilgan qarzni SAQLASHDAN OLDIN tasdiqlash — pendingLoanConfirm naqshida.
+      const answer = cq.data.split(':')[1];
+      const messageId = cq.message?.message_id;
+      const pend = pendingLoanConfirm.get(chatId);
+      pendingLoanConfirm.delete(chatId);
+      if (!pend || Date.now() >= pend.expiresAt) {
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "⏳ Vaqt tugadi, qaytadan yozing.", { inline_keyboard: [] });
+        return;
+      }
+      if (answer === 'yes') {
+        saveLentLoan(pend.amount, pend.rawText);
+        if (messageId) await editTelegramMessage(token, chatId, messageId, `✅ Qayd etildi: ${fmtMoney(pend.amount)} so'm qarz berilgan (kuzatilmoqda, har 15 kunda eslatiladi).`, { inline_keyboard: [] });
+      } else {
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "❌ Bekor qilindi.", { inline_keyboard: [] });
+      }
+      return;
+    }
+    if (cq.data.startsWith('debt_confirm:')) {
+      // 19-AA: olingan norasmiy qarzni SAQLASHDAN OLDIN tasdiqlash — pendingDebtConfirm naqshida.
+      const answer = cq.data.split(':')[1];
+      const messageId = cq.message?.message_id;
+      const pend = pendingDebtConfirm.get(chatId);
+      pendingDebtConfirm.delete(chatId);
+      if (!pend || Date.now() >= pend.expiresAt) {
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "⏳ Vaqt tugadi, qaytadan yozing.", { inline_keyboard: [] });
+        return;
+      }
+      if (answer === 'yes') {
+        saveBorrowedDebt(pend.amount, pend.source);
+        if (messageId) await editTelegramMessage(token, chatId, messageId, `✅ Qayd etildi: ${fmtMoney(pend.amount)} so'm qarz olingan (kuzatilmoqda, har 5 kunda eslatiladi).`, { inline_keyboard: [] });
+      } else {
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "❌ Bekor qilindi.", { inline_keyboard: [] });
+      }
+      return;
+    }
+    if (cq.data.startsWith('loan_remind:')) {
+      // 19-AA: berilgan qarz eslatmasiga javob — got (yopildi) / wait (+15 kun) / partial (summa so'raladi).
+      const [, action, id] = cq.data.split(':');
+      const messageId = cq.message?.message_id;
+      if (action === 'got') {
+        updateLentLoan(id, { remainingAmount: 0, status: 'yopildi' });
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "🎉 Ajoyib! Qarz yopildi.", { inline_keyboard: [] });
+      } else if (action === 'wait') {
+        updateLentLoan(id, { nextReminderDate: addDaysISO(todayTashkent(), 15) });
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "⏳ Yaxshi, 15 kundan keyin yana so'rayman.", { inline_keyboard: [] });
+      } else if (action === 'partial') {
+        pendingPartialAmount.set(chatId, { id, kind: 'lent', expiresAt: Date.now() + CREDIT_CONFIRM_TTL_MS });
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "Necha so'm oldingiz?", { inline_keyboard: [] });
+      }
+      return;
+    }
+    if (cq.data.startsWith('debt_remind:')) {
+      // 19-AA: olingan qarz eslatmasiga javob — paid (yopildi) / wait (+5 kun) / partial (summa so'raladi).
+      const [, action, id] = cq.data.split(':');
+      const messageId = cq.message?.message_id;
+      if (action === 'paid') {
+        updateBorrowedDebt(id, { remainingAmount: 0, status: 'yopildi' });
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "🎉 Ajoyib! Qarz yopildi.", { inline_keyboard: [] });
+      } else if (action === 'wait') {
+        updateBorrowedDebt(id, { nextReminderDate: addDaysISO(todayTashkent(), 5) });
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "⏳ Yaxshi, 5 kundan keyin yana so'rayman.", { inline_keyboard: [] });
+      } else if (action === 'partial') {
+        pendingPartialAmount.set(chatId, { id, kind: 'debt', expiresAt: Date.now() + CREDIT_CONFIRM_TTL_MS });
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "Necha so'm to'ladingiz?", { inline_keyboard: [] });
+      }
+      return;
+    }
+
     if (cq.data.startsWith('shop:')) {
       const shopSel = cq.data.slice('shop:'.length);
       await sendTelegramMessage(token, chatId, "Qaysi davr uchun hisobot kerak?", periodSelectionKeyboard(shopSel));
@@ -3106,6 +3183,30 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
         ]]
       });
     }
+    return;
+  }
+
+  // 19-AA: qisman to'lov/qaytarish summasini kutayotgan javob — ENG BOSHIDA (utilizationSessions bilan
+  // bir xil joyda), routeFreeTextFinance()dan OLDIN tekshiriladi.
+  const partialPending = pendingPartialAmount.get(chatId);
+  if (partialPending && Date.now() < partialPending.expiresAt) {
+    const amt = parseAmountFromText(text);
+    if (amt == null) {
+      await sendTelegramMessage(token, chatId, "Summani tushunmadim, raqam bilan yozing.");
+      return;
+    }
+    pendingPartialAmount.delete(chatId);
+    const isLent = partialPending.kind === 'lent';
+    const list = isLent ? getLentLoans() : getBorrowedDebts();
+    const item = list.find(x => x.id === partialPending.id);
+    if (!item) { await sendTelegramMessage(token, chatId, "Yozuv topilmadi."); return; }
+    const newRemaining = Math.max(0, item.remainingAmount - amt);
+    const closed = newRemaining <= 0;
+    const updates = closed
+      ? { remainingAmount: 0, status: 'yopildi' }
+      : { remainingAmount: newRemaining, nextReminderDate: addDaysISO(todayTashkent(), isLent ? 15 : 5) };
+    if (isLent) updateLentLoan(item.id, updates); else updateBorrowedDebt(item.id, updates);
+    await sendTelegramMessage(token, chatId, closed ? "🎉 Qarz to'liq yopildi!" : `✅ Qayd etildi. Qolgan qarz: ${fmtMoney(newRemaining)} so'm`);
     return;
   }
 
@@ -3436,6 +3537,18 @@ function addOneMonthISO(dateStr) {
   const nd = Math.min(d, lastDay);
   return `${ny}-${String(nm).padStart(2, '0')}-${String(nd).padStart(2, '0')}`;
 }
+// 19-AA: addOneMonthISO() naqshida, lekin kunlar bilan (qarz eslatmalari uchun: +15/+5 kun).
+function addDaysISO(dateStr, days) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+}
+// 19-AA: legacy Markdown xavfsizligi — foydalanuvchi erkin matnini (note/source) xabarga qo'shishdan
+// oldin escape qiladi (19-Z'da topilgan juftsiz "_" 400-xato sinfini oldini olish uchun).
+function escapeMd(text) {
+  return String(text || '').replace(/([_*`[])/g, '\\$1');
+}
 
 // ============ 19-X: ERKIN MATN — XARAJAT/KREDIT PARSING (lokal, Gemini'siz) ============
 // Standart xarajat kategoriyalari (dashboard <select> bilan bir xil) + userExpenses'da avval saqlangan boshqalar.
@@ -3500,13 +3613,23 @@ const EXPENSE_KEYWORDS = {
   Soliq: ['soliq', 'nalog', 'jarima'],
   'Xitoy tovar': ['xitoy', 'tovar', 'mahsulot', 'dokon', 'partiya', 'zakaz', 'zakoz']
 };
+// 19-AA: "qarz"/"kredit" so'zi bor bo'lsa, YO'NALISH fe'l orqali aniqlanadi:
+// berdim → qarz_berish (pul sizdan chiqdi); oldim + bank so'zi → kredit (mavjud oqim, o'ZGARMAYDI);
+// oldim, bank yo'q → qarz_olish_norasmiy; yo'nalish aniq emas → noaniq (Gemini-zaxiraga tushadi).
 function classifyMessage(text) {
   const s = normUz(text);
-  if (/\bqarz\b/.test(s) || /\bkredit\b/.test(s) || /qarz oldim/.test(s)) {
-    let bank = null;
-    if (/tbc/.test(s)) bank = 'TBC';
-    else if (/uzum/.test(s)) bank = 'Uzum Bank';
-    return { type: 'kredit', bank };
+  if (/\bqarz\b/.test(s) || /\bkredit\b/.test(s)) {
+    const gaveVerb = /\b(berdim|berib turdim|berib qoydim)\b/.test(s);
+    const tookVerb = /\boldim\b|\bolib turdim\b/.test(s);
+    if (gaveVerb && !tookVerb) return { type: 'qarz_berish' };
+    if (tookVerb) {
+      let bank = null;
+      if (/tbc/.test(s)) bank = 'TBC';
+      else if (/uzum/.test(s)) bank = 'Uzum Bank';
+      if (bank) return { type: 'kredit', bank };
+      return { type: 'qarz_olish_norasmiy' };
+    }
+    return { type: 'noaniq' };
   }
   // Xarajat: avval to'g'ridan-to'g'ri kategoriya nomi, keyin kalit so'zlar
   const cats = getExpenseCategories();
@@ -3517,17 +3640,16 @@ function classifyMessage(text) {
   return { type: 'xarajat', category: null };
 }
 
-// Lokal (Gemini'siz) to'liq parsing. confident:true FAQAT summa VA (kategoriya YOKI bank) aniq bo'lsa.
+// Lokal (Gemini'siz) to'liq parsing. confident:true FAQAT summa VA (kategoriya/bank YOKI yo'nalish
+// fe'li orqali) aniq bo'lsa. qarz_olish_norasmiy uchun source — butun rawText (murakkab ajratilmaydi).
 function parseExpenseOrCreditLocal(text) {
   const amount = parseAmountFromText(text);
   const cls = classifyMessage(text);
-  const key = cls.type === 'kredit' ? cls.bank : cls.category;
-  return {
-    confident: amount != null && key != null,
-    type: cls.type, amount,
-    ...(cls.type === 'kredit' ? { bank: cls.bank } : { category: cls.category }),
-    rawText: text
-  };
+  if (cls.type === 'xarajat') return { confident: amount != null && cls.category != null, type: 'xarajat', amount, category: cls.category, rawText: text };
+  if (cls.type === 'kredit') return { confident: amount != null && cls.bank != null, type: 'kredit', amount, bank: cls.bank, rawText: text };
+  if (cls.type === 'qarz_berish') return { confident: amount != null, type: 'qarz_berish', amount, rawText: text };
+  if (cls.type === 'qarz_olish_norasmiy') return { confident: amount != null, type: 'qarz_olish_norasmiy', amount, source: text, rawText: text };
+  return { confident: false, type: 'noaniq', amount, rawText: text };
 }
 
 // 19-X QISM 2: lokal confident:false bo'lsa — ALOHIDA GEMINI_EXPENSE_API_KEY bilan (GEMINI_API_KEY'ga
@@ -3538,20 +3660,24 @@ async function parseWithGeminiFallback(text) {
   try {
     const ai = new GoogleGenAI({ apiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } });
     const cats = getExpenseCategories();
-    const prompt = `Foydalanuvchi o'zbekcha erkin matn yozdi. U XARAJAT yoki KREDIT (qarz) kiritmoqchi.
+    const prompt = `Foydalanuvchi o'zbekcha erkin matn yozdi. U XARAJAT kiritmoqchi, BANK KREDITI olmoqchi,
+BOSHQASIGA QARZ BERMOQCHI, yoki BOSHQASIDAN (norasmiy, bank emas) QARZ OLMOQCHI.
 Matn: "${text}"
 
 Mavjud xarajat kategoriyalari: ${cats.join(', ')}.
 AVVAL shu ro'yxatdan eng mos kelganini tanla. Faqat CHINDAN yangi (ro'yxatda umuman mos kelmaydigan) bo'lsa yangi qisqa nom taklif qil.
 "Boshqa" kategoriyasini FAQAT chindan hech qanday mazmunli nom topib bo'lmaganda ishlating — bu LENGROQ (dangasa) tanlov emas. Aks holda, xarajat nima uchun ekanligini aniq ifodalaydigan QISQA (1-2 so'z) yangi kategoriya nomi taklif qiling (masalan "Kommunal", "Aloqa", "Ta'mirlash").
-Kredit banklari: "TBC" yoki "Uzum Bank".
+Bank krediti — FAQAT matnda aniq "TBC" yoki "Uzum" (bank) so'zi bo'lsa. Aks holda, agar pul foydalanuvchiga
+BOSHQA odam/do'kon/joydan (bank emas) kelgan bo'lsa — "qarz_olish_norasmiy". Agar foydalanuvchi BOSHQASIGA
+pul bergan bo'lsa (masalan do'stiga qarz berdi) — "qarz_berish".
 
 Faqat toza JSON qaytar (markdown YO'Q):
 {
-  "type": "xarajat" | "kredit" | "noaniq",
+  "type": "xarajat" | "kredit" | "qarz_berish" | "qarz_olish_norasmiy" | "noaniq",
   "amount": <so'mdagi butun son yoki null>,
   "category": "<xarajat kategoriyasi yoki null>",
-  "bank": "<TBC | Uzum Bank | null>",
+  "bank": "<TBC | Uzum Bank | null, faqat type=kredit uchun>",
+  "source": "<qarzni kim/qayerdan berganining qisqa tavsifi yoki null, faqat type=qarz_olish_norasmiy uchun>",
   "confidence": "high" | "low"
 }
 Summani yoki turini aniq bilib bo'lmasa "noaniq" va null qaytar — TAXMIN QILMA.`;
@@ -3597,8 +3723,45 @@ function saveCreditRecord({ bank, totalRepay, dueDate, rawText }) {
   return rec;
 }
 
-// 19-Y: erkin matnni xarajat/kredit oqimiga yo'naltiradi (webhook else-shoxobchasi shuni chaqiradi).
-// Avval lokal (Gemini'siz), tushunmasa GEMINI_EXPENSE_API_KEY zaxira, u ham noaniq bo'lsa — aniq savol.
+// 19-AA: berilgan qarz (F-bosqich) — lent_loans.json, INVOICE_STATE_FILE bilan bir xil oddiy fayl naqshi.
+function getLentLoans() { return readJsonFile(LENT_LOANS_FILE, []); }
+function saveLentLoan(amount, rawText) {
+  const list = getLentLoans();
+  const rec = { id: finId(), amount, remainingAmount: amount, note: rawText, dateGiven: todayTashkent(), status: 'kutilmoqda', nextReminderDate: addDaysISO(todayTashkent(), 15) };
+  list.push(rec);
+  writeJsonFile(LENT_LOANS_FILE, list);
+  return rec;
+}
+function updateLentLoan(id, updates) {
+  const list = getLentLoans();
+  const idx = list.findIndex(l => l.id === id);
+  if (idx === -1) return null;
+  list[idx] = { ...list[idx], ...updates };
+  writeJsonFile(LENT_LOANS_FILE, list);
+  return list[idx];
+}
+
+// 19-AA: olingan norasmiy qarz (bank emas) — borrowed_debts.json, xuddi shu naqsh.
+function getBorrowedDebts() { return readJsonFile(BORROWED_DEBTS_FILE, []); }
+function saveBorrowedDebt(amount, source) {
+  const list = getBorrowedDebts();
+  const rec = { id: finId(), amount, remainingAmount: amount, source, dateTaken: todayTashkent(), status: 'kutilmoqda', nextReminderDate: addDaysISO(todayTashkent(), 5) };
+  list.push(rec);
+  writeJsonFile(BORROWED_DEBTS_FILE, list);
+  return rec;
+}
+function updateBorrowedDebt(id, updates) {
+  const list = getBorrowedDebts();
+  const idx = list.findIndex(l => l.id === id);
+  if (idx === -1) return null;
+  list[idx] = { ...list[idx], ...updates };
+  writeJsonFile(BORROWED_DEBTS_FILE, list);
+  return list[idx];
+}
+
+// 19-Y/19-AA: erkin matnni xarajat/kredit/qarz_berish/qarz_olish_norasmiy oqimiga yo'naltiradi
+// (webhook else-shoxobchasi shuni chaqiradi). Avval lokal (Gemini'siz), tushunmasa GEMINI_EXPENSE_API_KEY
+// zaxira, u ham noaniq bo'lsa — aniq savol.
 async function routeFreeTextFinance(token, chatId, text) {
   let parsed = parseExpenseOrCreditLocal(text);
   if (!parsed.confident) {
@@ -3607,6 +3770,8 @@ async function routeFreeTextFinance(token, chatId, text) {
       const d = ai.data;
       if (d.type === 'xarajat' && d.amount != null && d.category) parsed = { confident: true, type: 'xarajat', amount: Number(d.amount), category: d.category, rawText: text };
       else if (d.type === 'kredit' && d.amount != null && d.bank) parsed = { confident: true, type: 'kredit', amount: Number(d.amount), bank: d.bank, rawText: text };
+      else if (d.type === 'qarz_berish' && d.amount != null) parsed = { confident: true, type: 'qarz_berish', amount: Number(d.amount), rawText: text };
+      else if (d.type === 'qarz_olish_norasmiy' && d.amount != null) parsed = { confident: true, type: 'qarz_olish_norasmiy', amount: Number(d.amount), source: d.source || text, rawText: text };
     }
   }
   if (!parsed.confident) {
@@ -3620,13 +3785,55 @@ async function routeFreeTextFinance(token, chatId, text) {
     // foydalanuvchi jim qolardi). "\_" — legacy Markdown'ning rasmiy escape'i: haqiqiy buyruq nomi
     // ("/oxirgi_xarajat", chiziqcha bilan — nusxa ko'chirib yuborsa ishlashi uchun) saqlanib qoladi.
     await sendTelegramMessage(token, chatId, `✅ Xarajat qo'shildi: ${fmtMoney(rec.amount)} so'm — ${rec.category}\n✏️ Noto'g'ri bo'lsa, /oxirgi\\_xarajat buyrug'i bilan o'chiring`);
-  } else {
+  } else if (parsed.type === 'kredit') {
     const terms = computeCreditTerms(parsed.bank, parsed.amount, todayTashkent());
     if (!terms) { await sendTelegramMessage(token, chatId, "Bankni aniqlay olmadim (TBC yoki Uzum Bank). Qaytadan yozing."); return; }
     pendingCreditConfirm.set(chatId, { bank: parsed.bank, amount: parsed.amount, totalRepay: terms.totalRepay, dueDate: terms.dueDate, rawText: text, expiresAt: Date.now() + CREDIT_CONFIRM_TTL_MS });
     await sendTelegramMessage(token, chatId,
       `🏦 Tushundim: ${parsed.bank}'dan kredit\n💰 Olingan: ${fmtMoney(parsed.amount)} so'm\n📈 Qaytarish (5% bilan): ${fmtMoney(terms.totalRepay)} so'm\n📅 Muddat: ${fmtDateSlash(terms.dueDate)}\n\nTo'g'rimi?`,
       { inline_keyboard: [[{ text: '✅ Tasdiqlash', callback_data: 'credit_confirm:yes' }, { text: '❌ Bekor qilish', callback_data: 'credit_confirm:no' }]] });
+  } else if (parsed.type === 'qarz_berish') {
+    pendingLoanConfirm.set(chatId, { amount: parsed.amount, rawText: text, expiresAt: Date.now() + CREDIT_CONFIRM_TTL_MS });
+    await sendTelegramMessage(token, chatId,
+      `🤝 Tushundim: ${fmtMoney(parsed.amount)} so'm qarz berdingiz (${escapeMd(text)}). Har 15 kunda so'rab turaman — qaytarib oldingizmi deb.\n\nTo'g'rimi?`,
+      { inline_keyboard: [[{ text: '✅ Tasdiqlash', callback_data: 'loan_confirm:yes' }, { text: '❌ Bekor qilish', callback_data: 'loan_confirm:no' }]] });
+  } else if (parsed.type === 'qarz_olish_norasmiy') {
+    pendingDebtConfirm.set(chatId, { amount: parsed.amount, source: parsed.source, expiresAt: Date.now() + CREDIT_CONFIRM_TTL_MS });
+    await sendTelegramMessage(token, chatId,
+      `📒 Tushundim: ${fmtMoney(parsed.amount)} so'm qarz oldingiz (${escapeMd(parsed.source)}). Har 5 kunda ertalab so'rab turaman — to'ladingizmi deb.\n\nTo'g'rimi?`,
+      { inline_keyboard: [[{ text: '✅ Tasdiqlash', callback_data: 'debt_confirm:yes' }, { text: '❌ Bekor qilish', callback_data: 'debt_confirm:no' }]] });
+  }
+}
+
+// 19-AA: berilgan/olingan qarz eslatmalari — kunlik (10:00) va har kuni 07:00da tekshiriladi.
+async function checkLentLoanReminders() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || !ADMIN_CHAT_ID) return;
+  const today = todayTashkent();
+  for (const loan of getLentLoans()) {
+    if (loan.status !== 'kutilmoqda' || loan.nextReminderDate > today) continue;
+    await sendTelegramMessage(token, ADMIN_CHAT_ID,
+      `🤝 Eslatma: ${fmtMoney(loan.remainingAmount)} so'm qarz berilgan (${escapeMd(loan.note)}, ${fmtDateSlash(loan.dateGiven)}dan beri)\nQarzingizni oldingizmi?`,
+      { inline_keyboard: [[
+        { text: '✅ Ha, oldim', callback_data: `loan_remind:got:${loan.id}` },
+        { text: "⏳ Hali yo'q", callback_data: `loan_remind:wait:${loan.id}` },
+        { text: '🔄 Qisman oldim', callback_data: `loan_remind:partial:${loan.id}` }
+      ]] });
+  }
+}
+async function checkBorrowedDebtReminders() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || !ADMIN_CHAT_ID) return;
+  const today = todayTashkent();
+  for (const debt of getBorrowedDebts()) {
+    if (debt.status !== 'kutilmoqda' || debt.nextReminderDate > today) continue;
+    await sendTelegramMessage(token, ADMIN_CHAT_ID,
+      `📒 Eslatma: ${fmtMoney(debt.remainingAmount)} so'm qarz sizda (${escapeMd(debt.source)}, ${fmtDateSlash(debt.dateTaken)}dan beri)\nTo'ladingizmi?`,
+      { inline_keyboard: [[
+        { text: "✅ Ha, to'ladim", callback_data: `debt_remind:paid:${debt.id}` },
+        { text: "❌ Hali yo'q", callback_data: `debt_remind:wait:${debt.id}` },
+        { text: "🔄 Qisman to'ladim", callback_data: `debt_remind:partial:${debt.id}` }
+      ]] });
   }
 }
 
@@ -3866,6 +4073,14 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
     cron.schedule(spec, () => sendStaggeredAdvice(part).catch(e => console.error(`[CRON] AI bosqich "${part}" xato:`, e)), { timezone: 'Asia/Tashkent' });
   });
   console.log('[CRON] AI bosqichma-bosqich yuborish rejalashtirildi: 06:00, 09:00, 12:00, 15:00, 18:00, 21:00 Asia/Tashkent.');
+}
+
+// 19-AA: qarz eslatmalari — mavjud croplardan alohida vaqtlarda. Berilgan qarz kunlik (10:00),
+// olingan norasmiy qarz har kuni ertalab aniq 07:00da (F-bosqich talabi).
+if (process.env.TELEGRAM_BOT_TOKEN) {
+  cron.schedule('0 10 * * *', () => checkLentLoanReminders().catch(e => console.error('[CRON] Berilgan qarz eslatmasi xato:', e)), { timezone: 'Asia/Tashkent' });
+  cron.schedule('0 7 * * *', () => checkBorrowedDebtReminders().catch(e => console.error('[CRON] Olingan qarz eslatmasi xato:', e)), { timezone: 'Asia/Tashkent' });
+  console.log('[CRON] Qarz eslatmalari rejalashtirildi: berilgan qarz 10:00, olingan qarz 07:00 Asia/Tashkent.');
 }
 
 // Serve Telegram UI directly
