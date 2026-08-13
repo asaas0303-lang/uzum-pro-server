@@ -2653,6 +2653,15 @@ async function computeInvoicesSummary() {
 const utilizationSessions = new Map(); // chatId -> { items, expiresAt }
 const UTILIZATION_SESSION_TTL_MS = 10 * 60 * 1000;
 
+// 19-Y: kredit tasdiqlashini kutayotgan sessiya (SAQLASHDAN OLDIN ✅/❌) — utilizationSessions naqshi bilan bir xil.
+const pendingCreditConfirm = new Map(); // chatId -> { bank, amount, totalRepay, dueDate, rawText, expiresAt }
+const CREDIT_CONFIRM_TTL_MS = 10 * 60 * 1000;
+// 19-Y: /oxirgi_xarajat o'chirish tasdiqi — o'chiriladigan aniq yozuv id'si (oxirgisi tanlangan paytda qulflanadi).
+const pendingExpenseDelete = new Map(); // chatId -> { id, amount, category, expiresAt }
+
+// 19-Y: server tomonda oddiy ID generatori (dashboard finId() naqshiga o'xshash).
+function finId() { return 'f_' + Date.now() + '_' + Math.floor(Math.random() * 1000); }
+
 let invoiceSyncInProgress = false; // 19-C: kunlik va 20-daqiqalik cron bir vaqtda ustma-ust tushmasin (bir xil invoice_state.json'ni o'qib-yozadi)
 async function runInvoiceSync() {
   if (invoiceSyncInProgress) {
@@ -2993,6 +3002,45 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
       return;
     }
 
+    if (cq.data.startsWith('credit_confirm:')) {
+      // 19-Y: kreditni SAQLASHDAN OLDIN tasdiqlash — pendingCreditConfirm'dan o'qib saqlaydi (yes) yoki bekor (no).
+      const answer = cq.data.split(':')[1];
+      const messageId = cq.message?.message_id;
+      const pend = pendingCreditConfirm.get(chatId);
+      pendingCreditConfirm.delete(chatId);
+      if (!pend || Date.now() >= pend.expiresAt) {
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "⏳ Vaqt tugadi, qaytadan yozing.", { inline_keyboard: [] });
+        return;
+      }
+      if (answer === 'yes') {
+        saveCreditRecord(pend);
+        if (messageId) await editTelegramMessage(token, chatId, messageId, `✅ Kredit qo'shildi: ${pend.bank} mikroqarz — ${fmtMoney(pend.totalRepay)} so'm (muddat: ${fmtDateSlash(pend.dueDate)})`, { inline_keyboard: [] });
+      } else {
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "❌ Bekor qilindi.", { inline_keyboard: [] });
+      }
+      return;
+    }
+    if (cq.data.startsWith('expense_del:')) {
+      // 19-Y: /oxirgi_xarajat o'chirish tasdiqi — faqat qulflangan aniq id o'chiriladi.
+      const answer = cq.data.split(':')[1];
+      const messageId = cq.message?.message_id;
+      const pend = pendingExpenseDelete.get(chatId);
+      pendingExpenseDelete.delete(chatId);
+      if (!pend || Date.now() >= pend.expiresAt) {
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "⏳ Vaqt tugadi, qaytadan urinib ko'ring.", { inline_keyboard: [] });
+        return;
+      }
+      if (answer === 'yes') {
+        const before = (syncedState.userExpenses || []).length;
+        syncedState.userExpenses = (syncedState.userExpenses || []).filter(e => e.id !== pend.id);
+        if (syncedState.userExpenses.length < before) saveSettings();
+        if (messageId) await editTelegramMessage(token, chatId, messageId, `🗑 O'chirildi: ${fmtMoney(pend.amount)} so'm — ${pend.category || 'Boshqa'}`, { inline_keyboard: [] });
+      } else {
+        if (messageId) await editTelegramMessage(token, chatId, messageId, "Bekor qilindi — xarajat saqlanib qoldi.", { inline_keyboard: [] });
+      }
+      return;
+    }
+
     if (cq.data.startsWith('shop:')) {
       const shopSel = cq.data.slice('shop:'.length);
       await sendTelegramMessage(token, chatId, "Qaysi davr uchun hisobot kerak?", periodSelectionKeyboard(shopSel));
@@ -3169,6 +3217,22 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
         { text: "📊 Dashboardni ochish (Mini App)", web_app: { url: appUrl } }
       ]]
     });
+  } else if (text.startsWith('/oxirgi_xarajat')) {
+    // 19-Y: eng OXIRGI xarajatni o'chirish (xavfsiz, faqat bittasini), tasdiq bilan.
+    const list = syncedState.userExpenses || [];
+    if (list.length === 0) {
+      await sendTelegramMessage(token, chatId, "Hozircha xarajat yozuvi yo'q.");
+    } else {
+      const last = list[list.length - 1];
+      pendingExpenseDelete.set(chatId, { id: last.id, amount: last.amount, category: last.category, expiresAt: Date.now() + CREDIT_CONFIRM_TTL_MS });
+      await sendTelegramMessage(token, chatId,
+        `Oxirgi xarajat (${fmtMoney(last.amount)} so'm, ${last.category || 'Boshqa'}) o'chirilsinmi?`,
+        { inline_keyboard: [[{ text: '✅ Ha', callback_data: 'expense_del:yes' }, { text: '❌ Yo\'q', callback_data: 'expense_del:no' }]] });
+    }
+  } else if (!text.startsWith('/')) {
+    // 19-Y: ERKIN MATN (buyruq emas, kutilayotgan session ham emas) — xarajat/kredit sifatida parse qilinadi.
+    // Bu shoxobcha ZANJIR OXIRIDA — yuqoridagi barcha buyruq/session tekshiruvlariga ta'sir qilmaydi.
+    await routeFreeTextFinance(token, chatId, text);
   }
 });
 
@@ -3371,6 +3435,193 @@ function addOneMonthISO(dateStr) {
   const lastDay = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
   const nd = Math.min(d, lastDay);
   return `${ny}-${String(nm).padStart(2, '0')}-${String(nd).padStart(2, '0')}`;
+}
+
+// ============ 19-X: ERKIN MATN — XARAJAT/KREDIT PARSING (lokal, Gemini'siz) ============
+// Standart xarajat kategoriyalari (dashboard <select> bilan bir xil) + userExpenses'da avval saqlangan boshqalar.
+const EXPENSE_CATEGORIES = ['Xitoy tovar', 'Logistika', 'Reklama', 'Ijara', 'Ish haqi', 'Soliq', 'Boshqa'];
+function getExpenseCategories() {
+  const extra = [...new Set((syncedState.userExpenses || []).map(e => e.category).filter(Boolean))];
+  return [...new Set([...EXPENSE_CATEGORIES, ...extra])];
+}
+
+// Apostrofsiz, kichik harf — o'zbekcha son so'zlari lug'atiga moslash uchun.
+function normUz(text) {
+  return String(text || '').toLowerCase().replace(/[’‘ʻʼ'`]/g, '');
+}
+
+// O'zbekcha son so'zlari (apostrofsiz kalitlar). ming/min=1000, million/mln=1e6.
+const UZ_NUM_WORDS = {
+  bir: 1, ikki: 2, uch: 3, tort: 4, besh: 5, olti: 6, yetti: 7, sakkiz: 8, toqqiz: 9,
+  on: 10, yigirma: 20, ottiz: 30, qirq: 40, ellik: 50, oltmish: 60, yetmish: 70, sakson: 80, toqson: 90,
+  yuz: 100, ming: 1000, min: 1000, million: 1000000, mln: 1000000, milliard: 1000000000
+};
+const UZ_SCALES = new Set([1000, 1000000, 1000000000]);
+
+// Matndan summani aniqlaydi (raqam yoki so'z bilan). Topilmasa null. Taxmin qilmaydi.
+// ponytail: ">=1000 raqam + shkala so'zi" evristikasi — "50000 min"→50000 (shkala e'tiborsiz), "100min"→100000.
+//   Kamdan-kam holat "1500 ming"=1.5mln noto'g'ri (1500 chiqadi); kerak bo'lsa keyin aniqlashtiriladi.
+function parseAmountFromText(text) {
+  let s = normUz(text);
+  s = s.replace(/([0-9])([a-zа-я])/gi, '$1 $2').replace(/([a-zа-я])([0-9])/gi, '$1 $2'); // "100min" → "100 min"
+  const rawTokens = s.split(/[\s,]+/).filter(Boolean);
+  // Ming ajratkichlarni birlashtirish: aniq 3 xonali raqam oldingi raqamga qo'shiladi ("50" "000" → "50000").
+  const tokens = [];
+  for (const t of rawTokens) {
+    if (/^\d+$/.test(t) && tokens.length && /^\d+$/.test(tokens[tokens.length - 1]) && t.length === 3) {
+      tokens[tokens.length - 1] += t;
+    } else tokens.push(t);
+  }
+  let total = 0, current = 0, found = false;
+  for (const t of tokens) {
+    if (/^\d+$/.test(t)) { current += Number(t); found = true; continue; }
+    if (t === 'yarim') { current += 0.5; found = true; continue; }
+    const val = UZ_NUM_WORDS[t];
+    if (val == null) continue; // begona so'z (dokonga, som, gazga...) — e'tiborsiz
+    found = true;
+    if (val === 100) { current = (current === 0 ? 1 : current) * 100; }
+    else if (UZ_SCALES.has(val)) {
+      const base = current === 0 ? 1 : current;
+      if (base >= 1000) { total += current; current = 0; } // raqam allaqachon to'liq — shkala e'tiborsiz
+      else { total += base * val; current = 0; }
+    } else current += val; // birlik/o'nlik
+  }
+  total += current;
+  return found && total > 0 ? Math.round(total) : null;
+}
+
+// Turi (xarajat/kredit) + kategoriya/bank aniqlaydi. Kalit so'z → kategoriya lug'ati.
+const EXPENSE_KEYWORDS = {
+  Logistika: ['gaz', 'benzin', 'yoqilgi', 'yoqilg', 'transport', 'yetkazish', 'dostavka', 'logistika', 'pochta'],
+  Reklama: ['reklama', 'ads', 'target', 'blogger'],
+  Ijara: ['ijara', 'arenda', 'ofis'],
+  'Ish haqi': ['ish haqi', 'oylik', 'maosh', 'zarplata', 'ishchi'],
+  Soliq: ['soliq', 'nalog', 'jarima'],
+  'Xitoy tovar': ['xitoy', 'tovar', 'mahsulot', 'dokon', 'partiya', 'zakaz', 'zakoz']
+};
+function classifyMessage(text) {
+  const s = normUz(text);
+  if (/\bqarz\b/.test(s) || /\bkredit\b/.test(s) || /qarz oldim/.test(s)) {
+    let bank = null;
+    if (/tbc/.test(s)) bank = 'TBC';
+    else if (/uzum/.test(s)) bank = 'Uzum Bank';
+    return { type: 'kredit', bank };
+  }
+  // Xarajat: avval to'g'ridan-to'g'ri kategoriya nomi, keyin kalit so'zlar
+  const cats = getExpenseCategories();
+  for (const c of cats) if (s.includes(normUz(c))) return { type: 'xarajat', category: c };
+  for (const [cat, kws] of Object.entries(EXPENSE_KEYWORDS)) {
+    if (kws.some(k => s.includes(k))) return { type: 'xarajat', category: cat };
+  }
+  return { type: 'xarajat', category: null };
+}
+
+// Lokal (Gemini'siz) to'liq parsing. confident:true FAQAT summa VA (kategoriya YOKI bank) aniq bo'lsa.
+function parseExpenseOrCreditLocal(text) {
+  const amount = parseAmountFromText(text);
+  const cls = classifyMessage(text);
+  const key = cls.type === 'kredit' ? cls.bank : cls.category;
+  return {
+    confident: amount != null && key != null,
+    type: cls.type, amount,
+    ...(cls.type === 'kredit' ? { bank: cls.bank } : { category: cls.category }),
+    rawText: text
+  };
+}
+
+// 19-X QISM 2: lokal confident:false bo'lsa — ALOHIDA GEMINI_EXPENSE_API_KEY bilan (GEMINI_API_KEY'ga
+// aloqasi yo'q). callGeminiJson() qayta ishlatiladi, faqat yangi kalitli GoogleGenAI instansi bilan.
+async function parseWithGeminiFallback(text) {
+  const apiKey = process.env.GEMINI_EXPENSE_API_KEY;
+  if (!apiKey) return { ok: false, error: 'GEMINI_EXPENSE_API_KEY yo\'q' };
+  try {
+    const ai = new GoogleGenAI({ apiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } });
+    const cats = getExpenseCategories();
+    const prompt = `Foydalanuvchi o'zbekcha erkin matn yozdi. U XARAJAT yoki KREDIT (qarz) kiritmoqchi.
+Matn: "${text}"
+
+Mavjud xarajat kategoriyalari: ${cats.join(', ')}.
+AVVAL shu ro'yxatdan eng mos kelganini tanla. Faqat CHINDAN yangi (ro'yxatda umuman mos kelmaydigan) bo'lsa yangi qisqa nom taklif qil.
+Kredit banklari: "TBC" yoki "Uzum Bank".
+
+Faqat toza JSON qaytar (markdown YO'Q):
+{
+  "type": "xarajat" | "kredit" | "noaniq",
+  "amount": <so'mdagi butun son yoki null>,
+  "category": "<xarajat kategoriyasi yoki null>",
+  "bank": "<TBC | Uzum Bank | null>",
+  "confidence": "high" | "low"
+}
+Summani yoki turini aniq bilib bo'lmasa "noaniq" va null qaytar — TAXMIN QILMA.`;
+    const data = await callGeminiJson(ai, prompt);
+    return { ok: true, data };
+  } catch (err) {
+    console.error('[EXPENSE-AI] xato:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+// 19-X QISM 3: KREDIT hisob-kitobi — DETERMINISTIK (AI EMAS). TBC va Uzum Bank uchun aniq qoidalar.
+// loanDate: "YYYY-MM-DD" (Tashkent kuni). Qaytadi: { totalRepay, dueDate:"YYYY-MM-DD" } yoki null (noma'lum bank).
+function computeCreditTerms(bank, amount, loanDate) {
+  const amt = Number(amount) || 0;
+  if (bank === 'TBC') {
+    const [y, m, d] = loanDate.split('-').map(Number);
+    // 3-sanagacha: bugun 3 yoki undan oldin bo'lsa — shu oyning 3-si, aks holda keyingi oy 3-si
+    let dy = y, dm = m;
+    if (d > 3) { dm++; if (dm > 12) { dm = 1; dy++; } }
+    const dueDate = `${dy}-${String(dm).padStart(2, '0')}-03`;
+    return { totalRepay: Math.round(amt * 1.05), dueDate };
+  }
+  if (bank === 'Uzum Bank') {
+    return { totalRepay: Math.round(amt * 1.05), dueDate: addOneMonthISO(loanDate) };
+  }
+  return null;
+}
+
+// 19-Y: xarajatni DARHOL saqlaydi (userExpenses'ga + saveSettings). /api/finance-data mantig'i bilan bir xil,
+// faqat funksiya darajasida (yangi HTTP so'rov yo'q). rawText → note (kelajakda tekshirish uchun).
+function saveUserExpenseRecord(amount, category, rawText) {
+  const rec = { id: finId(), date: todayTashkent(), amount, category, note: rawText };
+  syncedState.userExpenses = [...(syncedState.userExpenses || []), rec];
+  saveSettings();
+  return rec;
+}
+// 19-Y: kreditni saqlaydi (credits'ga + saveSettings). Bir martalik qaytariladigan mikroqarz: butun summa dueDate'da.
+function saveCreditRecord({ bank, totalRepay, dueDate, rawText }) {
+  const rec = { id: finId(), name: `${bank} mikroqarz`, totalAmount: totalRepay, remainingAmount: totalRepay, monthlyPayment: totalRepay, nextPaymentDate: dueDate, type: 'fixed', note: rawText };
+  syncedState.credits = [...(syncedState.credits || []), rec];
+  saveSettings();
+  return rec;
+}
+
+// 19-Y: erkin matnni xarajat/kredit oqimiga yo'naltiradi (webhook else-shoxobchasi shuni chaqiradi).
+// Avval lokal (Gemini'siz), tushunmasa GEMINI_EXPENSE_API_KEY zaxira, u ham noaniq bo'lsa — aniq savol.
+async function routeFreeTextFinance(token, chatId, text) {
+  let parsed = parseExpenseOrCreditLocal(text);
+  if (!parsed.confident) {
+    const ai = await parseWithGeminiFallback(text);
+    if (ai.ok && ai.data && ai.data.type !== 'noaniq') {
+      const d = ai.data;
+      if (d.type === 'xarajat' && d.amount != null && d.category) parsed = { confident: true, type: 'xarajat', amount: Number(d.amount), category: d.category, rawText: text };
+      else if (d.type === 'kredit' && d.amount != null && d.bank) parsed = { confident: true, type: 'kredit', amount: Number(d.amount), bank: d.bank, rawText: text };
+    }
+  }
+  if (!parsed.confident) {
+    await sendTelegramMessage(token, chatId, "Tushunmadim. Bu xarajatmi yoki qarzmi? Summasi qancha?");
+    return;
+  }
+  if (parsed.type === 'xarajat') {
+    const rec = saveUserExpenseRecord(parsed.amount, parsed.category, text);
+    await sendTelegramMessage(token, chatId, `✅ Xarajat qo'shildi: ${fmtMoney(rec.amount)} so'm — ${rec.category}\n✏️ Noto'g'ri bo'lsa, /oxirgi_xarajat buyrug'i bilan o'chiring`);
+  } else {
+    const terms = computeCreditTerms(parsed.bank, parsed.amount, todayTashkent());
+    if (!terms) { await sendTelegramMessage(token, chatId, "Bankni aniqlay olmadim (TBC yoki Uzum Bank). Qaytadan yozing."); return; }
+    pendingCreditConfirm.set(chatId, { bank: parsed.bank, amount: parsed.amount, totalRepay: terms.totalRepay, dueDate: terms.dueDate, rawText: text, expiresAt: Date.now() + CREDIT_CONFIRM_TTL_MS });
+    await sendTelegramMessage(token, chatId,
+      `🏦 Tushundim: ${parsed.bank}'dan kredit\n💰 Olingan: ${fmtMoney(parsed.amount)} so'm\n📈 Qaytarish (5% bilan): ${fmtMoney(terms.totalRepay)} so'm\n📅 Muddat: ${fmtDateSlash(terms.dueDate)}\n\nTo'g'rimi?`,
+      { inline_keyboard: [[{ text: '✅ Tasdiqlash', callback_data: 'credit_confirm:yes' }, { text: '❌ Bekor qilish', callback_data: 'credit_confirm:no' }]] });
+  }
 }
 
 async function computeCashFlow() {
