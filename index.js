@@ -3392,6 +3392,26 @@ app.get('/api/invoice/sync-status', (req, res) => {
   });
 });
 
+// VAQTINCHALIK diagnostika (faqat o'qish): zaxira fayllaridan productTypes.stock qiymatlarini va
+// invoice_state.json deducted a'zoligini tekshiradi. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/stock-history', (req, res) => {
+  const files = fs.existsSync(DATA_DIR)
+    ? fs.readdirSync(DATA_DIR).filter(f => /^settings(\.\d{4}-\d{2}-\d{2})?\.(backup\.)?json$/.test(f))
+    : [];
+  const snapshots = files.map(f => {
+    const data = readJsonFile(path.join(DATA_DIR, f), null);
+    return { file: f, productTypes: data ? (data.productTypes || []).map(t => ({ id: t.id, name: t.name, stock: t.stock })) : null };
+  });
+  const st = readJsonFile(INVOICE_STATE_FILE, { deducted: [], acceptedNotified: [] });
+  const ids = (req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean).map(Number);
+  const deducted = new Set(st.deducted || []);
+  res.json({
+    snapshots,
+    currentProductTypes: (syncedState.productTypes || []).map(t => ({ id: t.id, name: t.name, stock: t.stock })),
+    deductedCheck: ids.map(id => ({ id, deducted: deducted.has(id) }))
+  });
+});
+
 // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar) — barcha ACCEPTED yuk xatlari bo'yicha
 app.get('/api/compensation-candidates', async (req, res) => {
   const result = await computeCompensationCandidates();
