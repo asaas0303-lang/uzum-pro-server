@@ -3750,10 +3750,24 @@ Summani yoki turini aniq bilib bo'lmasa "noaniq" va null qaytar — TAXMIN QILMA
   }
 }
 
+// 19-BB: matndan aytilgan MUDDATni (kun) o'qiydi — "10 kunda to'layman", "15 kunga" kabi.
+// "N kun oldin" (o'TMISH, qachon olingani) muddat bilan CHALKASHMASIN — shuning uchun "oldin" so'zi
+// keyin kelgan holat e'tiborsiz qoldiriladi. Topilmasa null.
+function parseTermDaysFromText(text) {
+  let s = normUz(text);
+  s = s.replace(/([0-9])([a-z])/gi, '$1 $2').replace(/([a-z])([0-9])/gi, '$1 $2');
+  const m = s.match(/(\d+)\s*kun(?!\s*oldin)/);
+  return m ? Number(m[1]) : null;
+}
+
 // 19-X QISM 3: KREDIT hisob-kitobi — DETERMINISTIK (AI EMAS). TBC va Uzum Bank uchun aniq qoidalar.
-// loanDate: "YYYY-MM-DD" (Tashkent kuni). Qaytadi: { totalRepay, dueDate:"YYYY-MM-DD" } yoki null (noma'lum bank).
-function computeCreditTerms(bank, amount, loanDate) {
+// loanDate: "YYYY-MM-DD" (Tashkent kuni). termDaysOverride berilsa — foydalanuvchi aytgan aniq muddat
+// (bugundan boshlab) ishlatiladi, foiz (5%) o'zgarmaydi. Qaytadi: { totalRepay, dueDate:"YYYY-MM-DD" } yoki null.
+function computeCreditTerms(bank, amount, loanDate, termDaysOverride) {
   const amt = Number(amount) || 0;
+  if (termDaysOverride != null && (bank === 'TBC' || bank === 'Uzum Bank')) {
+    return { totalRepay: Math.round(amt * 1.05), dueDate: addDaysISO(loanDate, termDaysOverride) };
+  }
   if (bank === 'TBC') {
     const [y, m, d] = loanDate.split('-').map(Number);
     // 3-sanagacha: bugun 3 yoki undan oldin bo'lsa — shu oyning 3-si, aks holda keyingi oy 3-si
@@ -3847,11 +3861,15 @@ async function routeFreeTextFinance(token, chatId, text) {
     // ("/oxirgi_xarajat", chiziqcha bilan — nusxa ko'chirib yuborsa ishlashi uchun) saqlanib qoladi.
     await sendTelegramMessage(token, chatId, `✅ Xarajat qo'shildi: ${fmtMoney(rec.amount)} so'm — ${rec.category}\n✏️ Noto'g'ri bo'lsa, /oxirgi\\_xarajat buyrug'i bilan o'chiring`);
   } else if (parsed.type === 'kredit') {
-    const terms = computeCreditTerms(parsed.bank, parsed.amount, todayTashkent());
+    const termDays = parseTermDaysFromText(text);
+    const terms = computeCreditTerms(parsed.bank, parsed.amount, todayTashkent(), termDays);
     if (!terms) { await sendTelegramMessage(token, chatId, "Bankni aniqlay olmadim (TBC yoki Uzum Bank). Qaytadan yozing."); return; }
     pendingCreditConfirm.set(chatId, { bank: parsed.bank, amount: parsed.amount, totalRepay: terms.totalRepay, dueDate: terms.dueDate, rawText: text, expiresAt: Date.now() + CREDIT_CONFIRM_TTL_MS });
+    const dueLine = termDays != null
+      ? `📅 Muddat: ${fmtDateSlash(terms.dueDate)} (siz aytgan ${termDays} kunlik muddat bo'yicha)`
+      : `📅 Muddat: ${fmtDateSlash(terms.dueDate)}`;
     await sendTelegramMessage(token, chatId,
-      `🏦 Tushundim: ${parsed.bank}'dan kredit\n💰 Olingan: ${fmtMoney(parsed.amount)} so'm\n📈 Qaytarish (5% bilan): ${fmtMoney(terms.totalRepay)} so'm\n📅 Muddat: ${fmtDateSlash(terms.dueDate)}\n\nTo'g'rimi?`,
+      `🏦 Tushundim: ${parsed.bank}'dan kredit\n💰 Olingan: ${fmtMoney(parsed.amount)} so'm\n📈 Qaytarish (5% bilan): ${fmtMoney(terms.totalRepay)} so'm\n${dueLine}\n\nTo'g'rimi?`,
       { inline_keyboard: [[{ text: '✅ Tasdiqlash', callback_data: 'credit_confirm:yes' }, { text: '❌ Bekor qilish', callback_data: 'credit_confirm:no' }]] });
   } else if (parsed.type === 'qarz_berish') {
     pendingLoanConfirm.set(chatId, { amount: parsed.amount, rawText: text, expiresAt: Date.now() + CREDIT_CONFIRM_TTL_MS });
