@@ -3656,16 +3656,32 @@ const EXPENSE_KEYWORDS = {
   Ijara: ['ijara', 'arenda', 'ofis'],
   'Ish haqi': ['ish haqi', 'oylik', 'maosh', 'zarplata', 'ishchi'],
   Soliq: ['soliq', 'nalog', 'jarima'],
-  'Xitoy tovar': ['xitoy', 'tovar', 'mahsulot', 'dokon', 'partiya', 'zakaz', 'zakoz']
+  'Xitoy tovar': ['xitoy', 'partiya', 'zakaz', 'zakoz']
 };
 // 19-AA: "qarz"/"kredit" so'zi bor bo'lsa, YO'NALISH fe'l orqali aniqlanadi:
 // berdim → qarz_berish (pul sizdan chiqdi); oldim + bank so'zi → kredit (mavjud oqim, o'ZGARMAYDI);
 // oldim, bank yo'q → qarz_olish_norasmiy; yo'nalish aniq emas → noaniq (Gemini-zaxiraga tushadi).
 function classifyMessage(text) {
   const s = normUz(text);
+  // 19-BB fix: bank nomi "qarz"/"kredit" so'zisiz ham kredit sifatida tanilsin — bu ilovada
+  // TBC/Uzum Bank'dan pul OLISH doim kredit degani (boshqa kontekstda ishlatilmaydi).
+  // "uzum" so'zi mevani ham anglatishi mumkin — shuning uchun bu yerda FAQAT "uzum bank" birikmasi hisobga olinadi
+  // (ichkaridagi eski /uzum/ tekshiruvi — "qarz" so'zi allaqachon bor bo'lgani uchun xavfsiz — o'zgartirilmaydi).
+  {
+    const gaveVerb0 = /\b(berdim|berib turdim|berib qoydim)\b/.test(s);
+    const tookVerb0 = /\boldim\b|\bolib turdim\b/.test(s);
+    if (tookVerb0 && !gaveVerb0) {
+      let bank0 = null;
+      if (/tbc/.test(s)) bank0 = 'TBC';
+      else if (/uzum\s*bank/.test(s)) bank0 = 'Uzum Bank';
+      if (bank0) return { type: 'kredit', bank: bank0 };
+    }
+  }
   if (/\bqarz\b/.test(s) || /\bkredit\b/.test(s)) {
     const gaveVerb = /\b(berdim|berib turdim|berib qoydim)\b/.test(s);
-    const tookVerb = /\boldim\b|\bolib turdim\b/.test(s);
+    let tookVerb = /\boldim\b|\bolib turdim\b/.test(s);
+    // fe'l topilmasa: "...dan" (biror joydan/kimdandir) + "qarz" so'zi — OLDI deb hisoblanadi
+    if (!gaveVerb && !tookVerb && /\bqarz\b/.test(s) && /[a-z]+dan\b/.test(s)) tookVerb = true;
     if (gaveVerb && !tookVerb) return { type: 'qarz_berish' };
     if (tookVerb) {
       let bank = null;
