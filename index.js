@@ -2687,6 +2687,9 @@ async function runInvoiceSync() {
   const st = readJsonFile(INVOICE_STATE_FILE, { deducted: [], acceptedNotified: [] });
   const deducted = new Set(st.deducted || []);
   const acceptedNotified = new Set(st.acceptedNotified || []);
+  // Re-sort himoyasi uchun: allaqachon "qayta-saralash" deb hisobga olingan rad-etilgan yozuvlar,
+  // kalit "radInvoiceId:skuId" — bir rad etilgan yozuv ikki marta "recovered" deb sanalmasin.
+  const resortConsumed = new Set(st.resortConsumed || []);
 
   if (firstRun) {
     // Bazaviy holat: hamma narsani "ishlangan" deb belgilaymiz — eski yuk xatlari zaxirani buzmasin, toshqin bo'lmasin.
@@ -2719,7 +2722,48 @@ async function runInvoiceSync() {
           `📅 Yaratilgan: ${inv.dateCreated || '?'}`
         );
       } else {
+        // RE-SORT HIMOYASI: bu yuk xatining TO'LIQ QABUL qilingan (accepted===toStock>0) SKU'lari orasidan,
+        // oxirgi RESORT_WINDOW_DAYS (60) kun ichida boshqa ALLAQACHON DEDUCTED yuk xatida XUDDI SHU SKU
+        // to'liq RAD etilgan (accepted=0, toStock>=hozirgi) yozuv bo'lsa — bu Uzum re-sort'i: tovar avvalgi
+        // aktda ALLAQACHON zaxiradan ayirilgan, qaytadan ayirilmaydi (compensation candidates mantig'i bilan bir xil).
+        // ponytail: bir sync run'da rad+qayta-qabul birga birinchi marta ko'rinsa (8 kun farq — amalda bo'lmaydi,
+        // ular alohida sync oynalarida sinxronlanadi) tartibga bog'liq; deducted.has gate real holatni qamraydi.
+        const resortSkuIds = new Set();
+        const resortNotes = [];
+        const invMs = invoiceEventMs(inv);
+        (inv.productForInvoiceDto || []).forEach(p => (p.skuForInvoiceDtoList || []).forEach(s => {
+          const acc = s.quantityAccepted || 0, toS = s.quantityToStock || 0;
+          if (toS <= 0 || acc !== toS) return; // faqat to'liq qabul qilingan SKU'lar re-sort nomzodi
+          for (const prev of invoices) {
+            if (prev.id === inv.id || !deducted.has(prev.id)) continue;
+            const key = `${prev.id}:${s.id}`;
+            if (resortConsumed.has(key)) continue;
+            if (Math.abs(invoiceEventMs(prev) - invMs) > RESORT_WINDOW_DAYS * 86400000) continue;
+            let matched = false;
+            (prev.productForInvoiceDto || []).forEach(pp => (pp.skuForInvoiceDtoList || []).forEach(ps => {
+              if (String(ps.id) !== String(s.id)) return;
+              if ((ps.quantityAccepted || 0) === 0 && (ps.quantityToStock || 0) >= toS) matched = true;
+            }));
+            if (matched) {
+              resortSkuIds.add(String(s.id));
+              resortConsumed.add(key);
+              resortNotes.push(`♻️ Qayta-saralash aniqlandi: ${s.skuTitle || 'SKU'} — avvalgi akt #${invoiceDisplayNumber(prev)}da hisobga olingan, qaytadan ayirilmadi`);
+              break;
+            }
+          }
+        }));
+
         const byType = invoiceQtyByType(inv, 'quantityToStock');
+        // re-sort deb topilgan SKU'lar miqdorini byType'dan chiqaramiz (invoiceQtyByType'ga tegmaymiz)
+        if (resortSkuIds.size) {
+          (inv.productForInvoiceDto || []).forEach(p => (p.skuForInvoiceDtoList || []).forEach(s => {
+            if (!resortSkuIds.has(String(s.id))) return;
+            const typeId = syncedState.skuMappings[String(s.id)];
+            if (!typeId || byType[typeId] === undefined) return;
+            byType[typeId] -= (s.quantityToStock || 0);
+            if (byType[typeId] <= 0) delete byType[typeId];
+          }));
+        }
         const lines = [];
         for (const [typeId, qty] of Object.entries(byType)) {
           const type = (syncedState.productTypes || []).find(t => t.id === typeId);
@@ -2743,7 +2787,8 @@ async function runInvoiceSync() {
           `📦 Jami: ${fmtMoney(inv.totalToStock || 0)} ta — ${productNames.join(', ') || inv.shopTitle}`;
         if (skuItems.length) msg += `\n\nSKU bo'yicha:\n${skuItems.map(i => `- ${i.skuTitle}: ${fmtMoney(i.qty)} ta`).join('\n')}`;
         if (lines.length) msg += `\n\n🏠 Uy zaxirasidan ayirildi:\n${lines.join('\n')}`;
-        else msg += `\n\n(Uy zaxirasiga bog'langan SKU topilmadi — zaxira o'zgarmadi)`;
+        else if (!resortNotes.length) msg += `\n\n(Uy zaxirasiga bog'langan SKU topilmadi — zaxira o'zgarmadi)`;
+        if (resortNotes.length) msg += `\n\n${resortNotes.join('\n')}`;
         messages.push(msg);
         deducted.add(inv.id);
         deductedCount++;
@@ -2777,7 +2822,7 @@ async function runInvoiceSync() {
     }
   }
 
-  writeJsonFile(INVOICE_STATE_FILE, { deducted: [...deducted], acceptedNotified: [...acceptedNotified] });
+  writeJsonFile(INVOICE_STATE_FILE, { deducted: [...deducted], acceptedNotified: [...acceptedNotified], resortConsumed: [...resortConsumed] });
   if (stockChanged) saveSettings(); // uy zaxirasi o'zgardi — diskka saqlaymiz (mavjud himoya ostida)
 
   if (token && ADMIN_CHAT_ID && messages.length) {
