@@ -3621,6 +3621,9 @@ const UZ_SCALES = new Set([1000, 1000000, 1000000000]);
 //   Kamdan-kam holat "1500 ming"=1.5mln noto'g'ri (1500 chiqadi); kerak bo'lsa keyin aniqlashtiriladi.
 function parseAmountFromText(text) {
   let s = normUz(text);
+  // 19-BB fix: "kun"ga bog'liq raqamlar ("10 kunda", "15 kunga", "5 kun oldin") summa emas — muddat.
+  // Boshqa hech qayerda takrorlanmasin, faqat shu yerda — barcha oqimlar (xarajat/kredit/qarz) shu funksiyadan o'tadi.
+  s = s.replace(/\d+\s*kun\w*/g, ' ');
   s = s.replace(/([0-9])([a-zа-я])/gi, '$1 $2').replace(/([a-zа-я])([0-9])/gi, '$1 $2'); // "100min" → "100 min"
   const rawTokens = s.split(/[\s,]+/).filter(Boolean);
   // Ming ajratkichlarni birlashtirish: aniq 3 xonali raqam oldingi raqamga qo'shiladi ("50" "000" → "50000").
