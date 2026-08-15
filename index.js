@@ -1723,10 +1723,15 @@ function formatMaqsadBlock(raw) {
   if (remaining > 0) lines.push(`• 🎯 Maqsadgacha qoldi: *${fmtMoney(remaining)} so'm*`);
   return lines.join('\n');
 }
-// 19-T: eng kam zaxira-kun qolgan 2-3 ta SKU (needsReorder'dan qat'iy nazar — maqsad eng yaqin
-// muddatni ko'rsatish). SKU ma'lumoti umuman bo'lmasa — eski oddiy gap (taxmin qilinmaydi).
+// 19-CC: eng kam zaxira-kun qolgan 2-3 ta SKU (needsReorder'dan qat'iy nazar — maqsad eng yaqin
+// muddatni ko'rsatish) — yagona joyda, matn (formatXitoyBlock) va rasm (collectXitoyPhotos) BIR XIL
+// to'plamni ko'rsatishi uchun.
+function getTopXitoySkus(raw, n = 3) {
+  return (raw.skusByStockDays || []).slice().sort((a, b) => a.stockDays - b.stockDays).slice(0, n);
+}
+// 19-T: SKU ma'lumoti umuman bo'lmasa — eski oddiy gap (taxmin qilinmaydi).
 function formatXitoyBlock(raw) {
-  const skus = (raw.skusByStockDays || []).slice().sort((a, b) => a.stockDays - b.stockDays).slice(0, 3);
+  const skus = getTopXitoySkus(raw);
   if (!skus.length) return "Hozircha shoshilinch buyurtma kerak emas";
   return skus.map(s => `• 🔹 "${s.title}": Zaxira ${s.stockDays.toFixed(0)} kunga yetadi`).join('\n');
 }
@@ -1734,6 +1739,8 @@ function formatXitoyBlock(raw) {
 // 19-BB: Xitoy bo'limi uchun BITTA do'konning SKU-hisoblash mantig'i — buildAiContext() ICHIDAGI
 // skuRows to'ldirish loop bilan bir xil hisob (computeSkuMetrics), lekin faqat Xitoy blokiga kerakli
 // maydonlar (moliya/marja/rank hisoblanmaydi — bu yerda ishlatilmaydi, keraksiz hisob qilinmaydi).
+// 19-CC: `image` — Uzumning haqiqiy tovar rasmi (uzumImageUrl, ~467-qator naqshida), matn nomi
+// (masalan "КРАСН") o'rniga foydalanuvchi qaysi tovarligini rasm orqali ko'rsin degan maqsadda.
 async function computeXitoyForShop(shopId, shopTitle) {
   const prod = await fetchLiveShopProducts(shopId);
   const metrics = await computeSkuMetrics(shopId);
@@ -1742,11 +1749,12 @@ async function computeXitoyForShop(shopId, shopTitle) {
   prod.products.forEach(p => (p.skuList || []).forEach(sku => {
     const m = metrics.perSku[sku.skuId] || {};
     const stockDays = m.canCompute ? (m.stockDays30 != null ? m.stockDays30 : m.stockDays7) : null;
-    skuRows.push({ title: sku.skuTitle, stockDays, needsReorder: m.needsReorder });
+    const image = uzumImageUrl(sku.previewImage || sku.photo || sku.image) || null;
+    skuRows.push({ title: sku.skuTitle, stockDays, needsReorder: m.needsReorder, image });
   }));
   return {
     shopTitle,
-    skusByStockDays: skuRows.filter(r => r.stockDays != null).map(r => ({ title: r.title, stockDays: r.stockDays })),
+    skusByStockDays: skuRows.filter(r => r.stockDays != null).map(r => ({ title: r.title, stockDays: r.stockDays, image: r.image })),
     reorderSkus: skuRows.filter(r => r.needsReorder).map(r => ({ title: r.title, stockDays: r.stockDays }))
   };
 }
@@ -1767,6 +1775,18 @@ function formatXitoyMultiShop(shopsXitoy) {
     const holat = (s.reorderSkus || []).length > 0 ? 'Shoshilinch' : 'Yaxshi';
     return `🏪 *${s.shopTitle}*: Holat — ${holat}\n${formatXitoyBlock(s)}`;
   }).join('\n\n');
+}
+// 19-CC: formatXitoyBlock bilan BIR XIL SKU to'plamidan (getTopXitoySkus) — faqat rasmi bor SKU'lar.
+// Rasmi yo'q SKU shunchaki o'tkazib yuboriladi (xato emas, matnda hamon ko'rinadi).
+function collectXitoyPhotos(shopsXitoy) {
+  const items = [];
+  shopsXitoy.forEach(s => {
+    getTopXitoySkus(s).forEach(sku => {
+      if (!sku.image) return;
+      items.push({ media: sku.image, caption: `🏪 ${s.shopTitle} — "${sku.title}": ${sku.stockDays.toFixed(0)} kunga yetadi` });
+    });
+  });
+  return items;
 }
 
 // 19-G: Gemini'ni chaqirib, JSON javobni parse qiladi. maxOutputTokens aniq belgilangan (avval yo'q edi —
@@ -1915,6 +1935,7 @@ async function sendStaggeredAdvice(part) {
   const raw = (await buildAiContext(shopId)).raw; // raqamlar HAR DOIM jonli, Gemini kerak emas
 
   let msg = null;
+  let xitoyShops = null; // 19-CC: faqat part==='xitoy'da to'ldiriladi, rasm yuborish uchun
   if (part === 'ish0' || part === 'ish1' || part === 'ish2') {
     const idx = { ish0: 0, ish1: 1, ish2: 2 }[part];
     const ishlar = Array.isArray(d.bugungi_ishlar) ? d.bugungi_ishlar.filter(Boolean) : [];
@@ -1940,11 +1961,16 @@ async function sendStaggeredAdvice(part) {
     if (d.maqsad_reja) lines.push(`• Reja: ${d.maqsad_reja}`);
     msg = lines.join('\n');
   } else if (part === 'xitoy') {
-    const lines = ['📦 *XITOYDAN BUYURTMA*', formatXitoyMultiShop(await computeXitoyAllShops())];
+    xitoyShops = await computeXitoyAllShops();
+    const lines = ['📦 *XITOYDAN BUYURTMA*', formatXitoyMultiShop(xitoyShops)];
     lines.push('', "Ertaga yana ko'rishguncha! 👋");
     msg = lines.join('\n');
   }
   if (msg) await sendTelegramMessage(token, ADMIN_CHAT_ID, msg);
+  if (part === 'xitoy' && xitoyShops) {
+    try { await sendTelegramPhotoGroup(token, ADMIN_CHAT_ID, collectXitoyPhotos(xitoyShops)); }
+    catch (e) { console.error('[XITOY-PHOTO] xato:', e); }
+  }
 }
 
 // 19-V: dashboard eski sxemasiga (moliya_holati/maqsad/xitoy_buyurtma satr, bugungi_ishlar satrlar
@@ -2018,6 +2044,42 @@ async function sendTelegramMessage(token, chatId, text, replyMarkup = null) {
   } catch (err) {
     console.error("[TG] sendMessage exception:", err);
     return { ok: false, exception: err.message, chatIdSent: chatId };
+  }
+}
+
+// 19-CC: Xitoy bo'limi rasmlari — sendTelegramMessage bilan bir xil xato-log naqshida.
+// Telegram sendMediaGroup KAMIDA 2 ta element talab qiladi (API cheklovi) — 1 ta bo'lsa sendPhoto.
+async function sendTelegramPhotoGroup(token, chatId, items) {
+  if (!items.length) return { ok: true, skipped: true };
+  try {
+    if (items.length === 1) {
+      const body = { chat_id: chatId, photo: items[0].media, caption: items[0].caption };
+      const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        console.error(`[TG] sendPhoto RAD ETILDI → HTTP ${response.status}, ok=${data.ok}, error_code=${data.error_code}, description="${data.description}", chat_id=${chatId}`);
+        return { ok: false, status: response.status, errorCode: data.error_code, description: data.description };
+      }
+      console.log(`[TG] Rasm yuborildi ✓ → message_id=${data.result?.message_id}, chat_id=${chatId}`);
+      return { ok: true, messageId: data.result?.message_id };
+    }
+    const media = items.slice(0, 10).map(i => ({ type: 'photo', media: i.media, caption: i.caption }));
+    const body = { chat_id: chatId, media };
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      console.error(`[TG] sendMediaGroup RAD ETILDI → HTTP ${response.status}, ok=${data.ok}, error_code=${data.error_code}, description="${data.description}", chat_id=${chatId}`);
+      return { ok: false, status: response.status, errorCode: data.error_code, description: data.description };
+    }
+    console.log(`[TG] Rasm guruhi yuborildi ✓ → ${media.length} ta rasm, chat_id=${chatId}`);
+    return { ok: true, count: media.length };
+  } catch (err) {
+    console.error("[TG] sendTelegramPhotoGroup exception:", err);
+    return { ok: false, exception: err.message };
   }
 }
 
@@ -3084,7 +3146,11 @@ app.post('/api/tg-bot/webhook', async (req, res) => {
       if (messageId) await editTelegramMessage(token, chatId, messageId, "🤖 AI murabbiy tahlil qilyapti... (10-20 soniya)", { inline_keyboard: [] });
       const shopId = syncedState.activeShop;
       const result = await generateAndCacheDailyAdvice(shopId);
-      if (result.ok) await sendTelegramMessage(token, chatId, await aiAdviceToText(result.data, result.raw));
+      if (result.ok) {
+        await sendTelegramMessage(token, chatId, await aiAdviceToText(result.data, result.raw));
+        try { await sendTelegramPhotoGroup(token, chatId, collectXitoyPhotos(await computeXitoyAllShops())); }
+        catch (e) { console.error('[XITOY-PHOTO] xato:', e); }
+      }
       else await sendTelegramMessage(token, chatId, `⚠️ AI murabbiy javob bermadi: ${result.error}`);
       return;
     }
@@ -3338,6 +3404,8 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
       const shopId = cached.shopId || syncedState.activeShop;
       const raw = (await buildAiContext(shopId)).raw;
       await sendTelegramMessage(token, chatId, await aiAdviceToText(cached.data, raw));
+      try { await sendTelegramPhotoGroup(token, chatId, collectXitoyPhotos(await computeXitoyAllShops())); }
+      catch (e) { console.error('[XITOY-PHOTO] xato:', e); }
     }
   } else if (text.startsWith('/maqsad')) {
     // 18-D1: oylik aylanma maqsadi holati
