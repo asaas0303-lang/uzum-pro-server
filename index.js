@@ -2047,16 +2047,40 @@ async function sendTelegramMessage(token, chatId, text, replyMarkup = null) {
   }
 }
 
-// 19-CC: Xitoy bo'limi rasmlari — sendTelegramMessage bilan bir xil xato-log naqshida.
+// 19-DD: rasmni serverda oldindan yuklaydi (Buffer). Timeout — 9s (AbortController). Xato bo'lsa
+// (tarmoq, 404, timeout) THROW QILMAYDI — null qaytaradi, chaqiruvchi shu SKU'ni o'tkazib yuboradi.
+async function fetchImageBuffer(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 9000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) { console.error(`[TG] rasm yuklanmadi (HTTP ${response.status}): ${url}`); return null; }
+    return Buffer.from(await response.arrayBuffer());
+  } catch (err) {
+    console.error(`[TG] rasm yuklashda xato: ${url} —`, err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 19-DD (WEBPAGE_MEDIA_EMPTY tuzatildi): Telegram serveri ba'zi CDN rasm URL'larini o'zi yuklab
+// ololmaydi (masalan images.uzum.uz himoyasi) — shuning uchun URL emas, rasmni OLDINDAN yuklab,
+// multipart/form-data orqali FAYL sifatida yuboramiz. Xato-log naqshi sendTelegramMessage bilan bir xil.
 // Telegram sendMediaGroup KAMIDA 2 ta element talab qiladi (API cheklovi) — 1 ta bo'lsa sendPhoto.
 async function sendTelegramPhotoGroup(token, chatId, items) {
   if (!items.length) return { ok: true, skipped: true };
   try {
-    if (items.length === 1) {
-      const body = { chat_id: chatId, photo: items[0].media, caption: items[0].caption };
-      const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-      });
+    const buffers = await Promise.all(items.map(i => fetchImageBuffer(i.media)));
+    const loaded = items.map((i, idx) => ({ ...i, buffer: buffers[idx] })).filter(i => i.buffer);
+    if (!loaded.length) { console.warn('[TG] Xitoy rasmlaridan birortasi yuklanmadi — o\'tkazib yuborildi.'); return { ok: true, skipped: true }; }
+
+    if (loaded.length === 1) {
+      const form = new FormData();
+      form.append('chat_id', String(chatId));
+      form.append('caption', loaded[0].caption);
+      form.append('photo', new Blob([loaded[0].buffer]), 'photo0.jpg');
+      const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: form });
       const data = await response.json();
       if (!response.ok || !data.ok) {
         console.error(`[TG] sendPhoto RAD ETILDI → HTTP ${response.status}, ok=${data.ok}, error_code=${data.error_code}, description="${data.description}", chat_id=${chatId}`);
@@ -2065,11 +2089,13 @@ async function sendTelegramPhotoGroup(token, chatId, items) {
       console.log(`[TG] Rasm yuborildi ✓ → message_id=${data.result?.message_id}, chat_id=${chatId}`);
       return { ok: true, messageId: data.result?.message_id };
     }
-    const media = items.slice(0, 10).map(i => ({ type: 'photo', media: i.media, caption: i.caption }));
-    const body = { chat_id: chatId, media };
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-    });
+
+    const media = loaded.slice(0, 10).map((i, idx) => ({ type: 'photo', media: `attach://photo${idx}`, caption: i.caption }));
+    const form = new FormData();
+    form.append('chat_id', String(chatId));
+    form.append('media', JSON.stringify(media));
+    loaded.slice(0, 10).forEach((i, idx) => form.append(`photo${idx}`, new Blob([i.buffer]), `photo${idx}.jpg`));
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, { method: 'POST', body: form });
     const data = await response.json();
     if (!response.ok || !data.ok) {
       console.error(`[TG] sendMediaGroup RAD ETILDI → HTTP ${response.status}, ok=${data.ok}, error_code=${data.error_code}, description="${data.description}", chat_id=${chatId}`);
@@ -3537,17 +3563,6 @@ app.get('/api/invoice/sync-status', (req, res) => {
     deductedCount: st ? (st.deducted || []).length : 0,
     acceptedNotifiedCount: st ? (st.acceptedNotified || []).length : 0
   });
-});
-
-// VAQTINCHALIK diagnostika (faqat o'qish): computeXitoyForShop() natijasidagi SKU'larning `image`
-// maydoni haqiqiy qiymatini ko'rsatadi — nol rasm "kod xatosi"mi yoki "Uzumda rasm ma'lumoti yo'q"mi
-// ekanini aniqlash uchun. Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/xitoy-images', async (req, res) => {
-  const shopsXitoy = await computeXitoyAllShops();
-  res.json(shopsXitoy.map(s => ({
-    shopTitle: s.shopTitle,
-    skus: (s.skusByStockDays || []).map(x => ({ title: x.title, stockDays: x.stockDays, image: x.image }))
-  })));
 });
 
 // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar) — barcha ACCEPTED yuk xatlari bo'yicha
