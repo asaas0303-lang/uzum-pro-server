@@ -3565,10 +3565,10 @@ app.get('/api/invoice/sync-status', (req, res) => {
   });
 });
 
-// VAQTINCHALIK diagnostika (faqat o'qish): kartochka (skuList)dan skuTitle/skuCode HAQIQATDA qanday
-// ko'rinishda kelayotganini ko'rsatadi (2a-bosqich SKU→model guruhlash uchun). Faqat 3 maydon, maxfiy
-// ma'lumot yo'q. Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/sku-format', async (req, res) => {
+// VAQTINCHALIK diagnostika (faqat o'qish): 2a-bosqich uchun model↔rang munosabatini chuqurroq
+// ko'rsatadi — har do'konning eng ko'p SKU'ga ega 2 ta mahsuloti, productTitle + BARCHA SKU'lari bilan.
+// Maxfiy ma'lumot yo'q. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/sku-hierarchy', async (req, res) => {
   const shopIds = ['61122', '48589'];
   const out = [];
   for (const shopId of shopIds) {
@@ -3576,12 +3576,13 @@ app.get('/api/diag/sku-format', async (req, res) => {
     const shopTitle = shop ? shop.shopTitle : `Shop ${shopId}`;
     const prod = await fetchLiveShopProducts(shopId);
     if (!prod.ok) { out.push({ shopTitle, error: prod.error }); continue; }
-    const skus = [];
-    prod.products.forEach(p => (p.skuList || []).forEach(s => {
-      if (skus.length >= 5) return;
-      skus.push({ shopTitle, skuId: s.skuId, skuTitle: s.skuTitle, skuCode: s.skuCode });
-    }));
-    out.push(...skus);
+    const top2 = prod.products.slice().sort((a, b) => (b.skuList || []).length - (a.skuList || []).length).slice(0, 2);
+    top2.forEach(p => {
+      out.push({
+        shopTitle, productId: p.productId, productTitle: p.title,
+        skus: (p.skuList || []).map(s => ({ skuId: s.skuId, skuTitle: s.skuTitle, skuCode: s.skuCode }))
+      });
+    });
   }
   res.json(out);
 });
