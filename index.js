@@ -3539,6 +3539,17 @@ app.get('/api/invoice/sync-status', (req, res) => {
   });
 });
 
+// VAQTINCHALIK diagnostika (faqat o'qish): computeXitoyForShop() natijasidagi SKU'larning `image`
+// maydoni haqiqiy qiymatini ko'rsatadi — nol rasm "kod xatosi"mi yoki "Uzumda rasm ma'lumoti yo'q"mi
+// ekanini aniqlash uchun. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/xitoy-images', async (req, res) => {
+  const shopsXitoy = await computeXitoyAllShops();
+  res.json(shopsXitoy.map(s => ({
+    shopTitle: s.shopTitle,
+    skus: (s.skusByStockDays || []).map(x => ({ title: x.title, stockDays: x.stockDays, image: x.image }))
+  })));
+});
+
 // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar) — barcha ACCEPTED yuk xatlari bo'yicha
 app.get('/api/compensation-candidates', async (req, res) => {
   const result = await computeCompensationCandidates();
