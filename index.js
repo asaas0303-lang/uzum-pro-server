@@ -3751,6 +3751,39 @@ app.get('/api/diag/uyzaxira-text', async (req, res) => {
   res.type('text/plain').send(await uyZaxiraCommandText());
 });
 
+// VAQTINCHALIK diagnostika (faqat o'qish): "YASHIRI-MAYDAKA"/"JAYDAR-MINIK" kabi mahsulotlar
+// skuMappings'da bog'langanmi — mahsulot darajasida ko'rsatadi. Maxfiy ma'lumot yo'q. Tekshirilgach
+// OLIB TASHLANADI.
+app.get('/api/diag/unmapped-check', async (req, res) => {
+  const shopIds = ['61122', '48589'];
+  const out = [];
+  for (const shopId of shopIds) {
+    const shop = (syncedState.shops || []).find(s => String(s.shopId) === shopId);
+    const shopTitle = shop ? shop.shopTitle : `Shop ${shopId}`;
+    const prod = await fetchLiveShopProducts(shopId);
+    if (!prod.ok) { out.push({ shopTitle, error: prod.error }); continue; }
+    prod.products.forEach(p => {
+      const skus = p.skuList || [];
+      if (!skus.length) return;
+      const mappedTypes = new Set();
+      const unmappedIds = [];
+      let mappedCount = 0;
+      skus.forEach(s => {
+        const typeId = syncedState.skuMappings[String(s.skuId)];
+        if (typeId) { mappedCount++; mappedTypes.add(typeId); }
+        else unmappedIds.push(s.skuId);
+      });
+      out.push({
+        shopTitle, productId: p.productId, productTitle: p.title,
+        totalSkus: skus.length, mappedSkus: mappedCount, unmappedSkus: skus.length - mappedCount,
+        mappedToTypes: [...mappedTypes], sampleUnmappedSkuIds: unmappedIds.slice(0, 5)
+      });
+    });
+  }
+  out.sort((a, b) => (b.totalSkus || 0) - (a.totalSkus || 0));
+  res.json(out);
+});
+
 app.get('/api/invoice/trigger-sync', async (req, res) => {
   const result = await runInvoiceSync();
   res.json(result);
