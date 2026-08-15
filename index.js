@@ -2759,6 +2759,36 @@ async function computeReorderRecommendations() {
   return { leadTimeDaysUsed: leadTimeDays, leadTimeSampleCount: leadTime.count, models: result };
 }
 
+// 19-GG: /uyzaxira buyrug'i — computeReorderRecommendations() natijasini o'qishga qulay matnga aylantiradi.
+async function uyZaxiraCommandText() {
+  const rec = await computeReorderRecommendations();
+  const lines = ['🏠 *UY ZAXIRASI ↔ UZUM OMBORI*', ''];
+  if (rec.leadTimeDaysUsed === null) {
+    lines.push('⚠️ Yuborish muddati hali hisoblanmadi (tarixiy ma\'lumot yetarli emas)', '');
+  }
+  rec.models.forEach(m => {
+    lines.push(`📦 *${m.typeName}*`);
+    lines.push(`Uzum ombori: ${fmtMoney(m.uzumAvail)} dona (~${m.uzumStockDays.toFixed(0)} kun)`);
+    lines.push(`Uyda: ${fmtMoney(m.homeStock)} dona`);
+    if (m.shipFromHome) {
+      const s = m.shipFromHome;
+      if (s.urgency === 'shoshilinch') {
+        lines.push(`🚨 HOZIROQ YUBORING: ${fmtMoney(s.qtyToSend)} dona`);
+        if (s.insufficientHome) lines.push(`⚠️ Uyda yetarli emas — kerak edi ${fmtMoney(s.qtyNeeded)}, bor-yo'g'i ${fmtMoney(m.homeStock)} bor`);
+      } else if (s.urgency === 'tez orada') {
+        lines.push(`🟠 Tez orada yuboring (${s.daysUntilMustShip.toFixed(0)} kun qoldi): ${fmtMoney(s.qtyToSend)} dona`);
+      } else if (s.qtyToSend > 0) {
+        lines.push(`🟢 Hali vaqt bor (${s.daysUntilMustShip.toFixed(0)} kun) — ${fmtMoney(s.qtyToSend)} dona tayyorlab qo'ying`);
+      }
+    }
+    if (m.orderFromChina.needed) {
+      lines.push(`🏭 Xitoydan buyurtma bering: ~${fmtMoney(m.orderFromChina.qtyToOrder)} dona (birgalikdagi zaxira ${m.orderFromChina.combinedStockDays.toFixed(0)} kunga yetadi)`);
+    }
+    lines.push('');
+  });
+  return lines.join('\n').trim();
+}
+
 // { typeId: qty } — faqat skuMappings'da bog'langan SKU'lar (bog'lanmaganlar uy zaxirasida yo'q, e'tiborsiz).
 function invoiceQtyByType(invoice, field) {
   const byType = {};
@@ -3586,6 +3616,9 @@ Pastdagi tugma orqali bevosita Telegram Mini App iovamizni ishga tushirishingiz 
   } else if (text.startsWith('/maqsad')) {
     // 18-D1: oylik aylanma maqsadi holati
     await sendTelegramMessage(token, chatId, await maqsadCommandText());
+  } else if (text.startsWith('/uyzaxira')) {
+    // 19-GG: uy zaxirasi ↔ Uzum ombori ↔ Xitoy buyurtma zanjiri — yakuniy tavsiya
+    await sendTelegramMessage(token, chatId, await uyZaxiraCommandText());
   } else if (text.startsWith('/utilizatsiya')) {
     // 19-O: utilizatsiyaga tayyor (ASSEMBLED) AKTLAR ro'yxati — endi har SKU emas, HAR AKT bitta qator.
     await sendTelegramMessage(token, chatId, "🔍 Utilizatsiyaga tayyor tovarlar qidirilmoqda...");
@@ -3710,6 +3743,12 @@ app.get('/api/diag/lead-time', async (req, res) => {
 // ko'rsatadi. Hech narsani o'zgartirmaydi, hech qanday boshqa joyga ulanmagan. Tekshirilgach OLIB TASHLANADI.
 app.get('/api/diag/reorder-recommendations', async (req, res) => {
   res.json(await computeReorderRecommendations());
+});
+
+// VAQTINCHALIK diagnostika (faqat o'qish): /uyzaxira buyrug'ining TO'LIQ matnini ko'rsatadi
+// (bot orqali yubormasdan). Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/uyzaxira-text', async (req, res) => {
+  res.type('text/plain').send(await uyZaxiraCommandText());
 });
 
 app.get('/api/invoice/trigger-sync', async (req, res) => {
@@ -4378,6 +4417,7 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
         { command: 'moliya', description: "Naqd oqim: foyda/zarar, xarajat, kredit" },
         { command: 'maslahat', description: "AI murabbiy: bugungi ishlar va tavsiyalar" },
         { command: 'maqsad', description: "Aylanma maqsadi va unga yaqinlik" },
+        { command: 'uyzaxira', description: "Uy zaxirasi va Uzum ombori — necha dona yuborish/buyurtma kerak" },
         { command: 'utilizatsiya', description: "Utilizatsiya arizasi (.docx) yaratish" },
         { command: 'dashboard', description: "Mini App ochish" }
       ];
