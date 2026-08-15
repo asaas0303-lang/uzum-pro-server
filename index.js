@@ -1789,6 +1789,75 @@ function collectXitoyPhotos(shopsXitoy) {
   return items;
 }
 
+// 19-EE: Uy zaxirasi ↔ Uzum ↔ Xitoy zanjiri, 1-qadam — SKU'ni uy zaxirasi turiga (typeId) bog'laydi.
+// 1) mavjud skuMappings (ASOSIY, tegilmaydi). 2) topilmasa — bir xil productId'dagi "aka-uka" SKU
+// (diagnostika bilan tasdiqlangan: bitta productId = bitta model, SKU'lar = ranglar) skuMappings'da
+// bormi tekshiradi — yangi rang qo'shilganda qo'lda bog'lash shart bo'lmasin. 3) topilmasa — null.
+function resolveTypeIdForSku(sku, productId, productList) {
+  const direct = syncedState.skuMappings[String(sku.skuId)];
+  if (direct) return direct;
+  const product = (productList || []).find(p => p.productId === productId);
+  if (product) {
+    for (const sib of (product.skuList || [])) {
+      const t = syncedState.skuMappings[String(sib.skuId)];
+      if (t) return t;
+    }
+  }
+  return null;
+}
+
+// 19-EE: BITTA do'kon uchun, uy zaxirasi turi (typeId) bo'yicha GURUHLANGAN Uzum zaxira/sotuv tezligi.
+// computeXitoyForShop() naqshida (fetchLiveShopProducts + computeSkuMetrics), lekin SKU darajasida emas,
+// typeId darajasida yig'indi qaytaradi. FAQAT O'QIYDI — productTypes/skuMappings'ga tegmaydi.
+async function computeModelStockForShop(shopId) {
+  const prod = await fetchLiveShopProducts(shopId);
+  const metrics = await computeSkuMetrics(shopId);
+  if (!prod.ok || !metrics.ok) return { byType: {}, unmappedSkus: [] };
+  const byType = {};
+  const unmappedSkus = [];
+  prod.products.forEach(p => (p.skuList || []).forEach(sku => {
+    const typeId = resolveTypeIdForSku(sku, p.productId, prod.products);
+    const avail = Math.max(0, sku.availableAmount || 0);
+    const m = metrics.perSku[sku.skuId] || {};
+    const avgDaily = m.avgDaily30 != null ? m.avgDaily30 : (m.avgDaily7 != null ? m.avgDaily7 : 0);
+    if (!typeId) { unmappedSkus.push({ skuId: sku.skuId, skuTitle: sku.skuTitle, productId: p.productId }); return; }
+    if (!byType[typeId]) byType[typeId] = { avail: 0, avgDaily: 0 };
+    byType[typeId].avail += avail;
+    byType[typeId].avgDaily += avgDaily;
+  }));
+  return { byType, unmappedSkus };
+}
+
+// 19-EE: Kamera (61122) + Jaydari Bozor (48589) — uy zaxirasi bilan BIR XIL "umumiy, ikkala do'kon"
+// mantig'ida (uy zaxirasi ham ikkala do'kon uchun umumiy). productTypes'da bor, lekin Uzumda SKU'si
+// topilmagan model ham to'liq ro'yxatga kiritiladi (uzumAvail:0, uzumStockDays:null).
+async function computeModelStockAllShops() {
+  const merged = {};
+  const allUnmapped = [];
+  for (const shopId of XITOY_SHOP_IDS) {
+    const { byType, unmappedSkus } = await computeModelStockForShop(shopId);
+    for (const [typeId, v] of Object.entries(byType)) {
+      if (!merged[typeId]) merged[typeId] = { avail: 0, avgDaily: 0 };
+      merged[typeId].avail += v.avail;
+      merged[typeId].avgDaily += v.avgDaily;
+    }
+    allUnmapped.push(...unmappedSkus.map(u => ({ ...u, shopId })));
+  }
+  const productTypes = syncedState.productTypes || [];
+  const typeIds = new Set([...Object.keys(merged), ...productTypes.map(t => t.id)]);
+  const types = [...typeIds].map(typeId => {
+    const type = productTypes.find(t => t.id === typeId);
+    const m = merged[typeId] || { avail: 0, avgDaily: 0 };
+    return {
+      typeId, typeName: type ? type.name : typeId,
+      uzumAvail: m.avail, uzumAvgDaily: m.avgDaily,
+      uzumStockDays: m.avgDaily > 0 ? m.avail / m.avgDaily : null,
+      homeStock: type ? (type.stock || 0) : 0
+    };
+  });
+  return { types, unmappedSkus: allUnmapped };
+}
+
 // 19-G: Gemini'ni chaqirib, JSON javobni parse qiladi. maxOutputTokens aniq belgilangan (avval yo'q edi —
 // uzun prompt ba'zan javobni chiqish limitiga yetkazib, JSON'ni kesib qo'yardi).
 async function callGeminiJson(ai, promptText) {
@@ -3543,6 +3612,12 @@ app.get('/api/tg-bot/trigger-problem-check', async (req, res) => {
   res.json(result);
 });
 
+// VAQTINCHALIK diagnostika (faqat o'qish): computeModelStockAllShops() haqiqiy natijasini ko'rsatadi.
+// productTypes/skuMappings'ga TEGMAYDI. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/model-stock', async (req, res) => {
+  res.json(await computeModelStockAllShops());
+});
+
 // 19-B diagnostika: invoice sinxronni qo'lda ishga tushiradi (cron kutmasdan)
 app.get('/api/invoice/trigger-sync', async (req, res) => {
   const result = await runInvoiceSync();
@@ -3563,28 +3638,6 @@ app.get('/api/invoice/sync-status', (req, res) => {
     deductedCount: st ? (st.deducted || []).length : 0,
     acceptedNotifiedCount: st ? (st.acceptedNotified || []).length : 0
   });
-});
-
-// VAQTINCHALIK diagnostika (faqat o'qish): 2a-bosqich uchun model↔rang munosabatini chuqurroq
-// ko'rsatadi — har do'konning eng ko'p SKU'ga ega 2 ta mahsuloti, productTitle + BARCHA SKU'lari bilan.
-// Maxfiy ma'lumot yo'q. Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/sku-hierarchy', async (req, res) => {
-  const shopIds = ['61122', '48589'];
-  const out = [];
-  for (const shopId of shopIds) {
-    const shop = (syncedState.shops || []).find(s => String(s.shopId) === shopId);
-    const shopTitle = shop ? shop.shopTitle : `Shop ${shopId}`;
-    const prod = await fetchLiveShopProducts(shopId);
-    if (!prod.ok) { out.push({ shopTitle, error: prod.error }); continue; }
-    const top2 = prod.products.slice().sort((a, b) => (b.skuList || []).length - (a.skuList || []).length).slice(0, 2);
-    top2.forEach(p => {
-      out.push({
-        shopTitle, productId: p.productId, productTitle: p.title,
-        skus: (p.skuList || []).map(s => ({ skuId: s.skuId, skuTitle: s.skuTitle, skuCode: s.skuCode }))
-      });
-    });
-  }
-  res.json(out);
 });
 
 // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar) — barcha ACCEPTED yuk xatlari bo'yicha
