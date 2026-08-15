@@ -2616,6 +2616,9 @@ async function runProblemCheck() {
 // quantityToStock (jo'natilgan), quantityAccepted (qabul qilingan), purchasePrice (tannarx).
 // MUHIM: `size>50` bo'sh qaytaradi (finance/orders'dagidek) — shuning uchun page=0,1,2... size=50 bilan sahifalaymiz.
 const INVOICE_TTL_MS = 5 * 60 * 1000;
+// 19-GG: Uy zaxirasi ↔ Uzum ↔ Xitoy zanjiri, 3-qadam — tavsiya konstantalari.
+const TARGET_UZUM_STOCK_DAYS = 30; // uydan yuborganda shu darajaga to'ldiriladi
+const CHINA_LEAD_TIME_DAYS = 30; // foydalanuvchi bahosi — Xitoydan buyurtma uchun aniq tarixiy ma'lumot yo'q
 let _invoiceCache = null; // { at, invoices }
 async function fetchAllInvoices() {
   const now = Date.now();
@@ -2716,6 +2719,44 @@ async function computeAvgInvoiceLeadTimeDays() {
       dateAccepted: invoiceDisplayDate(d.inv), diffDays: Math.round(d.diffDays * 10) / 10
     }))
   };
+}
+
+// 19-GG: Uy zaxirasi ↔ Uzum ↔ Xitoy zanjiri, 3-qadam — model bo'yicha yakuniy tavsiya (necha dona,
+// qachongacha uydan Uzumga yuborish / Xitoydan buyurtma berish). FAQAT hisoblaydi, hech qanday bot
+// xabari/dashboard'ga hali ulanmagan. computeModelStockAllShops()/computeAvgInvoiceLeadTimeDays()ning
+// o'zini o'zgartirmaydi — faqat chaqiradi.
+async function computeReorderRecommendations() {
+  const models = (await computeModelStockAllShops()).types;
+  const leadTime = await computeAvgInvoiceLeadTimeDays();
+  const leadTimeDays = leadTime.medianDays != null ? leadTime.medianDays : null;
+
+  const result = models
+    .filter(m => m.uzumAvgDaily > 0) // sotuvi yo'q model uchun tavsiya ma'nosiz
+    .map(m => {
+      const combinedAvail = m.uzumAvail + m.homeStock;
+      const combinedStockDays = m.uzumAvgDaily > 0 ? combinedAvail / m.uzumAvgDaily : null;
+
+      let shipFromHome = null;
+      if (leadTimeDays != null) {
+        const daysUntilMustShip = m.uzumStockDays - leadTimeDays;
+        const qtyNeeded = Math.max(0, Math.round(m.uzumAvgDaily * TARGET_UZUM_STOCK_DAYS) - m.uzumAvail);
+        const qtyToSend = Math.min(qtyNeeded, m.homeStock);
+        const urgency = daysUntilMustShip <= 0 ? 'shoshilinch' : (daysUntilMustShip <= 3 ? 'tez orada' : 'hali vaqt bor');
+        shipFromHome = { daysUntilMustShip, qtyNeeded, qtyToSend, urgency, insufficientHome: qtyNeeded > m.homeStock };
+      }
+
+      const qtyToOrder = Math.max(0, Math.round(m.uzumAvgDaily * (CHINA_LEAD_TIME_DAYS + TARGET_UZUM_STOCK_DAYS)) - combinedAvail);
+      const orderFromChina = {
+        qtyToOrder, needed: combinedStockDays != null && combinedStockDays <= CHINA_LEAD_TIME_DAYS, combinedStockDays
+      };
+
+      return {
+        typeId: m.typeId, typeName: m.typeName, uzumAvail: m.uzumAvail, uzumStockDays: m.uzumStockDays,
+        homeStock: m.homeStock, combinedStockDays, shipFromHome, orderFromChina
+      };
+    });
+
+  return { leadTimeDaysUsed: leadTimeDays, leadTimeSampleCount: leadTime.count, models: result };
 }
 
 // { typeId: qty } — faqat skuMappings'da bog'langan SKU'lar (bog'lanmaganlar uy zaxirasida yo'q, e'tiborsiz).
@@ -3663,6 +3704,12 @@ app.get('/api/diag/model-stock', async (req, res) => {
 // ko'rsatadi. Hech narsani o'zgartirmaydi. Tekshirilgach OLIB TASHLANADI.
 app.get('/api/diag/lead-time', async (req, res) => {
   res.json(await computeAvgInvoiceLeadTimeDays());
+});
+
+// VAQTINCHALIK diagnostika (faqat o'qish): computeReorderRecommendations() haqiqiy natijasini
+// ko'rsatadi. Hech narsani o'zgartirmaydi, hech qanday boshqa joyga ulanmagan. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/reorder-recommendations', async (req, res) => {
+  res.json(await computeReorderRecommendations());
 });
 
 app.get('/api/invoice/trigger-sync', async (req, res) => {
