@@ -2678,6 +2678,46 @@ function invoiceDayKey(inv) {
   return `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}`;
 }
 
+// 19-FF: Uy zaxirasi ↔ Uzum ↔ Xitoy zanjiri, 2-qadam — uydan Uzum omboriga yuborilgandan QABUL
+// qilinguncha HAQIQIY, tarixiy o'rtacha muddat (qattiq yozilgan "28 kun" taxmini o'rniga).
+// FAQAT O'QIYDI, hech qanday boshqa funksiyaga hali ULANMAGAN.
+async function computeAvgInvoiceLeadTimeDays() {
+  const empty = { count: 0, excludedCount: 0, meanDays: null, medianDays: null, minDays: null, maxDays: null, sampleInvoices: [] };
+  const fetchRes = await fetchAllInvoices();
+  if (!fetchRes.ok) return empty;
+
+  const diffs = []; // { inv, diffDays }
+  let excludedCount = 0;
+  fetchRes.invoices
+    .filter(inv => inv.invoiceStatus && inv.invoiceStatus.value === 'ACCEPTED' && inv.dateCreated && inv.dateAccepted)
+    .forEach(inv => {
+      const [dd, mm, yyyy] = String(inv.dateCreated).split('.').map(Number);
+      if (!dd || !mm || !yyyy) { excludedCount++; return; } // invoiceEventMs() naqshida parse
+      const dateCreatedMs = Date.UTC(yyyy, mm - 1, dd);
+      const diffDays = (inv.dateAccepted - dateCreatedMs) / 86400000;
+      if (diffDays < 0 || diffDays > 90) { excludedCount++; return; } // mantiqsiz — hisobdan chiqariladi
+      diffs.push({ inv, diffDays });
+    });
+
+  if (!diffs.length) return { ...empty, excludedCount };
+
+  diffs.sort((a, b) => a.inv.dateAccepted - b.inv.dateAccepted); // xronologik — "so'nggi 5" uchun
+  const values = diffs.map(d => d.diffDays);
+  const sorted = values.slice().sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const medianDays = sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  const meanDays = values.reduce((a, b) => a + b, 0) / values.length;
+
+  return {
+    count: diffs.length, excludedCount,
+    meanDays, medianDays, minDays: sorted[0], maxDays: sorted[sorted.length - 1],
+    sampleInvoices: diffs.slice(-5).map(d => ({
+      invoiceNumber: invoiceDisplayNumber(d.inv), dateCreated: d.inv.dateCreated,
+      dateAccepted: invoiceDisplayDate(d.inv), diffDays: Math.round(d.diffDays * 10) / 10
+    }))
+  };
+}
+
 // { typeId: qty } — faqat skuMappings'da bog'langan SKU'lar (bog'lanmaganlar uy zaxirasida yo'q, e'tiborsiz).
 function invoiceQtyByType(invoice, field) {
   const byType = {};
@@ -3619,6 +3659,12 @@ app.get('/api/diag/model-stock', async (req, res) => {
 });
 
 // 19-B diagnostika: invoice sinxronni qo'lda ishga tushiradi (cron kutmasdan)
+// VAQTINCHALIK diagnostika (faqat o'qish): computeAvgInvoiceLeadTimeDays() haqiqiy natijasini
+// ko'rsatadi. Hech narsani o'zgartirmaydi. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/lead-time', async (req, res) => {
+  res.json(await computeAvgInvoiceLeadTimeDays());
+});
+
 app.get('/api/invoice/trigger-sync', async (req, res) => {
   const result = await runInvoiceSync();
   res.json(result);
