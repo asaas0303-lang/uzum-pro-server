@@ -3565,6 +3565,27 @@ app.get('/api/invoice/sync-status', (req, res) => {
   });
 });
 
+// VAQTINCHALIK diagnostika (faqat o'qish): kartochka (skuList)dan skuTitle/skuCode HAQIQATDA qanday
+// ko'rinishda kelayotganini ko'rsatadi (2a-bosqich SKU→model guruhlash uchun). Faqat 3 maydon, maxfiy
+// ma'lumot yo'q. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/sku-format', async (req, res) => {
+  const shopIds = ['61122', '48589'];
+  const out = [];
+  for (const shopId of shopIds) {
+    const shop = (syncedState.shops || []).find(s => String(s.shopId) === shopId);
+    const shopTitle = shop ? shop.shopTitle : `Shop ${shopId}`;
+    const prod = await fetchLiveShopProducts(shopId);
+    if (!prod.ok) { out.push({ shopTitle, error: prod.error }); continue; }
+    const skus = [];
+    prod.products.forEach(p => (p.skuList || []).forEach(s => {
+      if (skus.length >= 5) return;
+      skus.push({ shopTitle, skuId: s.skuId, skuTitle: s.skuTitle, skuCode: s.skuCode });
+    }));
+    out.push(...skus);
+  }
+  res.json(out);
+});
+
 // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar) — barcha ACCEPTED yuk xatlari bo'yicha
 app.get('/api/compensation-candidates', async (req, res) => {
   const result = await computeCompensationCandidates();
