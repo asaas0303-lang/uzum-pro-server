@@ -3784,6 +3784,43 @@ app.get('/api/diag/unmapped-check', async (req, res) => {
   res.json(out);
 });
 
+// VAQTINCHALIK diagnostika (faqat o'qish): bitta productId uchun so'nggi 30 kunlik finance/orders
+// ma'lumotini "xom" (faqat productId filtri) va "moslashtirilgan" (buildSkuMatcher orqali skuId
+// topilgan) holatda solishtiradi — qayerda ma'lumot yo'qolayotganini ko'rsatish uchun.
+async function computeProductSalesCheck(productId, shopId) {
+  const fo = await fetchFinanceOrders(shopId);
+  if (!fo.ok) return { productId, shopId, error: fo.error };
+  const prod = await fetchLiveShopProducts(shopId);
+  const matchSkuId = buildSkuMatcher(prod.ok ? prod.products : []);
+  const range = periodToDayRange('month'); // 30 kun
+  const inRange = fo.orders.filter(o => o.orderId != null && o.date != null);
+  const dayOrders = inRange.filter(o => { const d = tashDayOf(o.date); return d >= range.fromDay && d <= range.toDay; });
+  const valid = dayOrders.filter(o => o.status !== 'CANCELED');
+  const productOrders = valid.filter(o => String(o.productId) === String(productId));
+
+  let rawUnits = 0, matchedUnits = 0;
+  const lostOrders = [];
+  productOrders.forEach(o => {
+    const amount = o.amount || 0;
+    rawUnits += amount;
+    const skuId = matchSkuId(o.productId, o.skuTitle);
+    if (skuId != null) matchedUnits += amount;
+    else lostOrders.push({ skuTitle: o.skuTitle, amount, date: tashDayOf(o.date) });
+  });
+  const lostUnits = rawUnits - matchedUnits;
+  return {
+    productId, shopId, rawUnits30d: rawUnits, matchedUnits30d: matchedUnits, lostUnits30d: lostUnits,
+    lostPercent: rawUnits > 0 ? Math.round((lostUnits / rawUnits) * 1000) / 10 : 0,
+    sampleLostOrders: lostOrders.slice(0, 5)
+  };
+}
+app.get('/api/diag/product-sales-check', async (req, res) => {
+  const targets = [{ productId: 2464084, shopId: '61122' }, { productId: 2167552, shopId: '48589' }];
+  const out = [];
+  for (const t of targets) out.push(await computeProductSalesCheck(t.productId, t.shopId));
+  res.json(out);
+});
+
 app.get('/api/invoice/trigger-sync', async (req, res) => {
   const result = await runInvoiceSync();
   res.json(result);
