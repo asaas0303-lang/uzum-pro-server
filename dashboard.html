@@ -2059,6 +2059,9 @@ ${urgentSection}
             } else if (s.qtyToSend > 0) {
               extra += `<div class="text-emerald-400 font-bold text-xs mt-1">🟢 Hali vaqt bor (${Math.round(s.daysUntilMustShip)} kun): ${fmtMoney(s.qtyToSend)} dona</div>`;
             }
+            if (s.skuBreakdown && s.skuBreakdown.length) {
+              extra += `<ul class="text-[10px] text-slate-400 mt-1 pl-2">${s.skuBreakdown.map(b => `<li>${b.skuTitle} (${b.shopTitle}): ${fmtMoney(b.sentQty)} dona</li>`).join('')}</ul>`;
+            }
           }
           if (m.orderFromChina && m.orderFromChina.needed) {
             extra += `<div class="text-sky-400 text-xs mt-1">🏭 Xitoydan buyurtma: ~${fmtMoney(m.orderFromChina.qtyToOrder)} dona</div>`;

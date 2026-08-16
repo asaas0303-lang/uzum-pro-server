@@ -1825,9 +1825,12 @@ async function computeModelStockForShop(shopId) {
     const m = metrics.perSku[sku.skuId] || {};
     const avgDaily = m.avgDailyBlended != null ? m.avgDailyBlended : (m.avgDaily30 != null ? m.avgDaily30 : (m.avgDaily7 != null ? m.avgDaily7 : 0));
     if (!typeId) { unmappedSkus.push({ skuId: sku.skuId, skuTitle: sku.skuTitle, productId: p.productId }); return; }
-    if (!byType[typeId]) byType[typeId] = { avail: 0, avgDaily: 0 };
+    if (!byType[typeId]) byType[typeId] = { avail: 0, avgDaily: 0, skus: [] };
     byType[typeId].avail += avail;
     byType[typeId].avgDaily += avgDaily;
+    // 19-JJ: SKU darajasidagi tafsilot — qaysi aniq kartochkaga qancha yuborish kerakligini
+    // hisoblash uchun (model darajasidagi yig'indi buni yashiradi).
+    byType[typeId].skus.push({ skuId: sku.skuId, skuTitle: sku.skuTitle, avail, avgDaily, stockDays: avgDaily > 0 ? avail / avgDaily : null });
   }));
   return { byType, unmappedSkus };
 }
@@ -1840,10 +1843,13 @@ async function computeModelStockAllShops() {
   const allUnmapped = [];
   for (const shopId of XITOY_SHOP_IDS) {
     const { byType, unmappedSkus } = await computeModelStockForShop(shopId);
+    const shop = (syncedState.shops || []).find(s => String(s.shopId) === shopId);
+    const shopTitle = shop ? shop.shopTitle : `Shop ${shopId}`;
     for (const [typeId, v] of Object.entries(byType)) {
-      if (!merged[typeId]) merged[typeId] = { avail: 0, avgDaily: 0 };
+      if (!merged[typeId]) merged[typeId] = { avail: 0, avgDaily: 0, skus: [] };
       merged[typeId].avail += v.avail;
       merged[typeId].avgDaily += v.avgDaily;
+      merged[typeId].skus.push(...v.skus.map(s => ({ ...s, shopTitle }))); // 19-JJ: ikkala do'kondan birlashtiriladi
     }
     allUnmapped.push(...unmappedSkus.map(u => ({ ...u, shopId })));
   }
@@ -1851,12 +1857,13 @@ async function computeModelStockAllShops() {
   const typeIds = new Set([...Object.keys(merged), ...productTypes.map(t => t.id)]);
   const types = [...typeIds].map(typeId => {
     const type = productTypes.find(t => t.id === typeId);
-    const m = merged[typeId] || { avail: 0, avgDaily: 0 };
+    const m = merged[typeId] || { avail: 0, avgDaily: 0, skus: [] };
     return {
       typeId, typeName: type ? type.name : typeId,
       uzumAvail: m.avail, uzumAvgDaily: m.avgDaily,
       uzumStockDays: m.avgDaily > 0 ? m.avail / m.avgDaily : null,
-      homeStock: type ? (type.stock || 0) : 0
+      homeStock: type ? (type.stock || 0) : 0,
+      skus: m.skus // 19-JJ
     };
   });
   return { types, unmappedSkus: allUnmapped };
@@ -2747,6 +2754,20 @@ async function computeReorderRecommendations() {
         const qtyToSend = Math.min(qtyNeeded, m.homeStock);
         const urgency = daysUntilMustShip <= 0 ? 'shoshilinch' : (daysUntilMustShip <= 3 ? 'tez orada' : 'hali vaqt bor');
         shipFromHome = { daysUntilMustShip, qtyNeeded, qtyToSend, urgency, insufficientHome: qtyNeeded > m.homeStock };
+
+        // 19-JJ: qaysi aniq SKU'ga qancha yuborish kerak — tez sotiladiganiga ko'proq, sekiniga kamroq/nol.
+        if (qtyToSend > 0) {
+          const candidates = (m.skus || [])
+            .filter(s => s.avgDaily > 0)
+            .map(s => ({ ...s, idealQty: Math.max(0, Math.round(s.avgDaily * TARGET_UZUM_STOCK_DAYS) - s.avail) }));
+          const totalIdeal = candidates.reduce((a, c) => a + c.idealQty, 0);
+          shipFromHome.skuBreakdown = totalIdeal === 0 ? [] : candidates
+            .map(c => ({ skuTitle: c.skuTitle, shopTitle: c.shopTitle, avail: c.avail, stockDays: c.stockDays, sentQty: Math.round(qtyToSend * (c.idealQty / totalIdeal)) }))
+            .filter(c => c.sentQty > 0)
+            .sort((a, b) => b.sentQty - a.sentQty);
+        } else {
+          shipFromHome.skuBreakdown = [];
+        }
       }
 
       const qtyToOrder = Math.max(0, Math.round(m.uzumAvgDaily * (CHINA_LEAD_TIME_DAYS + TARGET_UZUM_STOCK_DAYS)) - combinedAvail);
@@ -2783,6 +2804,9 @@ async function uyZaxiraCommandText() {
         lines.push(`🟠 Tez orada yuboring (${s.daysUntilMustShip.toFixed(0)} kun qoldi): ${fmtMoney(s.qtyToSend)} dona`);
       } else if (s.qtyToSend > 0) {
         lines.push(`🟢 Hali vaqt bor (${s.daysUntilMustShip.toFixed(0)} kun) — ${fmtMoney(s.qtyToSend)} dona tayyorlab qo'ying`);
+      }
+      if (s.skuBreakdown && s.skuBreakdown.length) {
+        s.skuBreakdown.forEach(b => lines.push(`   → ${b.skuTitle} (${b.shopTitle}): ${fmtMoney(b.sentQty)} dona (hozir ${b.stockDays.toFixed(0)} kunga yetadi)`));
       }
     }
     if (m.orderFromChina.needed) {
@@ -3740,6 +3764,12 @@ app.get('/api/invoice/trigger-sync', async (req, res) => {
 app.get('/api/return/trigger-sync', async (req, res) => {
   const result = await runReturnSync();
   res.json(result);
+});
+
+// VAQTINCHALIK diagnostika (faqat o'qish): computeReorderRecommendations() haqiqiy natijasini,
+// skuBreakdown bilan birga, to'liq ko'rsatadi. Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/reorder-breakdown', async (req, res) => {
+  res.json(await computeReorderRecommendations());
 });
 
 // 19-B diagnostika (o'qish uchun): invoice holati — nechta ayirilgan/qabul belgilangan
