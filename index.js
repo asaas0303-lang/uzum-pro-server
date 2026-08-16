@@ -867,17 +867,21 @@ async function computeSkuMetrics(shopId) {
     const v = velocity.ready ? velocity.perSku[sku.skuId] : undefined;
     const a7 = v ? v.avgDaily7 : undefined;
     const a30 = v ? v.avgDaily30 : undefined;
+    const aBlended = v ? v.avgDaily : undefined; // 19-HH: vaznli o'rtacha (0.6×avg7+0.4×avg30) — allaqachon hisoblangan
     const stockDays7 = (a7 != null && a7 > 0) ? avail / a7 : null;
     const stockDays30 = (a30 != null && a30 > 0) ? avail / a30 : null;
-    // 5.4: Xitoy buyurtma nuqtasi — eng ishonchli mavjud ko'rsatkich (30 kunlik, bo'lmasa 7 kunlik)
-    const stockDaysBest = stockDays30 != null ? stockDays30 : stockDays7;
+    const stockDaysBlended = (aBlended != null && aBlended > 0) ? avail / aBlended : null;
+    // 5.4/19-HH: Xitoy buyurtma nuqtasi — vaznli (eng aniq, so'nggi tezlanishni aks ettiradi),
+    // bo'lmasa 30 kunlik, bo'lmasa 7 kunlik.
+    const stockDaysBest = stockDaysBlended != null ? stockDaysBlended : (stockDays30 != null ? stockDays30 : stockDays7);
     // 5.3: nolikvid — 30 kunlik oyna to'liq va aniq shu SKU uchun ma'lum, oxirgi 30 kunda 0 sotilgan, hozir zaxirasi bor
     const isDeadStock = velocity.ready && a30 != null && a30 === 0 && avail > 0;
     perSku[sku.skuId] = {
       productId: p.productId,
       avgDaily7: a7 != null ? a7 : null,
       avgDaily30: a30 != null ? a30 : null,
-      stockDays7, stockDays30,
+      avgDailyBlended: aBlended != null ? aBlended : null, // 19-HH
+      stockDays7, stockDays30, stockDaysBlended, // 19-HH: stockDaysBlended qo'shildi
       canCompute: stockDaysBest != null,
       needsReorder: stockDaysBest != null && stockDaysBest <= 35, // 5.4: 28 kun yo'l + 7 kun zaxira
       isDeadStock,
@@ -1748,7 +1752,7 @@ async function computeXitoyForShop(shopId, shopTitle) {
   const skuRows = [];
   prod.products.forEach(p => (p.skuList || []).forEach(sku => {
     const m = metrics.perSku[sku.skuId] || {};
-    const stockDays = m.canCompute ? (m.stockDays30 != null ? m.stockDays30 : m.stockDays7) : null;
+    const stockDays = m.canCompute ? (m.stockDaysBlended != null ? m.stockDaysBlended : (m.stockDays30 != null ? m.stockDays30 : m.stockDays7)) : null;
     const image = uzumImageUrl(sku.previewImage || sku.photo || sku.image) || null;
     skuRows.push({ title: sku.skuTitle, stockDays, needsReorder: m.needsReorder, image });
   }));
@@ -1819,7 +1823,7 @@ async function computeModelStockForShop(shopId) {
     const typeId = resolveTypeIdForSku(sku, p.productId, prod.products);
     const avail = Math.max(0, sku.availableAmount || 0);
     const m = metrics.perSku[sku.skuId] || {};
-    const avgDaily = m.avgDaily30 != null ? m.avgDaily30 : (m.avgDaily7 != null ? m.avgDaily7 : 0);
+    const avgDaily = m.avgDailyBlended != null ? m.avgDailyBlended : (m.avgDaily30 != null ? m.avgDaily30 : (m.avgDaily7 != null ? m.avgDaily7 : 0));
     if (!typeId) { unmappedSkus.push({ skuId: sku.skuId, skuTitle: sku.skuTitle, productId: p.productId }); return; }
     if (!byType[typeId]) byType[typeId] = { avail: 0, avgDaily: 0 };
     byType[typeId].avail += avail;
@@ -3818,6 +3822,33 @@ app.get('/api/diag/product-sales-check', async (req, res) => {
   const targets = [{ productId: 2464084, shopId: '61122' }, { productId: 2167552, shopId: '48589' }];
   const out = [];
   for (const t of targets) out.push(await computeProductSalesCheck(t.productId, t.shopId));
+  res.json(out);
+});
+
+// VAQTINCHALIK diagnostika (faqat o'qish): MAYDAKA (61122/2464084) va MINIK (48589/2167552) mahsulotlari
+// uchun HAR SKU'ning ESKI (30 kun) va YANGI (vaznli) stockDays qiymatlarini YONMA-YON ko'rsatadi.
+// Tekshirilgach OLIB TASHLANADI.
+app.get('/api/diag/blended-compare', async (req, res) => {
+  const targets = [{ productId: 2464084, shopId: '61122' }, { productId: 2167552, shopId: '48589' }];
+  const out = [];
+  for (const t of targets) {
+    const prod = await fetchLiveShopProducts(t.shopId);
+    const metrics = await computeSkuMetrics(t.shopId);
+    if (!prod.ok || !metrics.ok) { out.push({ ...t, error: prod.error || metrics.error }); continue; }
+    const product = prod.products.find(p => String(p.productId) === String(t.productId));
+    if (!product) { out.push({ ...t, error: 'product topilmadi' }); continue; }
+    const skus = (product.skuList || []).map(sku => {
+      const m = metrics.perSku[sku.skuId] || {};
+      const r = x => x == null ? null : Math.round(x * 10) / 10;
+      return {
+        skuTitle: sku.skuTitle, avail: Math.max(0, sku.availableAmount || 0),
+        avgDaily7: r(m.avgDaily7), avgDaily30: r(m.avgDaily30), avgDailyBlended: r(m.avgDailyBlended),
+        stockDays7: r(m.stockDays7), stockDays30_ESKI: r(m.stockDays30), stockDaysBlended_YANGI: r(m.stockDaysBlended),
+        needsReorder: m.needsReorder
+      };
+    }).sort((a, b) => (a.stockDaysBlended_YANGI ?? 1e9) - (b.stockDaysBlended_YANGI ?? 1e9));
+    out.push({ shopId: t.shopId, productId: t.productId, productTitle: product.title, skus });
+  }
   res.json(out);
 });
 
