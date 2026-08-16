@@ -3730,128 +3730,7 @@ app.get('/api/tg-bot/trigger-problem-check', async (req, res) => {
   res.json(result);
 });
 
-// VAQTINCHALIK diagnostika (faqat o'qish): computeModelStockAllShops() haqiqiy natijasini ko'rsatadi.
-// productTypes/skuMappings'ga TEGMAYDI. Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/model-stock', async (req, res) => {
-  res.json(await computeModelStockAllShops());
-});
-
 // 19-B diagnostika: invoice sinxronni qo'lda ishga tushiradi (cron kutmasdan)
-// VAQTINCHALIK diagnostika (faqat o'qish): computeAvgInvoiceLeadTimeDays() haqiqiy natijasini
-// ko'rsatadi. Hech narsani o'zgartirmaydi. Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/lead-time', async (req, res) => {
-  res.json(await computeAvgInvoiceLeadTimeDays());
-});
-
-// VAQTINCHALIK diagnostika (faqat o'qish): computeReorderRecommendations() haqiqiy natijasini
-// ko'rsatadi. Hech narsani o'zgartirmaydi, hech qanday boshqa joyga ulanmagan. Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/reorder-recommendations', async (req, res) => {
-  res.json(await computeReorderRecommendations());
-});
-
-// VAQTINCHALIK diagnostika (faqat o'qish): /uyzaxira buyrug'ining TO'LIQ matnini ko'rsatadi
-// (bot orqali yubormasdan). Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/uyzaxira-text', async (req, res) => {
-  res.type('text/plain').send(await uyZaxiraCommandText());
-});
-
-// VAQTINCHALIK diagnostika (faqat o'qish): "YASHIRI-MAYDAKA"/"JAYDAR-MINIK" kabi mahsulotlar
-// skuMappings'da bog'langanmi — mahsulot darajasida ko'rsatadi. Maxfiy ma'lumot yo'q. Tekshirilgach
-// OLIB TASHLANADI.
-app.get('/api/diag/unmapped-check', async (req, res) => {
-  const shopIds = ['61122', '48589'];
-  const out = [];
-  for (const shopId of shopIds) {
-    const shop = (syncedState.shops || []).find(s => String(s.shopId) === shopId);
-    const shopTitle = shop ? shop.shopTitle : `Shop ${shopId}`;
-    const prod = await fetchLiveShopProducts(shopId);
-    if (!prod.ok) { out.push({ shopTitle, error: prod.error }); continue; }
-    prod.products.forEach(p => {
-      const skus = p.skuList || [];
-      if (!skus.length) return;
-      const mappedTypes = new Set();
-      const unmappedIds = [];
-      let mappedCount = 0;
-      skus.forEach(s => {
-        const typeId = syncedState.skuMappings[String(s.skuId)];
-        if (typeId) { mappedCount++; mappedTypes.add(typeId); }
-        else unmappedIds.push(s.skuId);
-      });
-      out.push({
-        shopTitle, productId: p.productId, productTitle: p.title,
-        totalSkus: skus.length, mappedSkus: mappedCount, unmappedSkus: skus.length - mappedCount,
-        mappedToTypes: [...mappedTypes], sampleUnmappedSkuIds: unmappedIds.slice(0, 5)
-      });
-    });
-  }
-  out.sort((a, b) => (b.totalSkus || 0) - (a.totalSkus || 0));
-  res.json(out);
-});
-
-// VAQTINCHALIK diagnostika (faqat o'qish): bitta productId uchun so'nggi 30 kunlik finance/orders
-// ma'lumotini "xom" (faqat productId filtri) va "moslashtirilgan" (buildSkuMatcher orqali skuId
-// topilgan) holatda solishtiradi — qayerda ma'lumot yo'qolayotganini ko'rsatish uchun.
-async function computeProductSalesCheck(productId, shopId) {
-  const fo = await fetchFinanceOrders(shopId);
-  if (!fo.ok) return { productId, shopId, error: fo.error };
-  const prod = await fetchLiveShopProducts(shopId);
-  const matchSkuId = buildSkuMatcher(prod.ok ? prod.products : []);
-  const range = periodToDayRange('month'); // 30 kun
-  const inRange = fo.orders.filter(o => o.orderId != null && o.date != null);
-  const dayOrders = inRange.filter(o => { const d = tashDayOf(o.date); return d >= range.fromDay && d <= range.toDay; });
-  const valid = dayOrders.filter(o => o.status !== 'CANCELED');
-  const productOrders = valid.filter(o => String(o.productId) === String(productId));
-
-  let rawUnits = 0, matchedUnits = 0;
-  const lostOrders = [];
-  productOrders.forEach(o => {
-    const amount = o.amount || 0;
-    rawUnits += amount;
-    const skuId = matchSkuId(o.productId, o.skuTitle);
-    if (skuId != null) matchedUnits += amount;
-    else lostOrders.push({ skuTitle: o.skuTitle, amount, date: tashDayOf(o.date) });
-  });
-  const lostUnits = rawUnits - matchedUnits;
-  return {
-    productId, shopId, rawUnits30d: rawUnits, matchedUnits30d: matchedUnits, lostUnits30d: lostUnits,
-    lostPercent: rawUnits > 0 ? Math.round((lostUnits / rawUnits) * 1000) / 10 : 0,
-    sampleLostOrders: lostOrders.slice(0, 5)
-  };
-}
-app.get('/api/diag/product-sales-check', async (req, res) => {
-  const targets = [{ productId: 2464084, shopId: '61122' }, { productId: 2167552, shopId: '48589' }];
-  const out = [];
-  for (const t of targets) out.push(await computeProductSalesCheck(t.productId, t.shopId));
-  res.json(out);
-});
-
-// VAQTINCHALIK diagnostika (faqat o'qish): MAYDAKA (61122/2464084) va MINIK (48589/2167552) mahsulotlari
-// uchun HAR SKU'ning ESKI (30 kun) va YANGI (vaznli) stockDays qiymatlarini YONMA-YON ko'rsatadi.
-// Tekshirilgach OLIB TASHLANADI.
-app.get('/api/diag/blended-compare', async (req, res) => {
-  const targets = [{ productId: 2464084, shopId: '61122' }, { productId: 2167552, shopId: '48589' }];
-  const out = [];
-  for (const t of targets) {
-    const prod = await fetchLiveShopProducts(t.shopId);
-    const metrics = await computeSkuMetrics(t.shopId);
-    if (!prod.ok || !metrics.ok) { out.push({ ...t, error: prod.error || metrics.error }); continue; }
-    const product = prod.products.find(p => String(p.productId) === String(t.productId));
-    if (!product) { out.push({ ...t, error: 'product topilmadi' }); continue; }
-    const skus = (product.skuList || []).map(sku => {
-      const m = metrics.perSku[sku.skuId] || {};
-      const r = x => x == null ? null : Math.round(x * 10) / 10;
-      return {
-        skuTitle: sku.skuTitle, avail: Math.max(0, sku.availableAmount || 0),
-        avgDaily7: r(m.avgDaily7), avgDaily30: r(m.avgDaily30), avgDailyBlended: r(m.avgDailyBlended),
-        stockDays7: r(m.stockDays7), stockDays30_ESKI: r(m.stockDays30), stockDaysBlended_YANGI: r(m.stockDaysBlended),
-        needsReorder: m.needsReorder
-      };
-    }).sort((a, b) => (a.stockDaysBlended_YANGI ?? 1e9) - (b.stockDaysBlended_YANGI ?? 1e9));
-    out.push({ shopId: t.shopId, productId: t.productId, productTitle: product.title, skus });
-  }
-  res.json(out);
-});
-
 app.get('/api/invoice/trigger-sync', async (req, res) => {
   const result = await runInvoiceSync();
   res.json(result);
@@ -3878,6 +3757,12 @@ app.get('/api/compensation-candidates', async (req, res) => {
   const result = await computeCompensationCandidates();
   if (!result.ok) return sendUzumError(res, result.error);
   res.json(result);
+});
+
+// 19-II: Uy zaxirasi ↔ Uzum ombori ↔ Xitoy tavsiyasi — dashboard "Uy Zaxirasi" tabidagi solishtirish
+// paneli uchun (bot /uyzaxira buyrug'i bilan bir xil hisoblovchi funksiya).
+app.get('/api/reorder-recommendations', async (req, res) => {
+  res.json(await computeReorderRecommendations());
 });
 
 // 19-D: ta'minlashlar (yuk xatlari) ro'yxati — dashboard "Ta'minlashlar" bo'limi uchun

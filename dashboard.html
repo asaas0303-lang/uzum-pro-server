@@ -2018,9 +2018,74 @@ ${urgentSection}
               </div>
             ` : typesList}
           </div>
+
+          <div class="flex justify-between items-center text-xs px-1 mt-2">
+            <span class="font-bold text-slate-300">📊 Uzum ombori bilan solishtirish</span>
+            <button onclick="loadReorderRecommendations()" class="bg-slate-800 border border-slate-700 text-slate-300 text-[11px] px-3 py-1.5 rounded-lg flex items-center gap-1">
+              <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Yangilash
+            </button>
+          </div>
+          <div id="reorder-rec-panel" class="flex flex-col gap-3">
+            <div class="p-4 text-center text-slate-500 text-xs">Yuklanmoqda...</div>
+          </div>
         </div>
       `;
       lucide.createIcons();
+      loadReorderRecommendations();
+    }
+
+    // 19-II: Uy zaxirasi ↔ Uzum ombori ↔ Xitoy tavsiyasi paneli — bot /uyzaxira bilan bir xil
+    // backend hisobidan (computeReorderRecommendations()), mavjud productType kartochkalari
+    // uslubida (bg-darkCard, border-darkBorder, rounded-2xl).
+    async function loadReorderRecommendations() {
+      const panel = document.getElementById('reorder-rec-panel');
+      if (!panel) return;
+      panel.innerHTML = `<div class="p-4 text-center text-slate-500 text-xs">Yuklanmoqda...</div>`;
+      try {
+        const rec = await fetchFromProxy('/api/reorder-recommendations');
+        if (!rec.models || !rec.models.length) {
+          panel.innerHTML = `<div class="p-4 text-center text-slate-500 text-xs">Hozircha ma'lumot yo'q.</div>`;
+          return;
+        }
+        panel.innerHTML = rec.models.map(m => {
+          let extra = '';
+          if (m.shipFromHome) {
+            const s = m.shipFromHome;
+            if (s.urgency === 'shoshilinch') {
+              extra += `<div class="text-rose-400 font-bold text-xs mt-1">🚨 HOZIROQ YUBORING: ${fmtMoney(s.qtyToSend)} dona</div>`;
+              if (s.insufficientHome) extra += `<div class="text-rose-400/80 text-[11px] mt-0.5">⚠️ Uyda yetarli emas — kerak edi ${fmtMoney(s.qtyNeeded)}, bor-yo'g'i ${fmtMoney(m.homeStock)} bor</div>`;
+            } else if (s.urgency === 'tez orada') {
+              extra += `<div class="text-amber-400 font-bold text-xs mt-1">🟠 Tez orada yuboring (${Math.round(s.daysUntilMustShip)} kun): ${fmtMoney(s.qtyToSend)} dona</div>`;
+            } else if (s.qtyToSend > 0) {
+              extra += `<div class="text-emerald-400 font-bold text-xs mt-1">🟢 Hali vaqt bor (${Math.round(s.daysUntilMustShip)} kun): ${fmtMoney(s.qtyToSend)} dona</div>`;
+            }
+          }
+          if (m.orderFromChina && m.orderFromChina.needed) {
+            extra += `<div class="text-sky-400 text-xs mt-1">🏭 Xitoydan buyurtma: ~${fmtMoney(m.orderFromChina.qtyToOrder)} dona</div>`;
+          }
+          const borderCls = m.shipFromHome && m.shipFromHome.urgency === 'shoshilinch' ? 'border-rose-900/60'
+            : m.shipFromHome && m.shipFromHome.urgency === 'tez orada' ? 'border-amber-900/60' : 'border-darkBorder';
+          return `
+            <div class="p-3.5 rounded-2xl bg-darkCard border ${borderCls} flex flex-col gap-1.5">
+              <span class="text-sm font-bold text-slate-200">📦 ${m.typeName}</span>
+              <div class="grid grid-cols-2 gap-3 text-xs font-mono text-slate-400">
+                <div class="flex flex-col gap-0.5">
+                  <span class="text-[10px] uppercase text-slate-500">Uzum ombori:</span>
+                  <span class="font-bold text-slate-200">${fmtMoney(m.uzumAvail)} dona ${m.uzumStockDays != null ? `(~${Math.round(m.uzumStockDays)} kun)` : ''}</span>
+                </div>
+                <div class="flex flex-col gap-0.5">
+                  <span class="text-[10px] uppercase text-slate-500">Uyda:</span>
+                  <span class="font-bold text-slate-200">${fmtMoney(m.homeStock)} dona</span>
+                </div>
+              </div>
+              ${extra}
+            </div>
+          `;
+        }).join('');
+      } catch (e) {
+        console.error("Uzum solishtirish panelini yuklashda xato:", e);
+        panel.innerHTML = `<div class="p-4 text-center text-rose-400 text-xs">Ma'lumotni yuklab bo'lmadi.</div>`;
+      }
     }
 
     // 14C: davr nomi — Moliya va D4 bir xil yorliqni ishlatadi
