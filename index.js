@@ -3078,6 +3078,9 @@ async function runInvoiceSync() {
   // Re-sort himoyasi uchun: allaqachon "qayta-saralash" deb hisobga olingan rad-etilgan yozuvlar,
   // kalit "radInvoiceId:skuId" — bir rad etilgan yozuv ikki marta "recovered" deb sanalmasin.
   const resortConsumed = new Set(st.resortConsumed || []);
+  // 19-LL: har yuk xati uchun HAQIQIY ayirilgan miqdor (clamping'dan keyingi `before - stock`, `qty` EMAS)
+  // — { [invoiceId]: { [typeId]: actualDelta } }. Yuk xati keyinroq CANCELED bo'lsa aniq teskari qaytariladi.
+  const invoiceDeductions = st.invoiceDeductions || {};
 
   if (firstRun) {
     // Bazaviy holat: hamma narsani "ishlangan" deb belgilaymiz — eski yuk xatlari zaxirani buzmasin, toshqin bo'lmasin.
@@ -3096,6 +3099,28 @@ async function runInvoiceSync() {
   for (const inv of invoices) {
     const status = inv.invoiceStatus && inv.invoiceStatus.value;
     const numLabel = invoiceDisplayNumber(inv); // Uzum kabinetidagi raqam — tekshiruv xonasisiz
+
+    // 19-LL: AVVAL ayirilgan, endi CANCELED bo'lgan yuk xati — uy zaxirasini ANIQ orqaga tiklaymiz
+    // (invoiceDeductions'da haqiqiy ayirilgan miqdor saqlanadi, clamping hisobga olingan).
+    if (status === 'CANCELED' && invoiceDeductions[inv.id] && Object.keys(invoiceDeductions[inv.id]).length) {
+      const restoreLines = [];
+      for (const [typeId, delta] of Object.entries(invoiceDeductions[inv.id])) {
+        const type = (syncedState.productTypes || []).find(t => t.id === typeId);
+        if (!type) continue;
+        const before = type.stock || 0;
+        type.stock = before + delta; // teskari qaytarish — clamping shart emas
+        restoreLines.push(`   ${type.name}: ${before} → ${type.stock} (+${delta})`);
+        stockChanged = true;
+      }
+      delete invoiceDeductions[inv.id]; // qayta teskari qaytarilmasin
+      messages.push(
+        `🔄 *Yuk xati bekor qilindi — uy zaxirasi tiklandi*\n` +
+        `➤ Raqami: #${numLabel}\n` +
+        `🏬 Do'kon: ${inv.shopTitle}\n` +
+        (restoreLines.length ? `\n🏠 Uy zaxirasiga qaytarildi:\n${restoreLines.join('\n')}` : '')
+      );
+      continue; // qolgan mantiq (yangi ayirish/qabul qilish) shu invoice uchun ishlamaydi
+    }
 
     // 1) YANGI yuk xati (CREATED yoki to'g'ridan ACCEPTED) hali ayirilmagan bo'lsa — uy zaxirasidan ayir.
     // MUHIM: CANCELED (bekor qilingan) yuk xati JISMONAN jo'natilmagan — zaxiraga TEGMAYMIZ,
@@ -3158,6 +3183,11 @@ async function runInvoiceSync() {
           if (!type) continue;
           const before = type.stock || 0;
           type.stock = Math.max(0, before - qty); // manfiy zaxira yo'q
+          const actualDelta = before - type.stock; // 19-LL: clamping-xabardor haqiqiy o'zgarish
+          if (actualDelta > 0) {
+            invoiceDeductions[inv.id] = invoiceDeductions[inv.id] || {};
+            invoiceDeductions[inv.id][typeId] = actualDelta;
+          }
           lines.push(`   ${type.name}: ${before} → ${type.stock} (−${qty})`);
           stockChanged = true;
         }
@@ -3210,7 +3240,7 @@ async function runInvoiceSync() {
     }
   }
 
-  writeJsonFile(INVOICE_STATE_FILE, { deducted: [...deducted], acceptedNotified: [...acceptedNotified], resortConsumed: [...resortConsumed] });
+  writeJsonFile(INVOICE_STATE_FILE, { deducted: [...deducted], acceptedNotified: [...acceptedNotified], resortConsumed: [...resortConsumed], invoiceDeductions });
   if (stockChanged) saveSettings(); // uy zaxirasi o'zgardi — diskka saqlaymiz (mavjud himoya ostida)
 
   if (token && ADMIN_CHAT_ID && messages.length) {
