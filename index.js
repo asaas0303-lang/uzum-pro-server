@@ -2771,9 +2771,23 @@ async function computeReorderRecommendations() {
       }
 
       const qtyToOrder = Math.max(0, Math.round(m.uzumAvgDaily * (CHINA_LEAD_TIME_DAYS + TARGET_UZUM_STOCK_DAYS)) - combinedAvail);
-      const orderFromChina = {
-        qtyToOrder, needed: combinedStockDays != null && combinedStockDays <= CHINA_LEAD_TIME_DAYS, combinedStockDays
-      };
+      const chinaNeeded = combinedStockDays != null && combinedStockDays <= CHINA_LEAD_TIME_DAYS;
+      const orderFromChina = { qtyToOrder, needed: chinaNeeded, combinedStockDays };
+
+      // 19-JJ: qaysi rang/kartochkadan qancha buyurtma berish — Uzum ombori zaxira/tezligiga asoslanadi
+      // (uy zaxirasi rang bo'yicha ajratilmagani uchun hisobga olinmaydi — bilingan cheklov).
+      if (chinaNeeded && qtyToOrder > 0) {
+        const candidates = (m.skus || [])
+          .filter(s => s.avgDaily > 0)
+          .map(s => ({ ...s, idealQty: Math.max(0, Math.round(s.avgDaily * (CHINA_LEAD_TIME_DAYS + TARGET_UZUM_STOCK_DAYS)) - s.avail) }));
+        const totalIdeal = candidates.reduce((a, c) => a + c.idealQty, 0);
+        orderFromChina.skuBreakdown = totalIdeal === 0 ? [] : candidates
+          .map(c => ({ skuTitle: c.skuTitle, shopTitle: c.shopTitle, avail: c.avail, stockDays: c.stockDays, orderQty: Math.round(qtyToOrder * (c.idealQty / totalIdeal)) }))
+          .filter(c => c.orderQty > 0)
+          .sort((a, b) => b.orderQty - a.orderQty);
+      } else {
+        orderFromChina.skuBreakdown = [];
+      }
 
       return {
         typeId: m.typeId, typeName: m.typeName, uzumAvail: m.uzumAvail, uzumStockDays: m.uzumStockDays,
@@ -2811,6 +2825,9 @@ async function uyZaxiraCommandText() {
     }
     if (m.orderFromChina.needed) {
       lines.push(`🏭 Xitoydan buyurtma bering: ~${fmtMoney(m.orderFromChina.qtyToOrder)} dona (birgalikdagi zaxira ${m.orderFromChina.combinedStockDays.toFixed(0)} kunga yetadi)`);
+      if (m.orderFromChina.skuBreakdown && m.orderFromChina.skuBreakdown.length) {
+        m.orderFromChina.skuBreakdown.forEach(b => lines.push(`   → ${b.skuTitle} (${b.shopTitle}): ${fmtMoney(b.orderQty)} dona BUYURTMA BERING`));
+      }
     }
     lines.push('');
   });

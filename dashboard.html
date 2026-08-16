@@ -2065,6 +2065,9 @@ ${urgentSection}
           }
           if (m.orderFromChina && m.orderFromChina.needed) {
             extra += `<div class="text-sky-400 text-xs mt-1">🏭 Xitoydan buyurtma: ~${fmtMoney(m.orderFromChina.qtyToOrder)} dona</div>`;
+            if (m.orderFromChina.skuBreakdown && m.orderFromChina.skuBreakdown.length) {
+              extra += `<ul class="text-[10px] text-slate-400 mt-1 pl-2">${m.orderFromChina.skuBreakdown.map(b => `<li>${b.skuTitle} (${b.shopTitle}): <b>${fmtMoney(b.orderQty)} dona buyurtma bering</b></li>`).join('')}</ul>`;
+            }
           }
           const borderCls = m.shipFromHome && m.shipFromHome.urgency === 'shoshilinch' ? 'border-rose-900/60'
             : m.shipFromHome && m.shipFromHome.urgency === 'tez orada' ? 'border-amber-900/60' : 'border-darkBorder';
