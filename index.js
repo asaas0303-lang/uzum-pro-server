@@ -231,12 +231,14 @@ let syncedState = {
   credits: [], // { id, name, totalAmount, remainingAmount, monthlyPayment, nextPaymentDate:'YYYY-MM-DD', interestRate?, endDate?, remainingPayments?, type:'fixed'|'decreasing'|'annuity', note } — eski kreditlarda paymentDay (1-28) bo'lishi mumkin, creditDaysUntilDue() orqaga moslikni saqlaydi
   goals: [], // { id, type:'monthly_turnover', target, createdDate, milestones:[] } — moliyaviy maqsad
   // 19-J: Utilizatsiya arizasi uchun rekvizitlar — bir marta kiritiladi, diskda saqlanadi.
-  companyInfo: { name: '', inn: '', address: '', bank: '', account: '', mfo: '' }
+  companyInfo: { name: '', inn: '', address: '', bank: '', account: '', mfo: '' },
+  // 19-KK: uy zaxirasi "shoshilinch" ogohlantirishi — kuniga bir marta/model dublikat oldini olish uchun.
+  uyZaxiraAlertedToday: { date: null, typeIds: [] }
 };
 
 // Faqat foydalanuvchi sozlamalari diskda saqlanadi (2.1: sotuv/mahsulot ma'lumoti jonli tortiladi, saqlanmaydi)
 // 18-A: moliya ma'lumotlari (withdrawals/userExpenses/credits/goals) ham SHU YERDA — mavjud himoya ostida saqlanadi.
-const SETTINGS_KEYS = ['productTypes', 'skuMappings', 'costs', 'shops', 'activeShop', 'productSettings', 'withdrawals', 'userExpenses', 'credits', 'goals', 'companyInfo'];
+const SETTINGS_KEYS = ['productTypes', 'skuMappings', 'costs', 'shops', 'activeShop', 'productSettings', 'withdrawals', 'userExpenses', 'credits', 'goals', 'companyInfo', 'uyZaxiraAlertedToday'];
 const SETTINGS_BACKUP_FILE = path.join(DATA_DIR, 'settings.backup.json');
 const SETTINGS_BACKUP_RETENTION_DAYS = 7;
 
@@ -2051,6 +2053,8 @@ async function sendStaggeredAdvice(part) {
     try { await sendTelegramPhotoGroup(token, ADMIN_CHAT_ID, collectXitoyPhotos(xitoyShops)); }
     catch (e) { console.error('[XITOY-PHOTO] xato:', e); }
   }
+  try { await checkAndAlertUyZaxiraUrgent(token); }
+  catch (e) { console.error('[UYZAXIRA-ALERT] xato:', e); }
 }
 
 // 19-V: dashboard eski sxemasiga (moliya_holati/maqsad/xitoy_buyurtma satr, bugungi_ishlar satrlar
@@ -2832,6 +2836,43 @@ async function uyZaxiraCommandText() {
     lines.push('');
   });
   return lines.join('\n').trim();
+}
+
+// 19-KK: uy zaxirasi "shoshilinch"ga o'tsa — avtomatik, alohida ogohlantirish (kuniga bir marta/model).
+// sendStaggeredAdvice()ning MAVJUD 6x/kunlik cron chaqiruvlaridan foydalanadi — yangi cron QO'SHILMAYDI.
+async function checkAndAlertUyZaxiraUrgent(token) {
+  try {
+    const today = todayTashkent();
+    if (syncedState.uyZaxiraAlertedToday.date !== today) {
+      syncedState.uyZaxiraAlertedToday = { date: today, typeIds: [] };
+      saveSettings();
+    }
+    const rec = await computeReorderRecommendations();
+    const newUrgent = rec.models.filter(m =>
+      m.shipFromHome && m.shipFromHome.urgency === 'shoshilinch' &&
+      !syncedState.uyZaxiraAlertedToday.typeIds.includes(m.typeId)
+    );
+    if (!newUrgent.length) return;
+
+    for (const m of newUrgent) {
+      const s = m.shipFromHome;
+      const daysText = s.daysUntilMustShip <= 0 ? 'allaqachon' : `${Math.round(s.daysUntilMustShip)} kunda`;
+      const lines = [
+        `🚨 *UY ZAXIRASI: ${m.typeName} — SHOSHILINCH*`,
+        `Uzum ombori ${daysText} tugab qolmoqda!`,
+        `${fmtMoney(s.qtyToSend)} dona uydan yuboring.`
+      ];
+      if (s.skuBreakdown && s.skuBreakdown.length) {
+        s.skuBreakdown.forEach(b => lines.push(`   → ${b.skuTitle} (${b.shopTitle}): ${fmtMoney(b.sentQty)} dona YUBORING`));
+      }
+      lines.push('', "/uyzaxira — to'liq holatni ko'rish");
+      await sendTelegramMessage(token, ADMIN_CHAT_ID, lines.join('\n'));
+      syncedState.uyZaxiraAlertedToday.typeIds.push(m.typeId);
+    }
+    saveSettings();
+  } catch (e) {
+    console.error('[UYZAXIRA-ALERT] xato:', e);
+  }
 }
 
 // { typeId: qty } — faqat skuMappings'da bog'langan SKU'lar (bog'lanmaganlar uy zaxirasida yo'q, e'tiborsiz).
