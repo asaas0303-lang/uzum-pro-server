@@ -2806,7 +2806,7 @@ async function uyZaxiraCommandText() {
         lines.push(`🟢 Hali vaqt bor (${s.daysUntilMustShip.toFixed(0)} kun) — ${fmtMoney(s.qtyToSend)} dona tayyorlab qo'ying`);
       }
       if (s.skuBreakdown && s.skuBreakdown.length) {
-        s.skuBreakdown.forEach(b => lines.push(`   → ${b.skuTitle} (${b.shopTitle}): ${fmtMoney(b.sentQty)} dona (hozir ${b.stockDays.toFixed(0)} kunga yetadi)`));
+        s.skuBreakdown.forEach(b => lines.push(`   → ${b.skuTitle} (${b.shopTitle}): ${fmtMoney(b.sentQty)} dona YUBORING (hozir ${b.stockDays.toFixed(0)} kunga yetadi)`));
       }
     }
     if (m.orderFromChina.needed) {
