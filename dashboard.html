@@ -163,7 +163,8 @@
     function hideLoginScreen() { document.getElementById('pin-login-screen').classList.add('hidden'); }
 
     // Global fetch() patch — bitta joyda, sahifadagi BARCHA /api/* chaqiruvlariga (fetchFromProxy orqali
-    // ham, xom fetch() orqali ham) avtomatik "Authorization: Bearer <token>" qo'shadi. /api/app-login'ning
+    // ham, xom fetch() orqali ham) avtomatik "X-App-Token: <token>" qo'shadi. MUHIM: "Authorization"
+    // headeriga TEGMAYDI — u Uzum API tokeni uchun band (fetchFromProxy o'shani ishlatadi). /api/app-login'ning
     // o'zi bundan mustasno (u hali tokensiz chaqiriladi). 401 kelsa — token tozalanadi, login ekrani ochiladi.
     const _origFetch = window.fetch.bind(window);
     window.fetch = async function (input, init) {
@@ -174,7 +175,7 @@
         const token = getAppToken();
         if (token) {
           const headers = new Headers((init && init.headers) || (input instanceof Request ? input.headers : undefined));
-          headers.set('Authorization', 'Bearer ' + token);
+          headers.set('X-App-Token', token); // ilova-sessiya tokeni — "Authorization" Uzum tokeni uchun band
           init = { ...(init || {}), headers };
         }
       }

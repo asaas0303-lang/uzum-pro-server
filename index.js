@@ -103,16 +103,17 @@ function verifyAppToken(token) {
   return !!data && typeof data.exp === 'number' && Date.now() <= data.exp;
 }
 
-// Himoya middleware: FAQAT /api/* Bearer token talab qiladi. Ikkita istisno:
+// Himoya middleware: FAQAT /api/* ilova-sessiya tokenini "X-App-Token" HEADERIDA talab qiladi.
+// MUHIM: "Authorization" header EMAS — u Uzum API tokeni uchun band (getAuthToken()); agar ilova tokeni
+// Authorization'ga qo'yilsa, u Uzum'ga yuborilib "403 Token not found" beradi. Ikkita istisno:
 //  - POST /api/app-login — login endpointi (talabga ko'ra)
-//  - POST /api/tg-bot/webhook — Telegram serveri chaqiradi, Bearer token yubora olmaydi; himoyalasak bot O'LADI.
-// "/" va "/dashboard" (HTML) himoyalanmaydi — login ekranining o'zi shu orqali yuklanadi (frontend keyingi qadamda).
+//  - POST /api/tg-bot/webhook — Telegram serveri chaqiradi, ilova tokeni yubora olmaydi; himoyalasak bot O'LADI.
+// "/" va "/dashboard" (HTML) himoyalanmaydi — login ekranining o'zi shu orqali yuklanadi.
 const APP_AUTH_OPEN_PATHS = new Set(['/api/app-login', '/api/tg-bot/webhook']);
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/')) return next();     // faqat API himoyalanadi (HTML/statik ochiq)
   if (APP_AUTH_OPEN_PATHS.has(req.path)) return next(); // login + Telegram webhook ochiq
-  const m = String(req.headers['authorization'] || '').match(/^Bearer\s+(.+)$/i);
-  if (!m || !verifyAppToken(m[1])) {
+  if (!verifyAppToken(req.headers['x-app-token'])) {
     return res.status(401).json({ error: "Avtorizatsiya kerak — dashboard'ga qayta login qiling." });
   }
   next();
