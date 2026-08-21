@@ -1,0 +1,38 @@
+name: build-mobile-apk
+
+# Faqat qo'lda ishga tushiriladi (Actions sahifasi -> "Run workflow") — har push'da EMAS,
+# chunki dashboard jonli URL orqali yuklanadi va oddiy funksiya o'zgarishlari APK'ga ta'sir qilmaydi.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile/android
+    steps:
+      - name: Repo'ni olish
+        uses: actions/checkout@v4
+
+      - name: Java (JDK 17) sozlash
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK komponentlarini o'rnatish
+        uses: android-actions/setup-android@v3
+
+      - name: gradlew'ga bajarish ruxsati berish
+        run: chmod +x ./gradlew
+
+      - name: Debug APK yig'ish (assembleDebug)
+        run: ./gradlew assembleDebug
+
+      - name: Tayyor APK'ni Artifacts sifatida yuklash
+        uses: actions/upload-artifact@v4
+        with:
+          name: uzum-pro-debug-apk
+          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

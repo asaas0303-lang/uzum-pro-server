@@ -24,6 +24,15 @@ ta'sir qilmaydi — ular butunlay alohida ishlaydi.
 1. `mobile/` papkasi ichida: `npm install`
 2. `npx cap sync android` — sozlamalarni Android loyihasiga yangilaydi
 3. Android Studio'da `mobile/android` papkasini oching va "Build → Build
-   APK" tugmasini bosing — YOKI GitHub Actions orqali avtomatik
-   (keyingi bosqichda sozlanadi)
+   APK" tugmasini bosing — YOKI GitHub Actions orqali avtomatik (pastga
+   qarang)
 4. Tayyor APK faylni telefonga o'tkazib o'rnatasiz (sideload)
+
+## APK'ni GitHub orqali (kompyuteringizsiz) yig'ish
+
+GitHub saytida repo ichidagi **Actions** bo'limiga kiring, chapdan
+**build-mobile-apk** workflow'ini tanlang va **Run workflow** tugmasini
+bosing. Bir necha daqiqadan so'ng (build tugagach) o'sha workflow
+ishga tushgan sahifada, pastda **Artifacts** bo'limida
+`uzum-pro-debug-apk` nomli fayl paydo bo'ladi — shuni yuklab olib,
+to'g'ridan-to'g'ri telefonga o'rnatasiz.
