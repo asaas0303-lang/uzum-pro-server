@@ -1,0 +1,19 @@
+{
+  "name": "uzum-pro-mobile",
+  "version": "1.0.0",
+  "description": "Uzum Pro Android ilovasi (Capacitor WebView wrapper, jonli Railway sahifasini ochadi)",
+  "private": true,
+  "scripts": {
+    "sync": "npx cap sync android",
+    "open": "npx cap open android"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/core": "^8.5.0"
+  }
+}

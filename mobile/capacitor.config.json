@@ -1,0 +1,12 @@
+{
+  "appId": "uz.uzumpro.app",
+  "appName": "Uzum Pro",
+  "webDir": "www",
+  "server": {
+    "url": "https://uzum-pro-server-production.up.railway.app",
+    "androidScheme": "https",
+    "allowNavigation": [
+      "uzum-pro-server-production.up.railway.app"
+    ]
+  }
+}
