@@ -45,6 +45,25 @@
 </head>
 <body class="safe-top safe-bottom select-none">
 
+  <!-- 2.2-bosqich: PIN login ekrani — token yo'q/eskirgan bo'lsa BUTUN sahifani qoplaydi (modal-container'dan ham yuqori z-index). -->
+  <div id="pin-login-screen" class="hidden fixed inset-0 z-[200] bg-darkBg flex items-center justify-center p-6">
+    <div class="w-full max-w-[340px] p-6 rounded-2xl bg-darkCard border border-darkBorder flex flex-col gap-4 accent-glow">
+      <div class="flex flex-col items-center gap-2 text-center">
+        <div class="w-10 h-10 rounded-full bg-brand badge-glow flex items-center justify-center">
+          <i data-lucide="lock" class="w-5 h-5 text-darkBg"></i>
+        </div>
+        <span class="text-sm font-bold text-slate-200">UZUM PRO SELLER</span>
+        <span class="text-xs text-slate-500">Kirish uchun PIN kodni kiriting</span>
+      </div>
+      <input id="pin-login-input" type="password" inputmode="numeric" autocomplete="off" placeholder="PIN kod"
+        class="p-3 rounded-lg bg-darkBg border border-darkBorder text-center text-lg tracking-widest text-slate-200 font-mono focus:outline-none focus:border-brand">
+      <div id="pin-login-error" class="hidden text-xs text-rose-400 text-center"></div>
+      <button onclick="submitPinLogin()" id="pin-login-btn" class="bg-brand text-darkBg font-bold text-sm py-2.5 rounded-lg badge-glow">
+        Kirish
+      </button>
+    </div>
+  </div>
+
   <!-- Main Container -->
   <div class="max-w-[430px] mx-auto min-h-screen bg-darkBg flex flex-col relative pb-20 border-x border-darkBorder">
     
@@ -131,6 +150,72 @@
   </div>
 
   <script>
+    // ============ 2.2-BOSQICH: PIN login — token boshqaruvi + BARCHA /api/* fetch()ga markazlashtirilgan Authorization ============
+    // YANGI, ALOHIDA localStorage kaliti — mavjud 'uzum_api_token' (Uzum API tokeni) mantig'iga TEGILMAYDI.
+    const APP_TOKEN_KEY = 'uzumProAppToken';
+    function getAppToken() { return localStorage.getItem(APP_TOKEN_KEY); }
+    function showLoginScreen() {
+      document.getElementById('pin-login-screen').classList.remove('hidden');
+      if (window.lucide) lucide.createIcons(); // qulf ikonkasi (dastlabki yuklanishda hali chaqirilmagan bo'lishi mumkin)
+      const input = document.getElementById('pin-login-input');
+      if (input) { input.value = ''; setTimeout(() => input.focus(), 50); }
+    }
+    function hideLoginScreen() { document.getElementById('pin-login-screen').classList.add('hidden'); }
+
+    // Global fetch() patch — bitta joyda, sahifadagi BARCHA /api/* chaqiruvlariga (fetchFromProxy orqali
+    // ham, xom fetch() orqali ham) avtomatik "Authorization: Bearer <token>" qo'shadi. /api/app-login'ning
+    // o'zi bundan mustasno (u hali tokensiz chaqiriladi). 401 kelsa — token tozalanadi, login ekrani ochiladi.
+    const _origFetch = window.fetch.bind(window);
+    window.fetch = async function (input, init) {
+      const urlStr = typeof input === 'string' ? input : (input && input.url) || '';
+      const isApi = urlStr.startsWith('/api/');
+      const isLogin = urlStr.startsWith('/api/app-login');
+      if (isApi && !isLogin) {
+        const token = getAppToken();
+        if (token) {
+          const headers = new Headers((init && init.headers) || (input instanceof Request ? input.headers : undefined));
+          headers.set('Authorization', 'Bearer ' + token);
+          init = { ...(init || {}), headers };
+        }
+      }
+      const response = await _origFetch(input, init);
+      if (isApi && !isLogin && response.status === 401) {
+        localStorage.removeItem(APP_TOKEN_KEY);
+        showLoginScreen();
+      }
+      return response;
+    };
+
+    async function submitPinLogin() {
+      const input = document.getElementById('pin-login-input');
+      const errBox = document.getElementById('pin-login-error');
+      const btn = document.getElementById('pin-login-btn');
+      const pin = (input.value || '').trim();
+      errBox.classList.add('hidden');
+      if (!pin) return;
+      btn.disabled = true; btn.textContent = 'Tekshirilmoqda...';
+      try {
+        const res = await fetch('/api/app-login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.token) {
+          errBox.textContent = (data && data.error) || "PIN noto'g'ri.";
+          errBox.classList.remove('hidden');
+          return;
+        }
+        localStorage.setItem(APP_TOKEN_KEY, data.token);
+        hideLoginScreen();
+        await loadServerSettings();
+        refreshData();
+      } catch (e) {
+        errBox.textContent = "Serverga ulanib bo'lmadi.";
+        errBox.classList.remove('hidden');
+      } finally {
+        btn.disabled = false; btn.textContent = 'Kirish';
+      }
+    }
+
     // State management using elegant LocalStorage bindings
     const defaultShops = [
       { shopId: 61122, shopTitle: "kamera" },
@@ -3032,6 +3117,10 @@ ${urgentSection}
 
     // On Load Boostrapper
     window.addEventListener('DOMContentLoaded', async () => {
+      // 2.2-bosqich: token yo'q bo'lsa — dashboard'ning qolgan qismi umuman yuklanmaydi, faqat PIN ekrani.
+      const pinInput = document.getElementById('pin-login-input');
+      if (pinInput) pinInput.addEventListener('keydown', e => { if (e.key === 'Enter') submitPinLogin(); });
+      if (!getAppToken()) { showLoginScreen(); return; }
       // B: avval serverdagi sozlamalarni o'qib birlashtiramiz (bo'sh localStorage saqlangan ma'lumotni o'chirmasin)
       await loadServerSettings();
       refreshData();

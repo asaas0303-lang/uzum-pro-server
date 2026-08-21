@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import cron from 'node-cron';
@@ -63,6 +64,71 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
+
+// ============ 2-BOSQICH: PIN-asosli login (STATELESS, imzoli token) ============
+// Dashboard va barcha /api/* endpointlar himoyasi — oddiy veb-login (Telegram bilan bog'liq EMAS).
+// MUHIM: getAuthToken() (Uzum API tokeni) bilan ARALASHTIRMANG — bu butunlay boshqa narsa.
+const APP_TOKEN_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180 kun
+
+function b64url(buf) {
+  return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+// Doimiy vaqtli string solishtirish (timing attack oldini olish) — ikkalasi ham sha256'ga aylantiriladi
+// (turli uzunlikni ham xavfsiz qamraydi, chunki digest doim 32 bayt).
+function safeStrEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+// STATELESS imzoli token: "<payloadB64>.<hmacB64>". Serverda saqlanmaydi — restart/deploy'da amal qiladi.
+function signAppToken() {
+  const secret = process.env.APP_TOKEN_SECRET;
+  if (!secret) return null;
+  const payload = b64url(JSON.stringify({ exp: Date.now() + APP_TOKEN_TTL_MS }));
+  const sig = b64url(crypto.createHmac('sha256', secret).update(payload).digest());
+  return `${payload}.${sig}`;
+}
+function verifyAppToken(token) {
+  const secret = process.env.APP_TOKEN_SECRET;
+  if (!secret || typeof token !== 'string') return false;
+  const parts = token.split('.');
+  if (parts.length !== 2) return false;
+  const [payload, sig] = parts;
+  const expected = b64url(crypto.createHmac('sha256', secret).update(payload).digest());
+  if (sig.length !== expected.length) return false; // uzunlik ochiq (sha256-b64url doim 43 belgi) — xavfsiz
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return false;
+  let data;
+  try { data = JSON.parse(Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')); }
+  catch { return false; }
+  return !!data && typeof data.exp === 'number' && Date.now() <= data.exp;
+}
+
+// Himoya middleware: FAQAT /api/* Bearer token talab qiladi. Ikkita istisno:
+//  - POST /api/app-login — login endpointi (talabga ko'ra)
+//  - POST /api/tg-bot/webhook — Telegram serveri chaqiradi, Bearer token yubora olmaydi; himoyalasak bot O'LADI.
+// "/" va "/dashboard" (HTML) himoyalanmaydi — login ekranining o'zi shu orqali yuklanadi (frontend keyingi qadamda).
+const APP_AUTH_OPEN_PATHS = new Set(['/api/app-login', '/api/tg-bot/webhook']);
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/')) return next();     // faqat API himoyalanadi (HTML/statik ochiq)
+  if (APP_AUTH_OPEN_PATHS.has(req.path)) return next(); // login + Telegram webhook ochiq
+  const m = String(req.headers['authorization'] || '').match(/^Bearer\s+(.+)$/i);
+  if (!m || !verifyAppToken(m[1])) {
+    return res.status(401).json({ error: "Avtorizatsiya kerak — dashboard'ga qayta login qiling." });
+  }
+  next();
+});
+
+// Login: {pin} -> imzoli token (180 kun). Noto'g'ri PIN -> 401. Sozlanmagan bo'lsa -> 500.
+app.post('/api/app-login', (req, res) => {
+  if (!process.env.APP_PIN || !process.env.APP_TOKEN_SECRET) {
+    return res.status(500).json({ error: "Server login sozlanmagan (APP_PIN yoki APP_TOKEN_SECRET yo'q)." });
+  }
+  const pin = req.body && req.body.pin;
+  if (typeof pin !== 'string' || !safeStrEqual(pin, process.env.APP_PIN)) {
+    return res.status(401).json({ error: "PIN noto'g'ri." });
+  }
+  res.json({ token: signAppToken(), expiresInDays: 180 });
+});
 
 // 12A: pul/son yaxlitlash — YAGONA funksiya. toLocaleString('uz-UZ') kasr sonda vergulni O'NLIK
 // ajratkich sifatida ishlatadi (121.111 -> "121,111"), bu ming ajratkichiga o'xshab noto'g'ri o'qiladi.
