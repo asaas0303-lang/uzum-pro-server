@@ -15,11 +15,11 @@ jobs:
       - name: Repo'ni olish
         uses: actions/checkout@v4
 
-      - name: Java (JDK 17) sozlash
+      - name: Java (JDK 21) sozlash
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Android SDK komponentlarini o'rnatish
         uses: android-actions/setup-android@v3
