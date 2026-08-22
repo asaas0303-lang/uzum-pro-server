@@ -750,32 +750,46 @@ function financeQueryToMillis(query) {
 const UZUM_BASE = 'https://api-seller.uzum.uz/api/seller-openapi';
 
 // Server tomonda UZUM_TOKEN bilan so'rov. Rate-limit header'larini loglaydi, 429 ni alohida ushlaydi.
-// T3/2-QISM: Uzum API'ga bir vaqtda yuboriladigan so'rovlar soni cheklovi (429 "burst" himoyasi).
-// T1/T2 parallellashtirishdan keyin bir vaqtda o'nlab so'rov ketishi mumkin — Uzum buni rate-limit
-// deb rad etadi. Bu yerda oddiy semaphore: KO'PI BILAN UZUM_MAX_CONCURRENT ta so'rov "faol",
-// qolganlari navbatda kutadi. Hech qanday so'rov TASHLANMAYDI — faqat kechiktiriladi.
-const UZUM_MAX_CONCURRENT = 3;
-let _uzumActive = 0;
-const _uzumQueue = [];
-function _uzumAcquire() {
-  if (_uzumActive < UZUM_MAX_CONCURRENT) { _uzumActive++; return Promise.resolve(); }
-  return new Promise(resolve => _uzumQueue.push(resolve));
-}
-function _uzumRelease() {
-  const next = _uzumQueue.shift();
-  if (next) next(); // navbatdagi so'rov "faol" o'rinni meros oladi (_uzumActive o'zgarmaydi)
-  else _uzumActive--;
+//
+// T4: HAQIQIY RATE LIMITER (avvalgi concurrency-semaphore o'rniga).
+// Railway logidan TASDIQLANGAN (429 javob header'lari): Uzum token-bucket ishlatadi —
+//   x-ratelimit-replenish-rate: 2   (soniyasiga 2 token)
+//   x-ratelimit-burst-capacity: 2   (chelak sig'imi 2, burst zaxirasi yo'q)
+//   retry-after header YUBORILMAYDI
+// Ya'ni haqiqiy chegara — SONIYASIGA 2 TA SO'ROV. Eski semaphore "bir vaqtda nechta faol" ni
+// cheklardi, TEZLIKNI emas: 3 ta so'rov 200ms da tugasa, soniyasiga ~15 so'rov ketardi.
+// Endi: global navbat, har so'rov oldingisidan kamida UZUM_MIN_INTERVAL_MS keyin yuboriladi.
+const UZUM_MIN_INTERVAL_MS = 550; // 2/sek limitiga zaxira bilan (500ms + tarmoq/soat farqi)
+const UZUM_RETRY_DELAYS_MS = [500, 1000, 2000]; // 429 uchun: 3 marta qayta urinish (boshqa xato uchun EMAS)
+let _uzumChain = Promise.resolve(); // barcha so'rovlar shu zanjirdan ketma-ket o'tadi
+let _uzumLastSentAt = 0;
+const _sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// So'rovni global navbatga qo'yadi: oldingi yuborilishdan kamida UZUM_MIN_INTERVAL_MS o'tguncha kutadi.
+// Retry'lar ham SHU navbatdan o'tadi (aks holda qayta urinishlar o'zi yangi 429 keltirib chiqarardi).
+function _uzumSchedule(fn) {
+  const run = _uzumChain.then(async () => {
+    const wait = UZUM_MIN_INTERVAL_MS - (Date.now() - _uzumLastSentAt);
+    if (wait > 0) await _sleep(wait);
+    _uzumLastSentAt = Date.now();
+    return fn();
+  });
+  // Zanjir uzilmasin: xato bo'lsa ham keyingi so'rovlar davom etsin
+  _uzumChain = run.then(() => {}, () => {});
+  return run;
 }
 
 async function uzumGet(pathAndQuery, token) {
   token = token || process.env.UZUM_TOKEN;
   if (!token) return { ok: false, status: 0, error: "UZUM_TOKEN yo'q" };
-  await _uzumAcquire();
-  try {
-    return await _uzumGetRaw(pathAndQuery, token);
-  } finally {
-    _uzumRelease();
+  let r = await _uzumSchedule(() => _uzumGetRaw(pathAndQuery, token));
+  // FAQAT 429 uchun qayta urinish — boshqa xatolar (403/500/tarmoq) DARHOL qaytariladi.
+  for (let i = 0; i < UZUM_RETRY_DELAYS_MS.length && r.status === 429; i++) {
+    await _sleep(UZUM_RETRY_DELAYS_MS[i]);
+    console.warn(`[RATELIMIT] 429 — qayta urinish ${i + 1}/${UZUM_RETRY_DELAYS_MS.length}: ${pathAndQuery}`);
+    r = await _uzumSchedule(() => _uzumGetRaw(pathAndQuery, token));
   }
+  return r;
 }
 
 async function _uzumGetRaw(pathAndQuery, token) {
@@ -1543,7 +1557,7 @@ app.get('/api/uzum/shops', async (req, res) => {
     return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
   }
   try {
-    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    // T3-FIX: uzumGet() orqali — rate limiter (UZUM_MIN_INTERVAL_MS) qamrab olishi uchun.
     const r = await uzumGet('/v1/shops', getAuthToken(req));
     if (!r.ok) {
       console.warn(`Uzum Shops call ${r.status}:`, r.error);
@@ -1572,7 +1586,7 @@ app.get('/api/uzum/product/shop/:shopId', async (req, res) => {
     // Uzum product endpoint pagination parametrlarini majburiy talab qiladi
     const page = req.query.page || 0;
     const size = req.query.size || 100;
-    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    // T3-FIX: uzumGet() orqali — rate limiter (UZUM_MIN_INTERVAL_MS) qamrab olishi uchun.
     const r = await uzumGet(`/v1/product/shop/${shopId}?page=${page}&size=${size}`, getAuthToken(req));
     if (!r.ok) {
       console.warn(`Uzum Products call ${r.status}:`, r.error);
@@ -1597,7 +1611,7 @@ app.get('/api/uzum/finance/orders', async (req, res) => {
   }
   try {
     const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
-    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    // T3-FIX: uzumGet() orqali — rate limiter (UZUM_MIN_INTERVAL_MS) qamrab olishi uchun.
     const r = await uzumGet(`/v1/finance/orders?${query}`, getAuthToken(req));
     if (!r.ok) {
       console.warn(`Uzum Finance Orders call ${r.status}:`, r.error);
@@ -1623,7 +1637,7 @@ app.get('/api/uzum/finance/expenses', async (req, res) => {
   }
   try {
     const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
-    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    // T3-FIX: uzumGet() orqali — rate limiter (UZUM_MIN_INTERVAL_MS) qamrab olishi uchun.
     const r = await uzumGet(`/v1/finance/expenses?${query}`, getAuthToken(req));
     if (!r.ok) {
       console.warn(`Uzum Finance Expenses call ${r.status}:`, r.error);
@@ -1649,7 +1663,7 @@ app.get('/api/uzum/shop/:shopId/return', async (req, res) => {
     return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
   }
   try {
-    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    // T3-FIX: uzumGet() orqali — rate limiter (UZUM_MIN_INTERVAL_MS) qamrab olishi uchun.
     const r = await uzumGet(`/v1/shop/${shopId}/return`, getAuthToken(req));
     if (!r.ok) {
       console.warn(`Uzum Returns call ${r.status}:`, r.error);
@@ -1672,7 +1686,7 @@ app.get('/api/uzum/fbs/orders', async (req, res) => {
     return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
   }
   try {
-    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    // T3-FIX: uzumGet() orqali — rate limiter (UZUM_MIN_INTERVAL_MS) qamrab olishi uchun.
     const r = await uzumGet(`/v2/fbs/orders`, getAuthToken(req));
     if (!r.ok) {
       console.warn(`Uzum FBS Orders call ${r.status}:`, r.error);
