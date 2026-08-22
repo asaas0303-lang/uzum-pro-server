@@ -750,9 +750,35 @@ function financeQueryToMillis(query) {
 const UZUM_BASE = 'https://api-seller.uzum.uz/api/seller-openapi';
 
 // Server tomonda UZUM_TOKEN bilan so'rov. Rate-limit header'larini loglaydi, 429 ni alohida ushlaydi.
+// T3/2-QISM: Uzum API'ga bir vaqtda yuboriladigan so'rovlar soni cheklovi (429 "burst" himoyasi).
+// T1/T2 parallellashtirishdan keyin bir vaqtda o'nlab so'rov ketishi mumkin — Uzum buni rate-limit
+// deb rad etadi. Bu yerda oddiy semaphore: KO'PI BILAN UZUM_MAX_CONCURRENT ta so'rov "faol",
+// qolganlari navbatda kutadi. Hech qanday so'rov TASHLANMAYDI — faqat kechiktiriladi.
+const UZUM_MAX_CONCURRENT = 3;
+let _uzumActive = 0;
+const _uzumQueue = [];
+function _uzumAcquire() {
+  if (_uzumActive < UZUM_MAX_CONCURRENT) { _uzumActive++; return Promise.resolve(); }
+  return new Promise(resolve => _uzumQueue.push(resolve));
+}
+function _uzumRelease() {
+  const next = _uzumQueue.shift();
+  if (next) next(); // navbatdagi so'rov "faol" o'rinni meros oladi (_uzumActive o'zgarmaydi)
+  else _uzumActive--;
+}
+
 async function uzumGet(pathAndQuery, token) {
   token = token || process.env.UZUM_TOKEN;
   if (!token) return { ok: false, status: 0, error: "UZUM_TOKEN yo'q" };
+  await _uzumAcquire();
+  try {
+    return await _uzumGetRaw(pathAndQuery, token);
+  } finally {
+    _uzumRelease();
+  }
+}
+
+async function _uzumGetRaw(pathAndQuery, token) {
   let response;
   try {
     response = await fetch(`${UZUM_BASE}${pathAndQuery}`, { headers: { 'Authorization': token } });
@@ -783,21 +809,32 @@ async function uzumGet(pathAndQuery, token) {
 const productCache = new Map(); // shopId -> { at, value }
 const PRODUCT_CACHE_MS = 5 * 60 * 1000;
 
+// T3/1-QISM: in-flight promise sharing — kesh FAQAT so'rov tugagach yoziladi, shuning uchun bir xil
+// shopId uchun bir vaqtda kelgan chaqiruvlar hammasi "sovuq kesh" ko'rib, alohida so'rov yuborardi.
+// Endi birinchi chaqiruv promise'ni DARHOL saqlaydi, qolganlari SHU promise'ni kutadi (takroriy
+// so'rov yuborilmaydi). Kesh mantig'i/TTL o'zgarmadi.
+const _productInFlight = new Map(); // shopId -> Promise
 async function fetchLiveShopProducts(shopId, token) {
   const key = String(shopId);
   const cached = productCache.get(key);
   if (cached && Date.now() - cached.at < PRODUCT_CACHE_MS) return cached.value;
-  const r = await uzumGet(`/v1/product/shop/${shopId}?page=0&size=100`, token);
-  if (!r.ok && DEMO_MODE) {
-    // Lokal test: token yo'q/xato bo'lsa mock (allaqachon normalizatsiyalangan shakl) bilan oqimni sinash
-    const mock = String(shopId) === '72540' ? MOCK_PRODUCTS_72540 : MOCK_PRODUCTS_61122;
-    return { ok: true, products: mock, source: 'mock' };
-  }
-  const value = r.ok
-    ? { ok: true, products: normalizeUzumProducts(r.data).payload }
-    : { ok: false, status: r.status, error: r.error };
-  if (r.ok) productCache.set(key, { at: Date.now(), value });
-  return value;
+  const inFlight = _productInFlight.get(key);
+  if (inFlight) return inFlight;
+  const p = (async () => {
+    const r = await uzumGet(`/v1/product/shop/${shopId}?page=0&size=100`, token);
+    if (!r.ok && DEMO_MODE) {
+      // Lokal test: token yo'q/xato bo'lsa mock (allaqachon normalizatsiyalangan shakl) bilan oqimni sinash
+      const mock = String(shopId) === '72540' ? MOCK_PRODUCTS_72540 : MOCK_PRODUCTS_61122;
+      return { ok: true, products: mock, source: 'mock' };
+    }
+    const value = r.ok
+      ? { ok: true, products: normalizeUzumProducts(r.data).payload }
+      : { ok: false, status: r.status, error: r.error };
+    if (r.ok) productCache.set(key, { at: Date.now(), value });
+    return value;
+  })().finally(() => _productInFlight.delete(key));
+  _productInFlight.set(key, p);
+  return p;
 }
 
 // ============ KUNLIK SNAPSHOT (sotuv tezligini kuzatish) ============
@@ -1060,26 +1097,37 @@ async function getTodaySoFarDelta(shopId) {
 //  - orderId:null yozuvlar (ombor operatsiyalari) chetlab o'tiladi.
 const FIN_ORDERS_TTL_MS = 5 * 60 * 1000; // rate-limit himoyasi: har do'kon 5 daqiqada bir marta so'raladi
 const _finOrdersCache = {}; // shopId -> { at, orders }
+// T3/1-QISM: in-flight promise sharing — metrics/forecast/period-report uchalasi ham SHU funksiyani
+// bir xil shopId bilan chaqiradi. Kesh faqat 6 sahifa tugagach yozilgani uchun, parallel chaqirilganda
+// uchalasi "sovuq kesh" ko'rib, har biri 6 sahifani ALOHIDA tortardi (18 so'rov). Endi birinchisi
+// promise'ni darhol saqlaydi, qolganlari shuni kutadi (6 so'rov). Kesh mantig'i/TTL o'zgarmadi.
+const _finOrdersInFlight = new Map(); // shopId -> Promise
 async function fetchFinanceOrders(shopId) {
   const key = String(shopId);
   const now = Date.now();
   const cached = _finOrdersCache[key];
   if (cached && (now - cached.at) < FIN_ORDERS_TTL_MS) return { ok: true, orders: cached.orders, cached: true };
-  const all = [];
-  const size = 200;
-  for (let page = 0; page < 6; page++) { // 6×200=1200 buyurtma — 30+ kunni qoplaydi
-    const r = await uzumGet(`/v1/finance/orders?shopIds=${key}&page=${page}&size=${size}`, process.env.UZUM_TOKEN);
-    if (!r.ok) {
-      if (all.length) break; // qisman ma'lumot bor — shuni ishlatamiz (rate-limit yoki oxirgi sahifa xatosi)
-      return { ok: false, status: r.status, error: r.error || `Uzum ${r.status}` };
+  const inFlight = _finOrdersInFlight.get(key);
+  if (inFlight) return inFlight;
+  const p = (async () => {
+    const all = [];
+    const size = 200;
+    for (let page = 0; page < 6; page++) { // 6×200=1200 buyurtma — 30+ kunni qoplaydi
+      const r = await uzumGet(`/v1/finance/orders?shopIds=${key}&page=${page}&size=${size}`, process.env.UZUM_TOKEN);
+      if (!r.ok) {
+        if (all.length) break; // qisman ma'lumot bor — shuni ishlatamiz (rate-limit yoki oxirgi sahifa xatosi)
+        return { ok: false, status: r.status, error: r.error || `Uzum ${r.status}` };
+      }
+      const d = r.data || {};
+      const orders = d.payload?.orders || d.orderItems || (Array.isArray(d.payload) ? d.payload : []);
+      all.push(...orders);
+      if (orders.length < size) break; // oxirgi sahifa
     }
-    const d = r.data || {};
-    const orders = d.payload?.orders || d.orderItems || (Array.isArray(d.payload) ? d.payload : []);
-    all.push(...orders);
-    if (orders.length < size) break; // oxirgi sahifa
-  }
-  _finOrdersCache[key] = { at: now, orders: all };
-  return { ok: true, orders: all, cached: false };
+    _finOrdersCache[key] = { at: Date.now(), orders: all };
+    return { ok: true, orders: all, cached: false };
+  })().finally(() => _finOrdersInFlight.delete(key));
+  _finOrdersInFlight.set(key, p);
+  return p;
 }
 
 // Ixtiyoriy ms → Tashkent (UTC+5) kuni "YYYY-MM-DD"
@@ -2702,20 +2750,27 @@ const INVOICE_TTL_MS = 5 * 60 * 1000;
 const TARGET_UZUM_STOCK_DAYS = 30; // uydan yuborganda shu darajaga to'ldiriladi
 const CHINA_LEAD_TIME_DAYS = 30; // foydalanuvchi bahosi — Xitoydan buyurtma uchun aniq tarixiy ma'lumot yo'q
 let _invoiceCache = null; // { at, invoices }
+// T3/1-QISM: in-flight promise sharing — /api/invoices va /api/compensation-candidates ikkalasi ham
+// shu funksiyani chaqiradi va endi parallel ishlaydi. Kesh naqshi fetchFinanceOrders bilan bir xil.
+let _invoiceInFlight = null;
 async function fetchAllInvoices() {
   const now = Date.now();
   if (_invoiceCache && (now - _invoiceCache.at) < INVOICE_TTL_MS) return { ok: true, invoices: _invoiceCache.invoices, cached: true };
-  const all = [];
-  for (let page = 0; page < 40; page++) { // xavfsizlik chegarasi: 40*50=2000 yuk xati
-    const r = await uzumGet(`/v1/invoice?page=${page}&size=50`, process.env.UZUM_TOKEN);
-    if (!r.ok) { if (all.length) break; return { ok: false, status: r.status, error: r.error || `Uzum ${r.status}` }; }
-    const d = r.data;
-    const list = Array.isArray(d) ? d : (d && d.payload && Array.isArray(d.payload) ? d.payload : []);
-    all.push(...list);
-    if (list.length < 50) break; // oxirgi sahifa
-  }
-  _invoiceCache = { at: now, invoices: all };
-  return { ok: true, invoices: all, cached: false };
+  if (_invoiceInFlight) return _invoiceInFlight;
+  _invoiceInFlight = (async () => {
+    const all = [];
+    for (let page = 0; page < 40; page++) { // xavfsizlik chegarasi: 40*50=2000 yuk xati
+      const r = await uzumGet(`/v1/invoice?page=${page}&size=50`, process.env.UZUM_TOKEN);
+      if (!r.ok) { if (all.length) break; return { ok: false, status: r.status, error: r.error || `Uzum ${r.status}` }; }
+      const d = r.data;
+      const list = Array.isArray(d) ? d : (d && d.payload && Array.isArray(d.payload) ? d.payload : []);
+      all.push(...list);
+      if (list.length < 50) break; // oxirgi sahifa
+    }
+    _invoiceCache = { at: Date.now(), invoices: all };
+    return { ok: true, invoices: all, cached: false };
+  })().finally(() => { _invoiceInFlight = null; });
+  return _invoiceInFlight;
 }
 
 // Bitta yuk xatining SKU'larini uy zaxirasi turlariga (productTypes) bog'lab, tur bo'yicha jami dona qaytaradi.
