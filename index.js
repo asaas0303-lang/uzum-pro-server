@@ -793,7 +793,11 @@ async function _uzumGetRaw(pathAndQuery, token) {
     if (lim > 0 && rem / lim < 0.1) console.warn(`[RATELIMIT] Kunlik limit 10% dan kam: ${rem}/${lim}`);
   }
   if (response.status === 429) {
-    console.error('[RATELIMIT] 429 — Uzum limiti tugadi:', pathAndQuery);
+    // T3-FIX diagnostika: 429 kelganda BARCHA rate-limit header'larini loglaymiz — limit kunlikmi
+    // yoki soniya/daqiqalikmi ekanini aniqlash uchun (avval faqat per-day o'qilardi).
+    const rlHeaders = {};
+    response.headers.forEach((v, k) => { if (/ratelimit|retry-after/i.test(k)) rlHeaders[k] = v; });
+    console.error('[RATELIMIT] 429 — Uzum limiti tugadi:', pathAndQuery, 'headers:', JSON.stringify(rlHeaders));
     return { ok: false, status: 429, error: "Rate limit (429) — keyinroq urinib ko'ring" };
   }
   const text = await response.text();
@@ -1539,14 +1543,14 @@ app.get('/api/uzum/shops', async (req, res) => {
     return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
   }
   try {
-    const response = await fetch('https://api-seller.uzum.uz/api/seller-openapi/v1/shops', { headers });
-    if (!response.ok) {
-      const text = await response.text();
-      console.warn(`Uzum Shops call ${response.status}:`, text);
+    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    const r = await uzumGet('/v1/shops', getAuthToken(req));
+    if (!r.ok) {
+      console.warn(`Uzum Shops call ${r.status}:`, r.error);
       if (DEMO_MODE) return res.json({ payload: MOCK_SHOPS, source: 'mock' });
-      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
+      return sendUzumError(res, `Uzum ${r.status}: ${r.error}`);
     }
-    const data = await response.json();
+    const data = r.data;
     // Real javob bare massiv: [{id, name}]. Frontend { payload: [...] } kutadi.
     const list = Array.isArray(data) ? data : (data.payload || []);
     return res.json({ payload: list, source: 'live' });
@@ -1568,14 +1572,14 @@ app.get('/api/uzum/product/shop/:shopId', async (req, res) => {
     // Uzum product endpoint pagination parametrlarini majburiy talab qiladi
     const page = req.query.page || 0;
     const size = req.query.size || 100;
-    const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/product/shop/${shopId}?page=${page}&size=${size}`, { headers });
-    if (!response.ok) {
-      const text = await response.text();
-      console.warn(`Uzum Products call ${response.status}:`, text);
+    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    const r = await uzumGet(`/v1/product/shop/${shopId}?page=${page}&size=${size}`, getAuthToken(req));
+    if (!r.ok) {
+      console.warn(`Uzum Products call ${r.status}:`, r.error);
       if (DEMO_MODE) return res.json({ payload: shopId === '72540' ? MOCK_PRODUCTS_72540 : MOCK_PRODUCTS_61122, source: 'mock' });
-      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
+      return sendUzumError(res, `Uzum ${r.status}: ${r.error}`);
     }
-    const data = await response.json();
+    const data = r.data;
     // Real javobni frontend kutgan { payload: [...] } shakliga normallashtiramiz
     return res.json({ ...normalizeUzumProducts(data), source: 'live' });
   } catch (err) {
@@ -1593,14 +1597,14 @@ app.get('/api/uzum/finance/orders', async (req, res) => {
   }
   try {
     const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
-    const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/finance/orders?${query}`, { headers });
-    if (!response.ok) {
-      const text = await response.text();
-      console.warn(`Uzum Finance Orders call ${response.status}:`, text);
+    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    const r = await uzumGet(`/v1/finance/orders?${query}`, getAuthToken(req));
+    if (!r.ok) {
+      console.warn(`Uzum Finance Orders call ${r.status}:`, r.error);
       if (DEMO_MODE) return res.json({ payload: { orders: MOCK_ORDERS }, source: 'mock' });
-      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
+      return sendUzumError(res, `Uzum ${r.status}: ${r.error}`);
     }
-    const data = await response.json();
+    const data = r.data;
     // Real javob: { orderItems: [...] }. Frontend { payload: { orders: [...] } } kutadi.
     const orders = data.orderItems || data.payload?.orders || (Array.isArray(data.payload) ? data.payload : []);
     return res.json({ payload: { orders: Array.isArray(orders) ? orders : [] }, source: 'live' });
@@ -1619,14 +1623,14 @@ app.get('/api/uzum/finance/expenses', async (req, res) => {
   }
   try {
     const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
-    const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/finance/expenses?${query}`, { headers });
-    if (!response.ok) {
-      const text = await response.text();
-      console.warn(`Uzum Finance Expenses call ${response.status}:`, text);
+    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    const r = await uzumGet(`/v1/finance/expenses?${query}`, getAuthToken(req));
+    if (!r.ok) {
+      console.warn(`Uzum Finance Expenses call ${r.status}:`, r.error);
       if (DEMO_MODE) return res.json({ payload: MOCK_EXPENSES, source: 'mock' });
-      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
+      return sendUzumError(res, `Uzum ${r.status}: ${r.error}`);
     }
-    const data = await response.json();
+    const data = r.data;
     // Real javob: { payload: { payments: [...], totalElements: N } }. Frontend eData.payload ni massiv sifatida kutadi.
     const expenses = data.payload?.payments || data.payments || data.payload || data.expenses || data.expenseItems || [];
     return res.json({ payload: Array.isArray(expenses) ? expenses : [], source: 'live' });
@@ -1645,14 +1649,14 @@ app.get('/api/uzum/shop/:shopId/return', async (req, res) => {
     return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
   }
   try {
-    const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v1/shop/${shopId}/return`, { headers });
-    if (!response.ok) {
-      const text = await response.text();
-      console.warn(`Uzum Returns call ${response.status}:`, text);
+    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    const r = await uzumGet(`/v1/shop/${shopId}/return`, getAuthToken(req));
+    if (!r.ok) {
+      console.warn(`Uzum Returns call ${r.status}:`, r.error);
       if (DEMO_MODE) return res.json({ payload: MOCK_RETURNS, source: 'mock' });
-      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
+      return sendUzumError(res, `Uzum ${r.status}: ${r.error}`);
     }
-    const data = await response.json();
+    const data = r.data;
     return res.json({ ...normalizeUzumReturns(data), source: 'live' });
   } catch (err) {
     console.warn("Real Uzum Returns call failed:", err);
@@ -1668,14 +1672,14 @@ app.get('/api/uzum/fbs/orders', async (req, res) => {
     return sendUzumError(res, "UZUM_TOKEN sozlanmagan");
   }
   try {
-    const response = await fetch(`https://api-seller.uzum.uz/api/seller-openapi/v2/fbs/orders`, { headers });
-    if (!response.ok) {
-      const text = await response.text();
-      console.warn(`Uzum FBS Orders call ${response.status}:`, text);
+    // T3-FIX: uzumGet() orqali — semaphore (UZUM_MAX_CONCURRENT) qamrab olishi uchun.
+    const r = await uzumGet(`/v2/fbs/orders`, getAuthToken(req));
+    if (!r.ok) {
+      console.warn(`Uzum FBS Orders call ${r.status}:`, r.error);
       if (DEMO_MODE) return res.json({ payload: [], source: 'mock' });
-      return sendUzumError(res, `Uzum ${response.status}: ${text}`);
+      return sendUzumError(res, `Uzum ${r.status}: ${r.error}`);
     }
-    const data = await response.json();
+    const data = r.data;
     return res.json({ ...data, source: 'live' });
   } catch (err) {
     console.warn("Real Uzum FBS Orders call failed:", err);

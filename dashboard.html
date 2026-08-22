@@ -609,13 +609,13 @@ ${urgentSection}
     }
 
     // Server API Fetcher
-    async function fetchFromProxy(endpoint) {
+    async function fetchFromProxy(endpoint, signal) {
       const headers = {};
       const token = localStorage.getItem('uzum_api_token');
       if (token) {
         headers['Authorization'] = token;
       }
-      const response = await fetch(endpoint, { headers });
+      const response = await fetch(endpoint, { headers, signal });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
         // Backend 502 UZUM_API_ERROR bilan aniq sabab qaytaradi — shuni ko'rsatamiz
@@ -624,6 +624,9 @@ ${urgentSection}
       }
       return data;
     }
+    // T3-FIX: bekor qilingan (abort) so'rov — bu XATO EMAS (do'kon almashtirilgani uchun ataylab
+    // to'xtatilgan). UI'da "xatolik" deb ko'rsatilmasligi kerak.
+    function isAbortError(e) { return e && (e.name === 'AbortError' || /abort/i.test(e.message || '')); }
 
     function setBadge(state_, cls) {
       const badge = document.getElementById('api-status-badge');
@@ -631,7 +634,17 @@ ${urgentSection}
       badge.className = `text-[10px] px-2 py-0.5 rounded-full font-mono ${cls}`;
     }
 
+    // T3-FIX: bir vaqtda faqat BITTA refreshData ishlashi kerak. Do'kon almashtirilganda (yoki qayta
+    // yangilanganda) eski do'kon uchun HALI TUGALLANMAGAN so'rovlar bekor qilinadi — aks holda ular
+    // yangi do'kon so'rovlari bilan ustma-ust tushib, Uzum'ga bir vaqtda juda ko'p so'rov ketardi (429).
+    let _refreshController = null;
+
     async function refreshData() {
+      if (_refreshController) _refreshController.abort(); // eski (tugallanmagan) yuklashni to'xtatamiz
+      const controller = new AbortController();
+      _refreshController = controller;
+      const signal = controller.signal;
+
       document.getElementById('api-status-badge').classList.add('animate-pulse');
       state.dataErrors = { products: null, orders: null, expenses: null };
 
@@ -648,7 +661,7 @@ ${urgentSection}
       // himoyalangan: bittasi qulasa, qolganlari baribir yuklanadi (Promise.all rad etilmaydi).
       await Promise.all([
         // Mahsulotlar — badge asosan shu chaqiruvga qarab belgilanadi
-        fetchFromProxy(`/api/uzum/product/shop/${state.activeShop}`).then(pData => {
+        fetchFromProxy(`/api/uzum/product/shop/${state.activeShop}`, signal).then(pData => {
           state.cachedUzumProducts = pData.payload || [];
           // Do'kon ishlaydi — agar avval "mavjud emas" deb belgilangan bo'lsa, olib tashlaymiz
           state.unavailableShops = state.unavailableShops.filter(id => id !== state.activeShop);
@@ -658,6 +671,7 @@ ${urgentSection}
             setBadge('Demo Mode', 'bg-slate-800 border border-slate-700 text-slate-300');
           }
         }).catch(e => {
+          if (isAbortError(e)) return; // do'kon almashtirildi — bu xato emas
           console.error("Mahsulotlarni yuklashda xato:", e);
           state.cachedUzumProducts = null;
           state.dataErrors.products = e.message;
@@ -668,54 +682,63 @@ ${urgentSection}
           setBadge("⚠️ Ma'lumot yo'q", 'bg-rose-950/80 border border-rose-500/50 text-rose-300');
         }),
 
-        fetchFromProxy(`/api/uzum/finance/orders?${financeQuery}`).then(oData => {
+        fetchFromProxy(`/api/uzum/finance/orders?${financeQuery}`, signal).then(oData => {
           state.orders = oData.payload?.orders || [];
         }).catch(e => {
+          if (isAbortError(e)) return;
           console.error("Buyurtmalarni yuklashda xato:", e);
           state.orders = [];
           state.dataErrors.orders = e.message;
         }),
 
-        fetchFromProxy(`/api/uzum/finance/expenses?${financeQuery}`).then(eData => {
+        fetchFromProxy(`/api/uzum/finance/expenses?${financeQuery}`, signal).then(eData => {
           state.expenses = eData.payload || [];
         }).catch(e => {
+          if (isAbortError(e)) return;
           console.error("Xarajatlarni yuklashda xato:", e);
           state.expenses = [];
           state.dataErrors.expenses = e.message;
         }),
 
         // 5.1/5.2/5.4: zaxira kunlari, ABC, Xitoy buyurtma nuqtasi — snapshot tarixidan (server hisoblaydi)
-        fetchFromProxy(`/api/metrics/${state.activeShop}`).then(d => {
+        fetchFromProxy(`/api/metrics/${state.activeShop}`, signal).then(d => {
           state.skuMetrics = d;
         }).catch(e => {
+          if (isAbortError(e)) return;
           console.error("Metrikalarni yuklashda xato:", e);
           state.skuMetrics = null;
         }),
 
         // B1/14C: Moliya bo'limi — snapshot delta'ga asoslangan xulosa, tanlangan davr bo'yicha
         // (finance/orders doim bo'sh bo'lgani uchun). Moliya va D4 shu bitta davr state'ini ulashadi.
-        fetchFromProxy(`/api/period-report/${state.activeShop}?period=${state.financePeriod}`).then(d => {
+        fetchFromProxy(`/api/period-report/${state.activeShop}?period=${state.financePeriod}`, signal).then(d => {
           state.financeSummary = d;
         }).catch(e => {
+          if (isAbortError(e)) return;
           console.error("Moliya xulosasini yuklashda xato:", e);
           state.financeSummary = null;
         }),
 
         // E: keyingi 30 kunlik bashorat, ishonch darajasi bilan
-        fetchFromProxy(`/api/forecast/${state.activeShop}`).then(d => {
+        fetchFromProxy(`/api/forecast/${state.activeShop}`, signal).then(d => {
           state.forecast = d;
         }).catch(e => {
+          if (isAbortError(e)) return;
           console.error("Bashoratni yuklashda xato:", e);
           state.forecast = null;
         }),
 
         // 18-B: naqd oqim (yechilgan/xarajat/kredit + proyeksiya) — o'zi ichida try/catch bilan himoyalangan
-        loadCashFlow(),
+        loadCashFlow(signal),
         // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar)
-        loadCompensation(),
+        loadCompensation(signal),
         // 19-D: ta'minlashlar (yuk xatlari ro'yxati)
-        loadInvoices()
+        loadInvoices(signal)
       ]);
+
+      // Bu yuklash bekor qilingan bo'lsa (yangi do'kon tanlandi) — UI'ni ESKI ma'lumot bilan
+      // yangilamaymiz, yangi yuklash o'zi render qiladi.
+      if (signal.aborted) return;
 
       // 15: bu yerda avtomatik serverga yozish yo'q (avval syncStateToServer() chaqirilardi —
       // backend baribir products/orders/expenses'ni hech qayerda ishlatmasdi, faqat xotirada
@@ -2366,20 +2389,20 @@ ${urgentSection}
     }
 
     // 18-B: cash-flow serverdan
-    async function loadCashFlow() {
-      try { state.cashFlow = await fetchFromProxy('/api/cash-flow'); }
-      catch (e) { console.error("Naqd oqim yuklashda xato:", e); state.cashFlow = null; }
+    async function loadCashFlow(signal) {
+      try { state.cashFlow = await fetchFromProxy('/api/cash-flow', signal); }
+      catch (e) { if (isAbortError(e)) return; console.error("Naqd oqim yuklashda xato:", e); state.cashFlow = null; }
     }
 
     // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar)
-    async function loadCompensation() {
-      try { state.compensation = await fetchFromProxy('/api/compensation-candidates'); }
-      catch (e) { console.error("Kompensatsiya yuklashda xato:", e); state.compensation = null; }
+    async function loadCompensation(signal) {
+      try { state.compensation = await fetchFromProxy('/api/compensation-candidates', signal); }
+      catch (e) { if (isAbortError(e)) return; console.error("Kompensatsiya yuklashda xato:", e); state.compensation = null; }
     }
     // 19-D: ta'minlashlar (yuk xatlari)
-    async function loadInvoices() {
-      try { state.invoices = await fetchFromProxy('/api/invoices'); }
-      catch (e) { console.error("Ta'minlashlar yuklashda xato:", e); state.invoices = null; }
+    async function loadInvoices(signal) {
+      try { state.invoices = await fetchFromProxy('/api/invoices', signal); }
+      catch (e) { if (isAbortError(e)) return; console.error("Ta'minlashlar yuklashda xato:", e); state.invoices = null; }
     }
 
     // UI Panel: FINANCE & ACCOUNTING
