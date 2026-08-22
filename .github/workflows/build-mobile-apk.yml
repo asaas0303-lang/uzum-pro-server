@@ -27,7 +27,7 @@ jobs:
       - name: Node.js sozlash
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 'lts/*'
 
       - name: mobile/ bog'liqliklarini o'rnatish (npm ci)
         working-directory: mobile
