@@ -2979,9 +2979,12 @@ const RESORT_WINDOW_DAYS = 60; // sozlanadigan: [X→0] keyin [Y→Y] shu kun ic
 // Barcha do'kon jonli mahsulotlaridan skuId → { sell, commPct, title, shopTitle } xaritasi (sotuv−komissiya uchun)
 async function buildSkuSellMap() {
   const map = {};
-  for (const shop of (syncedState.shops || [])) {
-    const prod = await fetchLiveShopProducts(shop.shopId);
-    if (!prod.ok) continue;
+  const shops = syncedState.shops || [];
+  // T1: do'konlar bir-biridan mustaqil (har biri faqat umumiy map'ga yozadi, o'qimaydi) — parallel.
+  const results = await Promise.all(shops.map(shop => fetchLiveShopProducts(shop.shopId)));
+  shops.forEach((shop, i) => {
+    const prod = results[i];
+    if (!prod.ok) return;
     prod.products.forEach(p => (p.skuList || []).forEach(sku => {
       map[String(sku.skuId)] = {
         sell: sku.purchasePrice || 0,
@@ -2989,7 +2992,7 @@ async function buildSkuSellMap() {
         title: sku.skuTitle, shopTitle: shop.shopTitle
       };
     }));
-  }
+  });
   return map;
 }
 
@@ -4449,8 +4452,9 @@ async function computeCashFlow() {
   const upcomingCredits = credits.filter(c => creditDaysUntilDue(c) <= 30).reduce((a, c) => a + (c.monthlyPayment || 0), 0);
   // Kutilayotgan Uzum foydasi (bashoratdan, barcha do'kon) — sof foyda (kassaga tushadigan yangi pul)
   let expectedIncome = 0, forecastReady = false;
-  for (const shop of (syncedState.shops || [])) {
-    const f = await computeForecast(shop.shopId);
+  // T1: do'konlar bir-biridan mustaqil (faqat qo'shiladi) — parallel, ketma-ket EMAS.
+  const forecasts = await Promise.all((syncedState.shops || []).map(shop => computeForecast(shop.shopId)));
+  for (const f of forecasts) {
     if (f.ok && f.ready) { expectedIncome += f.forecastProfit; forecastReady = true; }
   }
   let projection = null;
