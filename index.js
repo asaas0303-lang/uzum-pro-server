@@ -761,34 +761,50 @@ const UZUM_BASE = 'https://api-seller.uzum.uz/api/seller-openapi';
 // Endi: global navbat, har so'rov oldingisidan kamida UZUM_MIN_INTERVAL_MS keyin yuboriladi.
 const UZUM_MIN_INTERVAL_MS = 550; // 2/sek limitiga zaxira bilan (500ms + tarmoq/soat farqi)
 const UZUM_RETRY_DELAYS_MS = [500, 1000, 2000]; // 429 uchun: 3 marta qayta urinish (boshqa xato uchun EMAS)
-let _uzumChain = Promise.resolve(); // barcha so'rovlar shu zanjirdan ketma-ket o'tadi
-let _uzumLastSentAt = 0;
 const _sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// So'rovni global navbatga qo'yadi: oldingi yuborilishdan kamida UZUM_MIN_INTERVAL_MS o'tguncha kutadi.
-// Retry'lar ham SHU navbatdan o'tadi (aks holda qayta urinishlar o'zi yangi 429 keltirib chiqarardi).
-function _uzumSchedule(fn) {
-  const run = _uzumChain.then(async () => {
-    const wait = UZUM_MIN_INTERVAL_MS - (Date.now() - _uzumLastSentAt);
-    if (wait > 0) await _sleep(wait);
-    _uzumLastSentAt = Date.now();
-    return fn();
+// T7: IKKI DARAJALI NAVBAT — foydalanuvchi ('high') so'rovlari fon isitish ('low') so'rovlaridan
+// OLDINGA o'tadi. Agar foydalanuvchi aynan isitish ketayotgan paytda kirsa, u 13 soniyalik fon
+// navbatini kutib qolmaydi. Har so'rov oldingi YUBORILISHdan kamida UZUM_MIN_INTERVAL_MS keyin ketadi.
+const _uzumHighQ = []; // { fn, resolve, reject } — foydalanuvchi
+const _uzumLowQ = [];  // { fn, resolve, reject } — fon isitish
+let _uzumLastSentAt = 0;
+let _uzumPumping = false;
+let _lastUzum429At = 0; // T7: oxirgi (barcha retry'lardan keyin) 429 vaqti — prewarm buni ko'rib o'zini to'xtatadi
+function _uzumSchedule(fn, priority = 'high') {
+  return new Promise((resolve, reject) => {
+    (priority === 'low' ? _uzumLowQ : _uzumHighQ).push({ fn, resolve, reject });
+    _uzumPump();
   });
-  // Zanjir uzilmasin: xato bo'lsa ham keyingi so'rovlar davom etsin
-  _uzumChain = run.then(() => {}, () => {});
-  return run;
+}
+async function _uzumPump() {
+  if (_uzumPumping) return;
+  _uzumPumping = true;
+  try {
+    while (_uzumHighQ.length || _uzumLowQ.length) {
+      const wait = UZUM_MIN_INTERVAL_MS - (Date.now() - _uzumLastSentAt);
+      if (wait > 0) await _sleep(wait);
+      const task = _uzumHighQ.shift() || _uzumLowQ.shift(); // sleep'dan KEYIN olamiz — user navbatga kirsa oldinga o'tadi
+      _uzumLastSentAt = Date.now();
+      try { task.resolve(await task.fn()); }
+      catch (e) { task.reject(e); }
+    }
+  } finally {
+    _uzumPumping = false;
+  }
 }
 
-async function uzumGet(pathAndQuery, token) {
+async function uzumGet(pathAndQuery, token, priority = 'high') {
   token = token || process.env.UZUM_TOKEN;
   if (!token) return { ok: false, status: 0, error: "UZUM_TOKEN yo'q" };
-  let r = await _uzumSchedule(() => _uzumGetRaw(pathAndQuery, token));
+  let r = await _uzumSchedule(() => _uzumGetRaw(pathAndQuery, token), priority);
   // FAQAT 429 uchun qayta urinish — boshqa xatolar (403/500/tarmoq) DARHOL qaytariladi.
   for (let i = 0; i < UZUM_RETRY_DELAYS_MS.length && r.status === 429; i++) {
     await _sleep(UZUM_RETRY_DELAYS_MS[i]);
     console.warn(`[RATELIMIT] 429 — qayta urinish ${i + 1}/${UZUM_RETRY_DELAYS_MS.length}: ${pathAndQuery}`);
-    r = await _uzumSchedule(() => _uzumGetRaw(pathAndQuery, token));
+    r = await _uzumSchedule(() => _uzumGetRaw(pathAndQuery, token), priority);
   }
+  if (r.status === 429) _lastUzum429At = Date.now(); // T7: prewarm buni ko'rib o'zini vaqtincha to'xtatadi
   return r;
 }
 
@@ -830,14 +846,22 @@ async function _uzumGetRaw(pathAndQuery, token) {
 const PROXY_CACHE_MS = 15 * 60 * 1000; // T6: 15 daqiqa (isitish har 5 daqiqada — kesh hech qachon "sovuq" bo'lmaydi)
 const _proxyCache = new Map();    // key -> { at, value }
 const _proxyInFlight = new Map(); // key -> Promise
-async function cachedUzumGet(pathAndQuery, token) {
+async function cachedUzumGet(pathAndQuery, token, opts = {}) {
+  const { force = false, priority = 'high' } = opts;
   const key = pathAndQuery; // to'liq yo'l + query — sana oralig'i shu yerda
   const hit = _proxyCache.get(key);
-  if (hit && Date.now() - hit.at < PROXY_CACHE_MS) return hit.value;
+  // T7 SWR: force bo'lmasa VA kesh mavjud bo'lsa — YOSHIDAN QAT'I NAZAR darhol qaytaramiz (user kutmaydi).
+  // Kesh eskirgan (> TTL) VA hozir yangilanmayotgan bo'lsa — fon rejimida (low) yangilaymiz.
+  if (!force && hit) {
+    if (Date.now() - hit.at >= PROXY_CACHE_MS && !_proxyInFlight.get(key)) {
+      cachedUzumGet(pathAndQuery, token, { force: true, priority: 'low' }).catch(() => {});
+    }
+    return hit.value;
+  }
   const inFlight = _proxyInFlight.get(key);
   if (inFlight) return inFlight;
   const p = (async () => {
-    const r = await uzumGet(pathAndQuery, token);
+    const r = await uzumGet(pathAndQuery, token, priority);
     if (r.ok) { _proxyCache.set(key, { at: Date.now(), value: r }); scheduleApiCacheSave(); } // xato keshlanmaydi
     return r;
   })().finally(() => _proxyInFlight.delete(key));
@@ -854,14 +878,21 @@ const PRODUCT_CACHE_MS = 15 * 60 * 1000; // T6: 15 daqiqa (isitish oralig'idan u
 // Endi birinchi chaqiruv promise'ni DARHOL saqlaydi, qolganlari SHU promise'ni kutadi (takroriy
 // so'rov yuborilmaydi). Kesh mantig'i/TTL o'zgarmadi.
 const _productInFlight = new Map(); // shopId -> Promise
-async function fetchLiveShopProducts(shopId, token) {
+async function fetchLiveShopProducts(shopId, token, opts = {}) {
+  const { force = false, priority = 'high' } = opts;
   const key = String(shopId);
   const cached = productCache.get(key);
-  if (cached && Date.now() - cached.at < PRODUCT_CACHE_MS) return cached.value;
+  // T7 SWR: force bo'lmasa VA kesh bor bo'lsa — yoshidan qat'i nazar darhol qaytaramiz; eskirgan bo'lsa fon'da yangilaymiz.
+  if (!force && cached) {
+    if (Date.now() - cached.at >= PRODUCT_CACHE_MS && !_productInFlight.get(key)) {
+      fetchLiveShopProducts(shopId, token, { force: true, priority: 'low' }).catch(() => {});
+    }
+    return cached.value;
+  }
   const inFlight = _productInFlight.get(key);
   if (inFlight) return inFlight;
   const p = (async () => {
-    const r = await uzumGet(`/v1/product/shop/${shopId}?page=0&size=100`, token);
+    const r = await uzumGet(`/v1/product/shop/${shopId}?page=0&size=100`, token, priority);
     if (!r.ok && DEMO_MODE) {
       // Lokal test: token yo'q/xato bo'lsa mock (allaqachon normalizatsiyalangan shakl) bilan oqimni sinash
       const mock = String(shopId) === '72540' ? MOCK_PRODUCTS_72540 : MOCK_PRODUCTS_61122;
@@ -1142,18 +1173,24 @@ const _finOrdersCache = {}; // shopId -> { at, orders }
 // uchalasi "sovuq kesh" ko'rib, har biri 6 sahifani ALOHIDA tortardi (18 so'rov). Endi birinchisi
 // promise'ni darhol saqlaydi, qolganlari shuni kutadi (6 so'rov). Kesh mantig'i/TTL o'zgarmadi.
 const _finOrdersInFlight = new Map(); // shopId -> Promise
-async function fetchFinanceOrders(shopId) {
+async function fetchFinanceOrders(shopId, opts = {}) {
+  const { force = false, priority = 'high' } = opts;
   const key = String(shopId);
-  const now = Date.now();
   const cached = _finOrdersCache[key];
-  if (cached && (now - cached.at) < FIN_ORDERS_TTL_MS) return { ok: true, orders: cached.orders, cached: true };
+  // T7 SWR: force bo'lmasa VA kesh bor bo'lsa — yoshidan qat'i nazar darhol qaytaramiz; eskirgan bo'lsa fon'da yangilaymiz.
+  if (!force && cached) {
+    if (Date.now() - cached.at >= FIN_ORDERS_TTL_MS && !_finOrdersInFlight.get(key)) {
+      fetchFinanceOrders(shopId, { force: true, priority: 'low' }).catch(() => {});
+    }
+    return { ok: true, orders: cached.orders, cached: true };
+  }
   const inFlight = _finOrdersInFlight.get(key);
   if (inFlight) return inFlight;
   const p = (async () => {
     const all = [];
     const size = 200;
     for (let page = 0; page < 6; page++) { // 6×200=1200 buyurtma — 30+ kunni qoplaydi
-      const r = await uzumGet(`/v1/finance/orders?shopIds=${key}&page=${page}&size=${size}`, process.env.UZUM_TOKEN);
+      const r = await uzumGet(`/v1/finance/orders?shopIds=${key}&page=${page}&size=${size}`, process.env.UZUM_TOKEN, priority);
       if (!r.ok) {
         if (all.length) break; // qisman ma'lumot bor — shuni ishlatamiz (rate-limit yoki oxirgi sahifa xatosi)
         return { ok: false, status: r.status, error: r.error || `Uzum ${r.status}` };
@@ -2856,14 +2893,20 @@ function loadApiCache() {
 // T3/1-QISM: in-flight promise sharing — /api/invoices va /api/compensation-candidates ikkalasi ham
 // shu funksiyani chaqiradi va endi parallel ishlaydi. Kesh naqshi fetchFinanceOrders bilan bir xil.
 let _invoiceInFlight = null;
-async function fetchAllInvoices() {
-  const now = Date.now();
-  if (_invoiceCache && (now - _invoiceCache.at) < INVOICE_TTL_MS) return { ok: true, invoices: _invoiceCache.invoices, cached: true };
+async function fetchAllInvoices(opts = {}) {
+  const { force = false, priority = 'high' } = opts;
+  // T7 SWR: force bo'lmasa VA kesh bor bo'lsa — yoshidan qat'i nazar darhol qaytaramiz; eskirgan bo'lsa fon'da yangilaymiz.
+  if (!force && _invoiceCache) {
+    if (Date.now() - _invoiceCache.at >= INVOICE_TTL_MS && !_invoiceInFlight) {
+      fetchAllInvoices({ force: true, priority: 'low' }).catch(() => {});
+    }
+    return { ok: true, invoices: _invoiceCache.invoices, cached: true };
+  }
   if (_invoiceInFlight) return _invoiceInFlight;
   _invoiceInFlight = (async () => {
     const all = [];
     for (let page = 0; page < 40; page++) { // xavfsizlik chegarasi: 40*50=2000 yuk xati
-      const r = await uzumGet(`/v1/invoice?page=${page}&size=50`, process.env.UZUM_TOKEN);
+      const r = await uzumGet(`/v1/invoice?page=${page}&size=50`, process.env.UZUM_TOKEN, priority);
       if (!r.ok) { if (all.length) break; return { ok: false, status: r.status, error: r.error || `Uzum ${r.status}` }; }
       const d = r.data;
       const list = Array.isArray(d) ? d : (d && d.payload && Array.isArray(d.payload) ? d.payload : []);
@@ -4769,9 +4812,63 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
   })();
 }
 
+// ============ T7: FON REJIMIDA KESH ISITISH (prewarm) ============
+// Server O'ZI, foydalanuvchi kirmasa ham, keshni doimo issiq tutadi — shunda foydalanuvchi 2-3 soatdan
+// keyin kirsa ham darhol (kesh + SWR) ochiladi, 30 soniya kutmaydi. Dashboard refreshData() qaysi
+// so'rovlarni ishlatsa, o'shalarni oldindan (force, LOW priority) yuklaydi.
+let _prewarmInProgress = false;   // req 3: ikkita prewarm ustma-ust tushmasin
+let _prewarmPauseUntil = 0;       // req 7: 429/kunlik-limit'da o'zini vaqtincha to'xtatadi
+const PREWARM_PAUSE_MS = 15 * 60 * 1000;
+async function runPrewarm() {
+  if (_prewarmInProgress) { console.log('[PREWARM] Oldingi isitish hali tugamagan — o\'tkazib yuborildi.'); return; }
+  if (Date.now() < _prewarmPauseUntil) { console.log('[PREWARM] 429 sababli vaqtincha to\'xtatilgan — o\'tkazib yuborildi.'); return; }
+  _prewarmInProgress = true;
+  const before429 = _lastUzum429At;
+  const t0 = Date.now();
+  try {
+    const shops = syncedState.shops || [];
+    const dateTo = new Date().toISOString().split('T')[0];
+    const dateFrom = new Date(Date.now() - 30 * 864e5).toISOString().split('T')[0];
+    const bg = { force: true, priority: 'low' };
+    // Har do'kon uchun dashboard aynan shu so'rovlarni yuboradi — o'shalarni oldindan isitamiz.
+    await Promise.all(shops.map(async (s) => {
+      const id = s.shopId;
+      const dq = financeQueryToMillis(`shopIds=${id}&dateFrom=${dateFrom}&dateTo=${dateTo}`);
+      await Promise.all([
+        fetchLiveShopProducts(id, null, bg),                                  // product/shop + metrics/forecast/compensation
+        fetchFinanceOrders(id, bg),                                           // metrics/forecast/period-report/cash-flow
+        cachedUzumGet(`/v1/finance/orders?${dq}`, null, bg),                  // proxy finance/orders
+        cachedUzumGet(`/v1/finance/expenses?${dq}`, null, bg)                 // proxy finance/expenses
+      ]);
+    }));
+    await fetchAllInvoices(bg); // invoices + compensation (barcha do'kon uchun umumiy)
+    console.log(`[PREWARM] Kesh isitildi (${shops.length} do'kon) — ${((Date.now() - t0) / 1000).toFixed(1)}s.`);
+    if (_lastUzum429At > before429) { // req 7: isitish paytida 429 bo'ldi — keyingi sikllarni vaqtincha to'xtatamiz
+      _prewarmPauseUntil = Date.now() + PREWARM_PAUSE_MS;
+      console.warn(`[PREWARM] 429 aniqlandi — isitish ${PREWARM_PAUSE_MS / 60000} daqiqaga to'xtatildi.`);
+    }
+  } catch (e) {
+    // req 4: xato bo'lsa jim loglaymiz, server yiqilmaydi, eski kesh buzilmaydi (fetcherlar faqat r.ok bo'lsa yozadi).
+    console.error('[PREWARM] Isitishda xato (eski kesh saqlanadi):', e.message);
+  } finally {
+    _prewarmInProgress = false;
+  }
+}
+
 // Snapshot cron — har kuni 04:50 Asia/Tashkent (hisobotdan oldin, sotuv tezligi uchun)
 // MUHIM: bu callback ham "[CRON]" tegi bilan loglaydi — Railway loglarida "CRON" bo'yicha
 // qidirilganda ko'rinsin (avval faqat "[SNAPSHOT]" tegi bor edi, "CRON" qidiruviga tushmasdi).
+if (process.env.UZUM_TOKEN) {
+  cron.schedule('*/5 * * * *', () => {
+    runPrewarm().catch(e => console.error('[PREWARM] cron xato:', e));
+  });
+  // req 6: startupda darhol bir marta isitish — fayl OXIRIDA, loadSettings()/loadApiCache()dan KEYIN
+  // chaqiriladi (to'g'ri do'konlar ro'yxati bilan). Cron esa shu yerda rejalashtiriladi.
+  console.log('[CRON] Kesh isitish rejalashtirildi: har 5 daqiqada + startupda darhol.');
+} else {
+  console.warn('[CRON] UZUM_TOKEN yo\'q — kesh isitish rejalashtirilmadi.');
+}
+
 if (process.env.UZUM_TOKEN) {
   cron.schedule('50 4 * * *', () => {
     console.log(`[CRON] Snapshot cron ishga tushdi: ${new Date().toISOString()}`);
@@ -4873,6 +4970,9 @@ async function runStartupCatchUp() {
 loadSettings();
 // T6: API keshini diskdan tiklaymiz — server qayta ishga tushganda foydalanuvchi kutmasin.
 loadApiCache();
+// T7 (req 6): startupda darhol bir marta kesh isitish — sozlamalar/kesh yuklangandan KEYIN, to'g'ri
+// do'konlar ro'yxati bilan. Fon rejimida (startupni bloklamaydi).
+if (process.env.UZUM_TOKEN) runPrewarm().catch(e => console.error('[PREWARM] startup isitish xato:', e));
 
 // Catch-up — server to'liq ishga tushgach, fon rejimida (startupni bloklamaydi)
 runStartupCatchUp().catch(e => console.error('[CRON] Catch-up umumiy xato:', e));
