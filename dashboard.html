@@ -638,83 +638,84 @@ ${urgentSection}
       // 15: sozlamalar BU YERDA avtomatik serverga yuborilmaydi — refreshData() faqat jonli
       // ma'lumot o'qiydi. Sozlamalar faqat aniq foydalanuvchi harakati (saveState()) orqali yoziladi.
 
-      // Mahsulotlar — badge asosan shu chaqiruvga qarab belgilanadi
-      try {
-        const pData = await fetchFromProxy(`/api/uzum/product/shop/${state.activeShop}`);
-        state.cachedUzumProducts = pData.payload || [];
-        // Do'kon ishlaydi — agar avval "mavjud emas" deb belgilangan bo'lsa, olib tashlaymiz
-        state.unavailableShops = state.unavailableShops.filter(id => id !== state.activeShop);
-        if (pData.source === 'live') {
-          setBadge('Live Connected', 'bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 badge-glow');
-        } else {
-          setBadge('Demo Mode', 'bg-slate-800 border border-slate-700 text-slate-300');
-        }
-      } catch (e) {
-        console.error("Mahsulotlarni yuklashda xato:", e);
-        state.cachedUzumProducts = null;
-        state.dataErrors.products = e.message;
-        // Uzum "Shop is not available" bersa — do'konni "mavjud emas" deb belgilaymiz
-        if (/not available|forbidden|403/i.test(e.message || '') && !state.unavailableShops.includes(state.activeShop)) {
-          state.unavailableShops.push(state.activeShop);
-        }
-        setBadge("⚠️ Ma'lumot yo'q", 'bg-rose-950/80 border border-rose-500/50 text-rose-300');
-      }
-
       // Sana oralig'i: oxirgi 30 kun
       const dateTo = new Date().toISOString().split('T')[0];
       const dateFrom = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
       const financeQuery = `shopIds=${state.activeShop}&dateFrom=${dateFrom}&dateTo=${dateTo}`;
 
-      // Har bir bo'lim mustaqil yuklanadi — bittasi qulasa, boshqalari baribir urinib ko'radi
-      try {
-        const oData = await fetchFromProxy(`/api/uzum/finance/orders?${financeQuery}`);
-        state.orders = oData.payload?.orders || [];
-      } catch (e) {
-        console.error("Buyurtmalarni yuklashda xato:", e);
-        state.orders = [];
-        state.dataErrors.orders = e.message;
-      }
+      // T2: 9 ta so'rov BIR VAQTDA (parallel) — ular bir-biriga bog'liq emas (hech biri boshqasining
+      // natijasini ishlatmaydi, har biri o'z state kalitiga yozadi). Har biri ALOHIDA .catch() bilan
+      // himoyalangan: bittasi qulasa, qolganlari baribir yuklanadi (Promise.all rad etilmaydi).
+      await Promise.all([
+        // Mahsulotlar — badge asosan shu chaqiruvga qarab belgilanadi
+        fetchFromProxy(`/api/uzum/product/shop/${state.activeShop}`).then(pData => {
+          state.cachedUzumProducts = pData.payload || [];
+          // Do'kon ishlaydi — agar avval "mavjud emas" deb belgilangan bo'lsa, olib tashlaymiz
+          state.unavailableShops = state.unavailableShops.filter(id => id !== state.activeShop);
+          if (pData.source === 'live') {
+            setBadge('Live Connected', 'bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 badge-glow');
+          } else {
+            setBadge('Demo Mode', 'bg-slate-800 border border-slate-700 text-slate-300');
+          }
+        }).catch(e => {
+          console.error("Mahsulotlarni yuklashda xato:", e);
+          state.cachedUzumProducts = null;
+          state.dataErrors.products = e.message;
+          // Uzum "Shop is not available" bersa — do'konni "mavjud emas" deb belgilaymiz
+          if (/not available|forbidden|403/i.test(e.message || '') && !state.unavailableShops.includes(state.activeShop)) {
+            state.unavailableShops.push(state.activeShop);
+          }
+          setBadge("⚠️ Ma'lumot yo'q", 'bg-rose-950/80 border border-rose-500/50 text-rose-300');
+        }),
 
-      try {
-        const eData = await fetchFromProxy(`/api/uzum/finance/expenses?${financeQuery}`);
-        state.expenses = eData.payload || [];
-      } catch (e) {
-        console.error("Xarajatlarni yuklashda xato:", e);
-        state.expenses = [];
-        state.dataErrors.expenses = e.message;
-      }
+        fetchFromProxy(`/api/uzum/finance/orders?${financeQuery}`).then(oData => {
+          state.orders = oData.payload?.orders || [];
+        }).catch(e => {
+          console.error("Buyurtmalarni yuklashda xato:", e);
+          state.orders = [];
+          state.dataErrors.orders = e.message;
+        }),
 
-      try {
+        fetchFromProxy(`/api/uzum/finance/expenses?${financeQuery}`).then(eData => {
+          state.expenses = eData.payload || [];
+        }).catch(e => {
+          console.error("Xarajatlarni yuklashda xato:", e);
+          state.expenses = [];
+          state.dataErrors.expenses = e.message;
+        }),
+
         // 5.1/5.2/5.4: zaxira kunlari, ABC, Xitoy buyurtma nuqtasi — snapshot tarixidan (server hisoblaydi)
-        state.skuMetrics = await fetchFromProxy(`/api/metrics/${state.activeShop}`);
-      } catch (e) {
-        console.error("Metrikalarni yuklashda xato:", e);
-        state.skuMetrics = null;
-      }
+        fetchFromProxy(`/api/metrics/${state.activeShop}`).then(d => {
+          state.skuMetrics = d;
+        }).catch(e => {
+          console.error("Metrikalarni yuklashda xato:", e);
+          state.skuMetrics = null;
+        }),
 
-      try {
         // B1/14C: Moliya bo'limi — snapshot delta'ga asoslangan xulosa, tanlangan davr bo'yicha
         // (finance/orders doim bo'sh bo'lgani uchun). Moliya va D4 shu bitta davr state'ini ulashadi.
-        state.financeSummary = await fetchFromProxy(`/api/period-report/${state.activeShop}?period=${state.financePeriod}`);
-      } catch (e) {
-        console.error("Moliya xulosasini yuklashda xato:", e);
-        state.financeSummary = null;
-      }
+        fetchFromProxy(`/api/period-report/${state.activeShop}?period=${state.financePeriod}`).then(d => {
+          state.financeSummary = d;
+        }).catch(e => {
+          console.error("Moliya xulosasini yuklashda xato:", e);
+          state.financeSummary = null;
+        }),
 
-      try {
         // E: keyingi 30 kunlik bashorat, ishonch darajasi bilan
-        state.forecast = await fetchFromProxy(`/api/forecast/${state.activeShop}`);
-      } catch (e) {
-        console.error("Bashoratni yuklashda xato:", e);
-        state.forecast = null;
-      }
+        fetchFromProxy(`/api/forecast/${state.activeShop}`).then(d => {
+          state.forecast = d;
+        }).catch(e => {
+          console.error("Bashoratni yuklashda xato:", e);
+          state.forecast = null;
+        }),
 
-      // 18-B: naqd oqim (yechilgan/xarajat/kredit + proyeksiya)
-      await loadCashFlow();
-      // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar)
-      await loadCompensation();
-      // 19-D: ta'minlashlar (yuk xatlari ro'yxati)
-      await loadInvoices();
+        // 18-B: naqd oqim (yechilgan/xarajat/kredit + proyeksiya) — o'zi ichida try/catch bilan himoyalangan
+        loadCashFlow(),
+        // 19-C: kompensatsiya nomzodlari (yo'qolgan/rad etilgan tovar)
+        loadCompensation(),
+        // 19-D: ta'minlashlar (yuk xatlari ro'yxati)
+        loadInvoices()
+      ]);
 
       // 15: bu yerda avtomatik serverga yozish yo'q (avval syncStateToServer() chaqirilardi —
       // backend baribir products/orders/expenses'ni hech qayerda ishlatmasdi, faqat xotirada
