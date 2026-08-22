@@ -24,6 +24,19 @@ jobs:
       - name: Android SDK komponentlarini o'rnatish
         uses: android-actions/setup-android@v3
 
+      - name: Node.js sozlash
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: mobile/ bog'liqliklarini o'rnatish (npm ci)
+        working-directory: mobile
+        run: npm ci
+
+      - name: Capacitor sync — generatsiya qilinadigan Android fayllarni yaratish
+        working-directory: mobile
+        run: npx cap sync android
+
       - name: gradlew'ga bajarish ruxsati berish
         run: chmod +x ./gradlew
 
