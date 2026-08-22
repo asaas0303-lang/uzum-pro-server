@@ -823,9 +823,31 @@ async function _uzumGetRaw(pathAndQuery, token) {
   return { ok: true, status: 200, data };
 }
 
+// T5: /api/uzum/* proxy endpointlari uchun umumiy kesh. Bu endpointlar Uzum javobini o'zgartirmasdan
+// uzatadi, shuning uchun XOM javobni keshlaymiz — dashboard ko'radigan format/semantika o'zgarmaydi.
+// KALIT — TO'LIQ so'rov qatori (sana oralig'i ham kiradi): aks holda bir sana oralig'i uchun olingan
+// javob boshqasiga noto'g'ri qaytarilardi. In-flight sharing ham bor (parallel bir xil so'rov — 1 marta).
+const PROXY_CACHE_MS = 15 * 60 * 1000; // T6: 15 daqiqa (isitish har 5 daqiqada — kesh hech qachon "sovuq" bo'lmaydi)
+const _proxyCache = new Map();    // key -> { at, value }
+const _proxyInFlight = new Map(); // key -> Promise
+async function cachedUzumGet(pathAndQuery, token) {
+  const key = pathAndQuery; // to'liq yo'l + query — sana oralig'i shu yerda
+  const hit = _proxyCache.get(key);
+  if (hit && Date.now() - hit.at < PROXY_CACHE_MS) return hit.value;
+  const inFlight = _proxyInFlight.get(key);
+  if (inFlight) return inFlight;
+  const p = (async () => {
+    const r = await uzumGet(pathAndQuery, token);
+    if (r.ok) { _proxyCache.set(key, { at: Date.now(), value: r }); scheduleApiCacheSave(); } // xato keshlanmaydi
+    return r;
+  })().finally(() => _proxyInFlight.delete(key));
+  _proxyInFlight.set(key, p);
+  return p;
+}
+
 // 2.5: mahsulotlar uchun qisqa muddatli kesh (bir xil ma'lumotni qayta-qayta so'ramaslik)
 const productCache = new Map(); // shopId -> { at, value }
-const PRODUCT_CACHE_MS = 5 * 60 * 1000;
+const PRODUCT_CACHE_MS = 15 * 60 * 1000; // T6: 15 daqiqa (isitish oralig'idan uzun)
 
 // T3/1-QISM: in-flight promise sharing — kesh FAQAT so'rov tugagach yoziladi, shuning uchun bir xil
 // shopId uchun bir vaqtda kelgan chaqiruvlar hammasi "sovuq kesh" ko'rib, alohida so'rov yuborardi.
@@ -848,7 +870,7 @@ async function fetchLiveShopProducts(shopId, token) {
     const value = r.ok
       ? { ok: true, products: normalizeUzumProducts(r.data).payload }
       : { ok: false, status: r.status, error: r.error };
-    if (r.ok) productCache.set(key, { at: Date.now(), value });
+    if (r.ok) { productCache.set(key, { at: Date.now(), value }); scheduleApiCacheSave(); }
     return value;
   })().finally(() => _productInFlight.delete(key));
   _productInFlight.set(key, p);
@@ -1113,7 +1135,7 @@ async function getTodaySoFarDelta(shopId) {
 //  - Maydonlar: sellPrice=DONA narxi; commission/logisticDeliveryFee/sellerProfit=QATOR JAMISI (×amount);
 //    purchasePrice=DONA tannarxi (Uzum); sellerProfit = sellPrice×amount − commission − logistics (aniq).
 //  - orderId:null yozuvlar (ombor operatsiyalari) chetlab o'tiladi.
-const FIN_ORDERS_TTL_MS = 5 * 60 * 1000; // rate-limit himoyasi: har do'kon 5 daqiqada bir marta so'raladi
+const FIN_ORDERS_TTL_MS = 15 * 60 * 1000; // T6: 15 daqiqa (isitish oralig'idan uzun; avval 5 daq edi)
 const _finOrdersCache = {}; // shopId -> { at, orders }
 // T3/1-QISM: in-flight promise sharing — metrics/forecast/period-report uchalasi ham SHU funksiyani
 // bir xil shopId bilan chaqiradi. Kesh faqat 6 sahifa tugagach yozilgani uchun, parallel chaqirilganda
@@ -1142,6 +1164,7 @@ async function fetchFinanceOrders(shopId) {
       if (orders.length < size) break; // oxirgi sahifa
     }
     _finOrdersCache[key] = { at: Date.now(), orders: all };
+    scheduleApiCacheSave();
     return { ok: true, orders: all, cached: false };
   })().finally(() => _finOrdersInFlight.delete(key));
   _finOrdersInFlight.set(key, p);
@@ -1586,7 +1609,19 @@ app.get('/api/uzum/product/shop/:shopId', async (req, res) => {
     // Uzum product endpoint pagination parametrlarini majburiy talab qiladi
     const page = req.query.page || 0;
     const size = req.query.size || 100;
-    // T3-FIX: uzumGet() orqali — rate limiter (UZUM_MIN_INTERVAL_MS) qamrab olishi uchun.
+    // T5: standart sahifalash (page=0, size=100) — fetchLiveShopProducts() AYNAN shu so'rovni yuboradi,
+    // shuning uchun uning keshini (productCache + in-flight) ulashamiz. U ham normalizeUzumProducts()
+    // qo'llaydi, ya'ni javob formati o'zgarmaydi ({ payload: [...], source }).
+    if (String(page) === '0' && String(size) === '100') {
+      const lr = await fetchLiveShopProducts(shopId, getAuthToken(req));
+      if (!lr.ok) {
+        console.warn(`Uzum Products call ${lr.status}:`, lr.error);
+        if (DEMO_MODE) return res.json({ payload: shopId === '72540' ? MOCK_PRODUCTS_72540 : MOCK_PRODUCTS_61122, source: 'mock' });
+        return sendUzumError(res, `Uzum ${lr.status}: ${lr.error}`);
+      }
+      return res.json({ payload: lr.products, source: lr.source || 'live' });
+    }
+    // Nostandart page/size — kesh kaliti mos kelmaydi, to'g'ridan-to'g'ri (rate limiter baribir qamraydi).
     const r = await uzumGet(`/v1/product/shop/${shopId}?page=${page}&size=${size}`, getAuthToken(req));
     if (!r.ok) {
       console.warn(`Uzum Products call ${r.status}:`, r.error);
@@ -1611,8 +1646,9 @@ app.get('/api/uzum/finance/orders', async (req, res) => {
   }
   try {
     const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
-    // T3-FIX: uzumGet() orqali — rate limiter (UZUM_MIN_INTERVAL_MS) qamrab olishi uchun.
-    const r = await uzumGet(`/v1/finance/orders?${query}`, getAuthToken(req));
+    // T5: keshlangan (kalit — to'liq query, sana oralig'i bilan). Semantika o'zgarmadi: sana
+    // parametrlari xuddi avvalgidek Uzum'ga uzatiladi, faqat takroriy so'rov endi keshdan javob oladi.
+    const r = await cachedUzumGet(`/v1/finance/orders?${query}`, getAuthToken(req));
     if (!r.ok) {
       console.warn(`Uzum Finance Orders call ${r.status}:`, r.error);
       if (DEMO_MODE) return res.json({ payload: { orders: MOCK_ORDERS }, source: 'mock' });
@@ -1637,8 +1673,8 @@ app.get('/api/uzum/finance/expenses', async (req, res) => {
   }
   try {
     const query = financeQueryToMillis(new URLSearchParams(req.query).toString());
-    // T3-FIX: uzumGet() orqali — rate limiter (UZUM_MIN_INTERVAL_MS) qamrab olishi uchun.
-    const r = await uzumGet(`/v1/finance/expenses?${query}`, getAuthToken(req));
+    // T5: keshlangan (kalit — to'liq query, sana oralig'i bilan) — avval bu endpointda kesh UMUMAN yo'q edi.
+    const r = await cachedUzumGet(`/v1/finance/expenses?${query}`, getAuthToken(req));
     if (!r.ok) {
       console.warn(`Uzum Finance Expenses call ${r.status}:`, r.error);
       if (DEMO_MODE) return res.json({ payload: MOCK_EXPENSES, source: 'mock' });
@@ -2763,11 +2799,60 @@ async function runProblemCheck() {
 // Har SKU: skuForInvoiceDtoList[].id = skuId (bizning skuMappings kaliti bilan bir xil — tekshirilgan),
 // quantityToStock (jo'natilgan), quantityAccepted (qabul qilingan), purchasePrice (tannarx).
 // MUHIM: `size>50` bo'sh qaytaradi (finance/orders'dagidek) — shuning uchun page=0,1,2... size=50 bilan sahifalaymiz.
-const INVOICE_TTL_MS = 5 * 60 * 1000;
+const INVOICE_TTL_MS = 15 * 60 * 1000; // T6: 15 daqiqa (isitish oralig'idan uzun; avval 5 daq edi)
 // 19-GG: Uy zaxirasi ↔ Uzum ↔ Xitoy zanjiri, 3-qadam — tavsiya konstantalari.
 const TARGET_UZUM_STOCK_DAYS = 30; // uydan yuborganda shu darajaga to'ldiriladi
 const CHINA_LEAD_TIME_DAYS = 30; // foydalanuvchi bahosi — Xitoydan buyurtma uchun aniq tarixiy ma'lumot yo'q
 let _invoiceCache = null; // { at, invoices }
+
+// ============ T6: API KESHINI DISKDA SAQLASH (/data/api_cache.json) ============
+// To'rt keshni (productCache, _finOrdersCache, _invoiceCache, _proxyCache) diskda saqlaymiz — server
+// qayta ishga tushganda (Railway deploy/restart) kesh yo'qolmasin, foydalanuvchi 25-31s kutmasin.
+// MAXFIY MA'LUMOT YO'Q: faqat Uzum'ning ochiq biznes ma'lumoti (token funksiya argumenti, hech qachon
+// keshlangan qiymatga yozilmaydi). Har yozuvda `at` timestamp saqlanadi — TTL semantikasi tiklashda ham
+// ishlaydi (eski yozuv avtomatik "muddati o'tgan" bo'lib qayta so'raladi).
+const API_CACHE_FILE = path.join(DATA_DIR, 'api_cache.json');
+const API_CACHE_MAX_BYTES = 50 * 1024 * 1024; // 50MB — bundan oshsa diskka yozilmaydi (faqat ogohlantirish)
+let _apiCacheSaveTimer = null;
+// Debounce: birinchi o'zgarish 3s taymer qo'yadi; shu 3s ichidagi keyingi o'zgarishlar yangi taymer
+// QO'YMAYDI (taymer allaqachon kutmoqda) — isitishdagi ~45 ta yozuv bitta disk yozuviga guruhlanadi.
+function scheduleApiCacheSave() {
+  if (_apiCacheSaveTimer) return;
+  _apiCacheSaveTimer = setTimeout(() => { _apiCacheSaveTimer = null; saveApiCacheNow(); }, 3000);
+  if (_apiCacheSaveTimer.unref) _apiCacheSaveTimer.unref(); // server chiqishini bloklamasin
+}
+function saveApiCacheNow() {
+  try {
+    const snapshot = {
+      productCache: [...productCache.entries()],
+      finOrders: _finOrdersCache,
+      invoice: _invoiceCache,
+      proxyCache: [..._proxyCache.entries()]
+    };
+    const json = JSON.stringify(snapshot);
+    if (json.length > API_CACHE_MAX_BYTES) {
+      console.warn(`[API-CACHE] Hajm ${Math.round(json.length / 1048576)}MB > 50MB — diskka saqlanmadi (xotirada qoladi).`);
+      return;
+    }
+    fs.writeFileSync(API_CACHE_FILE, json);
+  } catch (e) {
+    console.error('[API-CACHE] Saqlashda xato (davom etamiz):', e.message);
+  }
+}
+function loadApiCache() {
+  try {
+    if (!fs.existsSync(API_CACHE_FILE)) return;
+    const s = JSON.parse(fs.readFileSync(API_CACHE_FILE, 'utf8'));
+    if (Array.isArray(s.productCache)) for (const [k, v] of s.productCache) productCache.set(k, v);
+    if (s.finOrders && typeof s.finOrders === 'object') Object.assign(_finOrdersCache, s.finOrders);
+    if (s.invoice) _invoiceCache = s.invoice;
+    if (Array.isArray(s.proxyCache)) for (const [k, v] of s.proxyCache) _proxyCache.set(k, v);
+    console.log(`[API-CACHE] Diskdan tiklandi: ${productCache.size} mahsulot, ${Object.keys(_finOrdersCache).length} finance, ${_proxyCache.size} proxy yozuv.`);
+  } catch (e) {
+    console.warn('[API-CACHE] O\'qib bo\'lmadi (bo\'sh keshdan boshlanadi):', e.message);
+  }
+}
+
 // T3/1-QISM: in-flight promise sharing — /api/invoices va /api/compensation-candidates ikkalasi ham
 // shu funksiyani chaqiradi va endi parallel ishlaydi. Kesh naqshi fetchFinanceOrders bilan bir xil.
 let _invoiceInFlight = null;
@@ -2786,6 +2871,7 @@ async function fetchAllInvoices() {
       if (list.length < 50) break; // oxirgi sahifa
     }
     _invoiceCache = { at: Date.now(), invoices: all };
+    scheduleApiCacheSave();
     return { ok: true, invoices: all, cached: false };
   })().finally(() => { _invoiceInFlight = null; });
   return _invoiceInFlight;
@@ -4785,6 +4871,8 @@ async function runStartupCatchUp() {
 
 // Startupda saqlangan sozlamalarni diskdan yuklaymiz (2.2)
 loadSettings();
+// T6: API keshini diskdan tiklaymiz — server qayta ishga tushganda foydalanuvchi kutmasin.
+loadApiCache();
 
 // Catch-up — server to'liq ishga tushgach, fon rejimida (startupni bloklamaydi)
 runStartupCatchUp().catch(e => console.error('[CRON] Catch-up umumiy xato:', e));
