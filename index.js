@@ -67,6 +67,27 @@ function loadBusinessPrinciplesCondensed() {
   return _businessPrinciplesCondensedCache;
 }
 
+// 19-FF: "Ustoz" motivatsion freymvorklar bazasi (knowledge/yol-xaritasi-moliyaviy-erkinlik.md) —
+// bo'limlarga ajratib keshlaymiz. selectUstozTheme() BITTA bo'limni tanlaydi, FAQAT o'sha bo'lim matni
+// Gemini promptiga qo'shiladi (butun fayl EMAS — token tejash). 7-bo'lim (AI qoidalari) tanlanmaydi.
+let _ustozSectionsCache = null;
+const USTOZ_SECTION_IDS = { '1': 'qarz', '2': 'ozingga_tola', '3': 'aktiv_passiv', '4': 'pul_rejasi', '5': 'vaqt', '6': 'biznes' };
+function loadUstozSections() {
+  if (_ustozSectionsCache) return _ustozSectionsCache;
+  const out = {};
+  try {
+    const md = fs.readFileSync(path.join(__dirname, 'knowledge', 'yol-xaritasi-moliyaviy-erkinlik.md'), 'utf8');
+    for (const part of md.split(/\n## /)) {
+      const m = part.match(/^(\d+)\.\s/);
+      if (m && USTOZ_SECTION_IDS[m[1]]) out[USTOZ_SECTION_IDS[m[1]]] = ('## ' + part).trim();
+    }
+  } catch (e) {
+    console.warn('[USTOZ] Bilimlar bazasi o\'qilmadi:', e.message);
+  }
+  _ustozSectionsCache = out;
+  return out;
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -180,9 +201,9 @@ function getDailyAdvice(date) {
   const all = readJsonFile(DAILY_ADVICE_FILE, {});
   return all[date] || null;
 }
-function saveDailyAdvice(date, data, shopId) {
+function saveDailyAdvice(date, data, shopId, ustozSection) {
   const all = readJsonFile(DAILY_ADVICE_FILE, {});
-  all[date] = { shopId, data, generatedAt: new Date().toISOString() };
+  all[date] = { shopId, data, ustozSection: ustozSection || null, generatedAt: new Date().toISOString() };
   writeJsonFile(DAILY_ADVICE_FILE, all);
 }
 const SNAPSHOT_RETENTION_DAYS = 60;
@@ -2017,6 +2038,43 @@ async function formatGoalBreakdown() {
   return lines.join('\n');
 }
 
+// 19-FF: oxirgi N kunda ishlatilgan Ustoz bo'limlari (daily_advice.json'dan) — anti-takror uchun.
+function recentUstozSections(days = 7) {
+  const all = readJsonFile(DAILY_ADVICE_FILE, {});
+  const today = todayTashkent();
+  return Object.keys(all).sort().filter(dt => dt !== today).slice(-days)
+    .map(dt => all[dt] && all[dt].ustozSection).filter(Boolean);
+}
+
+// 19-FF: kunning HAQIQIY holatiga (kod hisoblaydi, taxmin YO'Q) qarab BITTA motivatsion bo'lim tanlaydi.
+//  - Naqd oqim manfiy YOKI yaqin (≤10 kun) kredit to'lovi -> "qarz" (FAVQULODDA — anti-takrordan mustasno).
+//  - Oylik maqsad sur'atidan orqada -> "ozingga_tola" (harakatga undash); oldinda/erishgan -> "aktiv_passiv".
+//  - Signal yo'q/afzal bo'lim yaqinda ishlatilgan -> qolganlaridan navbat bilan (7-kun anti-takror).
+async function selectUstozTheme() {
+  const sections = loadUstozSections();
+  const pack = (id, reason, urgent) => ({ sectionId: id, sectionText: sections[id] || '', reason, urgent });
+  const recent = recentUstozSections(7);
+
+  const cf = await computeCashFlow();
+  const warns = creditWarnings();
+  if ((cf.ok && cf.netCashFlow < 0) || warns.length) {
+    return pack('qarz', warns.length ? 'yaqin kredit to\'lovi' : 'naqd oqim manfiy', true);
+  }
+
+  let preferred = null, reason = null;
+  const goal = await computeGoalProgress();
+  if (goal.ok) {
+    if (goal.projected < goal.target) { preferred = 'ozingga_tola'; reason = 'maqsad sur\'atidan orqada'; }
+    else { preferred = 'aktiv_passiv'; reason = 'maqsaddan oldinda/erishgan'; }
+  }
+  if (preferred && !recent.includes(preferred)) return pack(preferred, reason, false);
+
+  // Rotation: "qarz" bundan tashqarida (u faqat favqulodda). Oxirgi 7 kunda ishlatilmagani tanlanadi.
+  const pool = ['ozingga_tola', 'aktiv_passiv', 'pul_rejasi', 'vaqt', 'biznes'];
+  const fresh = pool.find(id => !recent.includes(id));
+  return pack(fresh || pool[0], fresh ? 'navbat (7-kun anti-takror)' : 'navbat (hammasi yaqinda ishlatilgan)', false);
+}
+
 function formatMaqsadBlock(progress) {
   if (!progress || !progress.ok) return null;
   const lines = [
@@ -2199,6 +2257,11 @@ async function generateAiAdvice(shopId) {
     const ctx = await buildAiContext(shopId);
     const kb = loadKnowledgeBase().replace(/## 6\. RAQOBATCHILAR[\s\S]*?(?=\n## 7\.)/, ''); // raqobatchilar bo'limini token tejash uchun chiqaramiz
     const biz = loadBusinessPrinciplesCondensed();
+    // 19-FF: bugungi holatga mos BITTA motivatsion bo'lim (kod tanlaydi); faqat o'sha bo'lim promptga kiradi.
+    const ustoz = await selectUstozTheme();
+    const ustozBlock = ustoz.sectionText
+      ? `\n=== USTOZ uchun TANLANGAN bo'lim (bugun: ${ustoz.reason}) ===\n${ustoz.sectionText}\n`
+      : '';
 
     const ai = new GoogleGenAI({ apiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } });
 
@@ -2220,7 +2283,7 @@ ${kb}
 
 === BIZNES VA MOLIYA TAMOYILLARI ===
 ${biz}
-
+${ustozBlock}
 === JORIY HOLAT (real ma'lumot) ===
 ${ctx.text}
 
@@ -2233,7 +2296,8 @@ ko'rsatiladi, sen faqat FIKR-MULOHAZA yoz:
   ],
   "maqsad_reja": "Agar maqsad qo'yilgan bo'lsa: unga erishish uchun qisqa strategik reja (1-2 jumla). Yo'q bo'lsa bo'sh string.",
   "moliya_sharh": "Naqd oqim/kredit holati haqida 1 qisqa jumla (masalan taqchillik xavfi bo'lsa). Yo'q bo'lsa bo'sh string.",
-  "xitoy_izoh": "Xitoy buyurtma haqida qisqa izoh, yoki 'Hozircha shoshilinch buyurtma kerak emas'."
+  "xitoy_izoh": "Xitoy buyurtma haqida qisqa izoh, yoki 'Hozircha shoshilinch buyurtma kerak emas'.",
+  "ustoz_gap": "Yuqoridagi 'USTOZ uchun TANLANGAN bo'lim' asosida, foydalanuvchining BUGUNGI HAQIQIY raqamlari (JORIY HOLATdagi maqsad bajarilishi, naqd oqim, qarz/kredit) bilan bog'langan qisqa (2-3 jumla), aniq, hukm qilmaydigan motivatsion gap. Faqat SHU tanlangan bo'lim mavzusida yoz. RAQAMNI O'ZING TO'QIMA — faqat kontekstda berilgan haqiqiy raqamlardan foydalan, bo'lmasa raqamsiz yoz. Bo'lim tanlanmagan bo'lsa bo'sh string."
 }`;
 
     let parsedData;
@@ -2246,7 +2310,7 @@ ko'rsatiladi, sen faqat FIKR-MULOHAZA yoz:
       const retryPrompt = prompt + '\n\nMUHIM: Javobni albatta TO\'LIQ, QISQA va YOPIQ JSON qilib yakunlang, ortiqcha izoh yozmang.';
       parsedData = await callGeminiJson(ai, retryPrompt);
     }
-    return { ok: true, data: parsedData, raw: ctx.raw };
+    return { ok: true, data: parsedData, raw: ctx.raw, ustozSection: ustoz.sectionId };
   } catch (err) {
     console.error("AI murabbiy xato:", err);
     return { ok: false, error: "AI murabbiy bilan bog'lanishda xato: " + err.message };
@@ -2300,7 +2364,7 @@ async function aiAdviceToText(d, raw) {
 // generatsiya qilish" tugmasi ikkalasi ham shu funksiyani ishlatadi — bir xil kesh yozish naqshi.
 async function generateAndCacheDailyAdvice(shopId) {
   const result = await generateAiAdvice(shopId);
-  if (result.ok) saveDailyAdvice(todayTashkent(), result.data, shopId);
+  if (result.ok) saveDailyAdvice(todayTashkent(), result.data, shopId, result.ustozSection);
   return result;
 }
 
@@ -2346,6 +2410,17 @@ async function sendStaggeredAdvice(part) {
     xitoyShops = await computeXitoyAllShops();
     const lines = ['📦 *XITOYDAN BUYURTMA*', formatXitoyMultiShop(xitoyShops)];
     lines.push('', "Ertaga yana ko'rishguncha! 👋");
+    msg = lines.join('\n');
+  } else if (part === 'ustoz') {
+    // 19-FF: motivatsion "Ustoz" gapi — 05:30 keshidagi matn (Gemini yozgan, bugungi raqamlarga bog'liq).
+    const gap = (d.ustoz_gap || '').trim();
+    if (!gap) return; // bo'lim tanlanmagan yoki bilimlar bazasi yo'q — jim o'tkazamiz
+    const lines = ['🧭 *Ustoz maslahati*', '', gap];
+    // Qarz/kredit mavzusi bo'lsa — yaqin to'lov(lar)ni JONLI (aniq) qo'shamiz.
+    if (cached.ustozSection === 'qarz') {
+      const warns = creditWarnings();
+      if (warns.length) lines.push('', ...warns);
+    }
     msg = lines.join('\n');
   }
   if (msg) await sendTelegramMessage(token, ADMIN_CHAT_ID, msg);
@@ -5031,11 +5106,11 @@ if (process.env.UZUM_TOKEN && process.env.GEMINI_API_KEY) {
   console.log('[CRON] Kunlik AI generatsiya rejalashtirildi: har kuni 05:30 Asia/Tashkent vaqtida.');
 }
 if (process.env.TELEGRAM_BOT_TOKEN) {
-  const stages = [['0 6 * * *', 'ish0'], ['0 9 * * *', 'ish1'], ['0 12 * * *', 'ish2'], ['0 15 * * *', 'moliya'], ['0 18 * * *', 'maqsad'], ['0 21 * * *', 'xitoy']];
+  const stages = [['0 6 * * *', 'ish0'], ['0 8 * * *', 'ustoz'], ['0 9 * * *', 'ish1'], ['0 12 * * *', 'ish2'], ['0 15 * * *', 'moliya'], ['0 18 * * *', 'maqsad'], ['0 21 * * *', 'xitoy']];
   stages.forEach(([spec, part]) => {
     cron.schedule(spec, () => sendStaggeredAdvice(part).catch(e => console.error(`[CRON] AI bosqich "${part}" xato:`, e)), { timezone: 'Asia/Tashkent' });
   });
-  console.log('[CRON] AI bosqichma-bosqich yuborish rejalashtirildi: 06:00, 09:00, 12:00, 15:00, 18:00, 21:00 Asia/Tashkent.');
+  console.log('[CRON] AI bosqichma-bosqich yuborish rejalashtirildi: 06:00, 08:00(ustoz), 09:00, 12:00, 15:00, 18:00, 21:00 Asia/Tashkent.');
 }
 
 // 19-AA: qarz eslatmalari — mavjud croplardan alohida vaqtlarda. Berilgan qarz kunlik (10:00),
