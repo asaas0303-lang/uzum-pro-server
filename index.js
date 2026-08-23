@@ -1897,7 +1897,9 @@ async function buildAiContext(shopId) {
     // 19-S: deterministik formatlash uchun struktura ma'lumot — Gemini matnidan MUSTAQIL, allaqachon
     // hisoblangan qiymatlarning o'zi (formatMoliyaBlock/formatMaqsadBlock/formatXitoyBlock ishlatadi).
     raw: {
-      fin, cf, goal, credits: syncedState.credits || [],
+      // 19-DD: `goal` bu yerda YO'Q — OYLIK MAQSAD endi computeGoalProgress() orqali (barcha do'konlar
+      // yig'indisi, kalendar oy), bitta do'konga bog'liq `raw`dan mustaqil hisoblanadi.
+      fin, cf, credits: syncedState.credits || [],
       reorderSkus: skuRows.filter(r => r.needsReorder).map(r => ({ title: r.title, stockDays: r.stockDays })),
       // 19-T: barcha hisoblanadigan SKU (needsReorder'dan qat'iy nazar) — Xitoy bo'limida "eng yaqin
       // muddat" ko'rsatish uchun, computeSkuMetrics()dagi stockDays'dan (qayta hisob YO'Q).
@@ -1924,15 +1926,45 @@ function formatMoliyaBlock(raw) {
   if (raw.cf && raw.cf.ok && raw.cf.creditRemaining > 0) lines.push(`• 📉 Umumiy qarz: *${fmtMoney(raw.cf.creditRemaining)} so'm*`);
   return lines.length ? lines.join('\n') : null;
 }
-function formatMaqsadBlock(raw) {
-  if (!raw.goal || !raw.fin || !raw.fin.ok) return null;
-  const current = raw.fin.revenue || 0;
-  const target = raw.goal.target || 0;
-  if (target <= 0) return null;
-  const pct = (current / target) * 100;
+// 19-DD: Maqsad hisobi — BARCHA faol do'konlar YIG'INDISI, KALENDAR OY boshidan bugungacha (thismonth).
+// Yagona manba: /maqsad, /maslahat, kunlik AI-bosqich, dashboard maslahat-kartochkasi — hammasi shu
+// funksiyadan foydalanadi (avval ikkita mustaqil hisob bor edi: rolling-30-kun + BITTA do'kon
+// (formatMaqsadBlock/raw.fin) vs kalendar-oy + YIG'INDI (maqsadCommandText) — ikkisi turli natija berardi).
+async function computeGoalProgress() {
+  const goals = syncedState.goals || [];
+  if (!goals.length) return { ok: false, hasGoal: false, hasData: false, target: 0 };
+  const goal = goals[goals.length - 1]; // bitta faol maqsad (frontend bitta saqlaydi)
+  const target = goal.target || 0;
+
+  const today = todayTashkent();
+  const day = parseInt(today.slice(8, 10), 10) || 1;
+  const daysInMonth = new Date(parseInt(today.slice(0, 4), 10), parseInt(today.slice(5, 7), 10), 0).getDate();
+  const daysLeft = Math.max(1, daysInMonth - day);
+
+  let current = 0, hasData = false;
+  for (const shop of (syncedState.shops || [])) {
+    const fin = await computeSalesFromOrders(shop.shopId, 'thismonth');
+    if (fin.ok) { current += (fin.revenue || 0); hasData = true; }
+  }
+  if (!hasData) return { ok: false, hasGoal: true, hasData: false, target, day, daysInMonth, daysLeft };
+
+  const pct = target > 0 ? (current / target) * 100 : 0;
   const remaining = Math.max(0, target - current);
-  const lines = [`• 📈 Bajarildi: *${pct.toFixed(1)}%*`, `• 💰 Hozirgi aylanma: *${fmtMoney(current)} so'm*`];
-  if (remaining > 0) lines.push(`• 🎯 Maqsadgacha qoldi: *${fmtMoney(remaining)} so'm*`);
+  const projected = day > 0 ? (current / day * daysInMonth) : 0;
+  const dailyNeed = remaining > 0 ? remaining / daysLeft : 0;
+  return { ok: target > 0, hasGoal: true, hasData: true, target, current, pct, remaining, projected, dailyNeed, daysLeft, day, daysInMonth };
+}
+
+function formatMaqsadBlock(progress) {
+  if (!progress || !progress.ok) return null;
+  const lines = [
+    `• 📈 Bajarildi: *${progress.pct.toFixed(1)}%*`,
+    `• 💰 Hozirgi aylanma (bu oy, barcha do'konlar): *${fmtMoney(progress.current)} so'm*`
+  ];
+  if (progress.remaining > 0) {
+    lines.push(`• 🎯 Maqsadgacha qoldi: *${fmtMoney(progress.remaining)} so'm*`);
+    lines.push(`• 📅 Kuniga kerakli sur'at: *${fmtMoney(progress.dailyNeed)} so'm* (qolgan ${progress.daysLeft} kunda)`);
+  }
   return lines.join('\n');
 }
 // 19-CC: eng kam zaxira-kun qolgan 2-3 ta SKU (needsReorder'dan qat'iy nazar — maqsad eng yaqin
@@ -2188,7 +2220,7 @@ async function aiAdviceToText(d, raw) {
     });
   }
 
-  const maqsadBlock = formatMaqsadBlock(raw);
+  const maqsadBlock = formatMaqsadBlock(await computeGoalProgress());
   if (maqsadBlock) {
     lines.push('🎯 *OYLIK MAQSAD*');
     lines.push(maqsadBlock);
@@ -2243,7 +2275,7 @@ async function sendStaggeredAdvice(part) {
     if (d.moliya_sharh) lines.push(`• ${d.moliya_sharh}`);
     msg = lines.join('\n');
   } else if (part === 'maqsad') {
-    const block = formatMaqsadBlock(raw);
+    const block = formatMaqsadBlock(await computeGoalProgress());
     if (!block) return; // maqsad qo'yilmagan
     const lines = ['🎯 *OYLIK MAQSAD*', block];
     if (d.maqsad_reja) lines.push(`• Reja: ${d.maqsad_reja}`);
@@ -2268,7 +2300,7 @@ async function sendStaggeredAdvice(part) {
 async function buildDashboardAdviceShape(d, raw) {
   const strip = s => (s || '').replace(/\*/g, '');
   const moliyaBlock = strip(formatMoliyaBlock(raw));
-  const maqsadBlock = strip(formatMaqsadBlock(raw));
+  const maqsadBlock = strip(formatMaqsadBlock(await computeGoalProgress()));
   return {
     moliya_holati: [moliyaBlock, d.moliya_sharh].filter(Boolean).join('\n') || null,
     bugungi_ishlar: (Array.isArray(d.bugungi_ishlar) ? d.bugungi_ishlar : []).filter(Boolean).map(x =>
@@ -2639,42 +2671,25 @@ async function moliyaCommandText() {
   return lines.join('\n');
 }
 
-// 18-D1: /maqsad buyrug'i matni — oylik aylanma maqsadi vs joriy holat.
+// 18-D1: /maqsad buyrug'i matni — oylik aylanma maqsadi vs joriy holat. Hisob computeGoalProgress()da
+// (19-DD) — /maslahat va boshqa joylar bilan BIR XIL manba, ikki xil hisob mantig'i qaytarilmasin.
 async function maqsadCommandText() {
-  const goals = syncedState.goals || [];
-  if (!goals.length) {
+  const progress = await computeGoalProgress();
+  if (!progress.hasGoal) {
     return '🎯 *Maqsad qo\'yilmagan.*\n\nDashboard → Moliya bo\'limidan oylik aylanma maqsadingizni kiriting. Keyin bu yerda har kun qancha yaqinlashayotganingizni ko\'rasiz.';
-  }
-  const month = todayTashkent().slice(0, 7);
-  const goal = goals[goals.length - 1]; // bitta faol maqsad (frontend bitta saqlaydi)
-  const target = goal.target || 0;
-
-  // 18-FIX: Joriy oy aylanmasi — finance/orders (kalendar oy boshidan bugungacha, aniq)
-  let currentTurnover = 0, hasData = false;
-  const day = parseInt(todayTashkent().slice(8, 10), 10) || 1;
-  for (const shop of (syncedState.shops || [])) {
-    const fin = await computeSalesFromOrders(shop.shopId, 'thismonth');
-    if (fin.ok) { currentTurnover += (fin.revenue || 0); hasData = true; }
   }
 
   const lines = [];
-  lines.push(`🎯 *Maqsad: ${fmtMoney(target)} so'm/oy aylanma*`);
+  lines.push(`🎯 *Maqsad: ${fmtMoney(progress.target)} so'm/oy aylanma*`);
   lines.push('');
-  if (!hasData) {
+  if (!progress.hasData) {
     lines.push('Joriy aylanma ma\'lumoti hali yetarli emas (snapshot to\'planmoqda).');
   } else {
-    const pct = target > 0 ? (currentTurnover / target * 100) : 0;
-    const daysInMonth = new Date(parseInt(month.slice(0, 4)), parseInt(month.slice(5, 7)), 0).getDate();
-    const projected = day > 0 ? (currentTurnover / day * daysInMonth) : 0;
-    lines.push(`Bu oy ${day} kunda: ${fmtMoney(currentTurnover)} so'm (${fmtPct(pct)}%)`);
-    lines.push(`Shu sur'atda oy oxiriga: ~${fmtMoney(projected)} so'm`);
+    lines.push(`Bu oy ${progress.day} kunda: ${fmtMoney(progress.current)} so'm (${fmtPct(progress.pct)}%)`);
+    lines.push(`Shu sur'atda oy oxiriga: ~${fmtMoney(progress.projected)} so'm`);
     lines.push('');
-    if (projected >= target) lines.push('✅ Shu sur\'atda maqsadga yetasiz — davom eting!');
-    else {
-      const need = target - currentTurnover;
-      const daysLeft = Math.max(1, daysInMonth - day);
-      lines.push(`⚠️ Yetishmayapti. Maqsad uchun qolgan ${daysLeft} kunda kuniga ~${fmtMoney(need / daysLeft)} so'm aylanma kerak.`);
-    }
+    if (progress.projected >= progress.target) lines.push('✅ Shu sur\'atda maqsadga yetasiz — davom eting!');
+    else lines.push(`⚠️ Yetishmayapti. Maqsad uchun qolgan ${progress.daysLeft} kunda kuniga ~${fmtMoney(progress.dailyNeed)} so'm aylanma kerak.`);
   }
   lines.push('');
   lines.push('/moliya — pul holati · /maslahat — AI murabbiy');
