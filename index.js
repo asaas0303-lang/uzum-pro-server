@@ -205,13 +205,26 @@ function readJsonFile(file, fallback) {
   }
 }
 
+// ATOMIK yozuv: avval .tmp faylga yozamiz + fsync (diskka haqiqatan tushishi uchun), keyin rename.
+// rename atomik — restart yozuv paytiga to'g'ri kelsa ham, asl fayl YO eski YO yangi holatda qoladi,
+// hech qachon yarim-buzuq bo'lmaydi. (Invoice toshqinining ildiz sababi shu edi: eski fs.writeFileSync
+// atomik emas edi — restart yozuv o'rtasida faylni buzib, keyin barcha eski invoice "yangi" bo'lardi.)
 function writeJsonFile(file, data) {
+  const tmp = file + '.tmp';
   try {
     ensureDataDir();
-    fs.writeFileSync(file, JSON.stringify(data, null, 2));
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeSync(fd, JSON.stringify(data, null, 2));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, file);
     return true;
   } catch (err) {
     console.error(`[DISK] ${path.basename(file)} yozishda xato (crash bo'lmaydi):`, err.message);
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* tmp qoldig'i muhim emas */ }
     return false;
   }
 }
@@ -3358,6 +3371,7 @@ const pendingPartialAmount = new Map(); // chatId -> { id, kind: 'lent'|'debt', 
 function finId() { return 'f_' + Date.now() + '_' + Math.floor(Math.random() * 1000); }
 
 let invoiceSyncInProgress = false; // 19-C: kunlik va 20-daqiqalik cron bir vaqtda ustma-ust tushmasin (bir xil invoice_state.json'ni o'qib-yozadi)
+const INVOICE_FLOOD_LIMIT = 20; // bitta run'da shundan ko'p xabar chiqsa — toshqin deb hisoblanadi (oxirgi himoya)
 async function runInvoiceSync() {
   if (invoiceSyncInProgress) {
     console.log('[INVOICE] Oldingi sinxron hali tugamagan — bu chaqiruv o\'tkazib yuborildi.');
@@ -3370,8 +3384,22 @@ async function runInvoiceSync() {
   if (!fetchRes.ok) { console.error('[INVOICE] olinmadi:', fetchRes.error); return { ok: false, error: fetchRes.error }; }
   const invoices = fetchRes.invoices;
 
+  // Holat o'qish — UCH holatni ANIQ ajratamiz: (1) fayl yo'q -> firstRun (baseline to'g'ri);
+  // (2) fayl bor lekin BUZUQ -> BEKOR (readJsonFile'ning "bo'sh holat" fallback'ini ISHLATMAYMIZ,
+  // aks holda barcha eski invoice "yangi" bo'lib toshqin bo'lardi — aynan shu xato bo'lgan edi);
+  // (3) fayl bor va yaroqli -> normal.
   const firstRun = !fs.existsSync(INVOICE_STATE_FILE);
-  const st = readJsonFile(INVOICE_STATE_FILE, { deducted: [], acceptedNotified: [] });
+  let st;
+  if (firstRun) {
+    st = { deducted: [], acceptedNotified: [] };
+  } else {
+    try {
+      st = JSON.parse(fs.readFileSync(INVOICE_STATE_FILE, 'utf8'));
+    } catch (e) {
+      console.error('[INVOICE] invoice_state.json BUZUQ — sync bu run uchun BEKOR qilindi (toshqin oldini olish). Keyingi run davom etadi:', e.message);
+      return { ok: false, corrupt: true };
+    }
+  }
   const deducted = new Set(st.deducted || []);
   const acceptedNotified = new Set(st.acceptedNotified || []);
   // Re-sort himoyasi uchun: allaqachon "qayta-saralash" deb hisobga olingan rad-etilgan yozuvlar,
@@ -3390,6 +3418,27 @@ async function runInvoiceSync() {
     writeJsonFile(INVOICE_STATE_FILE, { deducted: [...deducted], acceptedNotified: [...acceptedNotified] });
     console.log(`[INVOICE] Birinchi run — ${invoices.length} ta yuk xati bazaviy belgilandi (ayirish/xabar yo'q).`);
     return { ok: true, firstRun: true, baselined: invoices.length };
+  }
+
+  // TOSHQIN HIMOYASI (oxirgi chiziq): xabar chiqaradigan invoice sonini mutatsiyalardan OLDIN sanaymiz.
+  // INVOICE_FLOOD_LIMIT'dan oshsa — bu g'ayrioddiy (boshqa noma'lum sabab). Hech narsani o'zgartirmasdan
+  // (zaxira/holat tegilmaydi) BITTA ogohlantirish yuboramiz va to'xtaymiz — 200 ta xabar o'rniga.
+  let wouldNotify = 0;
+  for (const inv of invoices) {
+    const status = inv.invoiceStatus && inv.invoiceStatus.value;
+    if (status === 'CANCELED' && invoiceDeductions[inv.id] && Object.keys(invoiceDeductions[inv.id]).length) wouldNotify++; // bekor->tiklash
+    if (!deducted.has(inv.id)) wouldNotify++; // yangi (ayirish yoki bekor xabari)
+    if (status === 'ACCEPTED' && !acceptedNotified.has(inv.id)) wouldNotify++; // qabul xabari
+  }
+  if (wouldNotify > INVOICE_FLOOD_LIMIT) {
+    console.error(`[INVOICE] TOSHQIN himoyasi: ${wouldNotify} ta invoice o'zgargan ko'rinadi (limit ${INVOICE_FLOOD_LIMIT}) — xabarlar YUBORILMADI, holat o'zgartirilmadi.`);
+    if (token && ADMIN_CHAT_ID) {
+      try {
+        await sendTelegramMessage(token, ADMIN_CHAT_ID,
+          `⚠️ *Diqqat:* ${wouldNotify} ta yuk xati birdan o'zgargan ko'rinadi — bu g'ayrioddiy.\n\nToshqin xabarlarning oldini olish uchun ular yuborilmadi. Iltimos, Uzum kabinetini va dashboard'ni tekshiring.`);
+      } catch (e) { console.error('[INVOICE] toshqin ogohlantirishi yuborilmadi:', e.message); }
+    }
+    return { ok: false, flood: true, count: wouldNotify };
   }
 
   const messages = [];
