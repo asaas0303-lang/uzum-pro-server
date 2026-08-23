@@ -11,6 +11,13 @@ import { Document, Packer, Paragraph, TextRun, AlignmentType } from 'docx';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// OXIRGI HIMOYA CHIZIG'I: bitta buzuq funksiyadagi (masalan aniqlanmagan o'zgaruvchi) kutilmagan xato
+// butun serverni (bot + dashboard + prewarm/kesh holati) yiqitmasin. Faqat LOG qilinadi, process.exit()
+// chaqirilmaydi — Telegram webhook allaqachon res.sendStatus(200) yuborgan bo'lishi mumkin, shuning
+// uchun bu yerdagi xato hech qachon HTTP javobga ta'sir qilmaydi, faqat loglanmasa ko'rinmas bo'lardi.
+process.on('unhandledRejection', (err) => { console.error('[UNHANDLED]', err); });
+process.on('uncaughtException', (err) => { console.error('[UNCAUGHT]', err); });
+
 // 18-C1: Uzum bilimlar bazasi (knowledge/uzum-rules.md) — AI kontekstiga qo'shiladi. Bir marta o'qib keshlanadi.
 let _knowledgeBaseCache = null;
 function loadKnowledgeBase() {
@@ -136,6 +143,11 @@ app.post('/api/app-login', (req, res) => {
 // Shuning uchun HAR DOIM avval Math.round(). Butun serverda FAQAT shu funksiya ishlatilsin.
 function fmtMoney(n) {
   return Math.round(n || 0).toLocaleString('uz-UZ');
+}
+// 19-DD-FIX: maqsadCommandText() bu funksiyani chaqirardi, lekin u hech qachon e'lon qilinmagan
+// edi (ReferenceError, /maqsad har chaqirilganda crash) — n allaqachon foiz sifatida hisoblangan.
+function fmtPct(n) {
+  return Number(n || 0).toFixed(1);
 }
 
 // ============ DISK SAQLASH (2.2) ============
