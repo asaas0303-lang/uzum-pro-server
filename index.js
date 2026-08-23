@@ -1249,6 +1249,13 @@ function periodToDayRange(period) {
     const fromDay = today.slice(0, 8) + '01';
     return { fromDay, toDay: today, spanDays: parseInt(today.slice(8, 10), 10) };
   }
+  if (period === 'thisweek') { // joriy KALENDAR hafta: dushanbadan bugungacha (haftalik maqsad uchun)
+    const t = new Date(today + 'T00:00:00Z');
+    const dow = t.getUTCDay();                     // 0=Yak, 1=Dush, ... 6=Shan
+    const offsetToMonday = dow === 0 ? 6 : dow - 1; // yakshanba -> 6 kun oldingi dushanba
+    const fromDay = new Date(t.getTime() - offsetToMonday * 86400000).toISOString().slice(0, 10);
+    return { fromDay, toDay: today, spanDays: offsetToMonday + 1 };
+  }
   return null;
 }
 
@@ -1951,10 +1958,19 @@ function formatMoliyaBlock(raw) {
   if (raw.cf && raw.cf.ok && raw.cf.creditRemaining > 0) lines.push(`• 📉 Umumiy qarz: *${fmtMoney(raw.cf.creditRemaining)} so'm*`);
   return lines.length ? lines.join('\n') : null;
 }
-// 19-DD: Maqsad hisobi — BARCHA faol do'konlar YIG'INDISI, KALENDAR OY boshidan bugungacha (thismonth).
-// Yagona manba: /maqsad, /maslahat, kunlik AI-bosqich, dashboard maslahat-kartochkasi — hammasi shu
-// funksiyadan foydalanadi (avval ikkita mustaqil hisob bor edi: rolling-30-kun + BITTA do'kon
-// (formatMaqsadBlock/raw.fin) vs kalendar-oy + YIG'INDI (maqsadCommandText) — ikkisi turli natija berardi).
+// 19-EE: BARCHA faol do'konlar bo'yicha revenue YIG'INDISI (bitta davr uchun). Oylik/haftalik/kunlik
+// maqsad — uchalasi SHU funksiyadan foydalanadi, yig'indi mantig'i uch joyda takrorlanmasin (19-DD saboqi).
+async function sumRevenueAcrossShops(period) {
+  let current = 0, hasData = false;
+  for (const shop of (syncedState.shops || [])) {
+    const fin = await computeSalesFromOrders(shop.shopId, period);
+    if (fin.ok) { current += (fin.revenue || 0); hasData = true; }
+  }
+  return { current, hasData };
+}
+
+// 19-DD: OYLIK maqsad hisobi — BARCHA do'konlar YIG'INDISI, KALENDAR OY boshidan bugungacha (thismonth).
+// Yagona manba: /maqsad, /maslahat, kunlik AI-bosqich, dashboard maslahat-kartochkasi.
 async function computeGoalProgress() {
   const goals = syncedState.goals || [];
   if (!goals.length) return { ok: false, hasGoal: false, hasData: false, target: 0 };
@@ -1966,11 +1982,7 @@ async function computeGoalProgress() {
   const daysInMonth = new Date(parseInt(today.slice(0, 4), 10), parseInt(today.slice(5, 7), 10), 0).getDate();
   const daysLeft = Math.max(1, daysInMonth - day);
 
-  let current = 0, hasData = false;
-  for (const shop of (syncedState.shops || [])) {
-    const fin = await computeSalesFromOrders(shop.shopId, 'thismonth');
-    if (fin.ok) { current += (fin.revenue || 0); hasData = true; }
-  }
+  const { current, hasData } = await sumRevenueAcrossShops('thismonth');
   if (!hasData) return { ok: false, hasGoal: true, hasData: false, target, day, daysInMonth, daysLeft };
 
   const pct = target > 0 ? (current / target) * 100 : 0;
@@ -1978,6 +1990,31 @@ async function computeGoalProgress() {
   const projected = day > 0 ? (current / day * daysInMonth) : 0;
   const dailyNeed = remaining > 0 ? remaining / daysLeft : 0;
   return { ok: target > 0, hasGoal: true, hasData: true, target, current, pct, remaining, projected, dailyNeed, daysLeft, day, daysInMonth };
+}
+
+// 19-EE: KUNLIK + HAFTALIK + OYLIK maqsadni bitta matn blokiga jamlaydi. /maqsad va kunlik hisobot
+// (global moliya xabari) — ikkalasi shu bitta formatterdan foydalanadi. Maqsad yo'q/ma'lumot yo'q -> null.
+//  - Kunlik maqsad = oylik ÷ oydagi kunlar soni (FLAT); bugungi (kalendar kun) savdo bilan solishtiriladi.
+//  - Haftalik maqsad = kunlik × 7; bu hafta (KALENDAR, dushanba–bugun) savdo bilan solishtiriladi.
+async function formatGoalBreakdown() {
+  const m = await computeGoalProgress();
+  if (!m.hasGoal) return null;
+  if (!m.hasData) return 'Joriy aylanma ma\'lumoti hali yetarli emas (snapshot to\'planmoqda).';
+
+  const dailyTarget = m.target / m.daysInMonth;
+  const weeklyTarget = dailyTarget * 7; // ponytail: hafta oy chegarasini kessa ham joriy oy dailyTarget'i — kичik yaqinlashish
+  const [d, w] = await Promise.all([sumRevenueAcrossShops('today'), sumRevenueAcrossShops('thisweek')]);
+  const pctOf = (cur, tgt) => tgt > 0 ? (cur / tgt * 100) : 0;
+  const mark = (cur, tgt) => cur >= tgt ? '✅' : '⏳';
+
+  const lines = [];
+  lines.push(`📅 *Bugun:* ${fmtMoney(d.current)} / ${fmtMoney(dailyTarget)} so'm (${fmtPct(pctOf(d.current, dailyTarget))}%) ${mark(d.current, dailyTarget)}`);
+  lines.push(`📆 *Bu hafta* (Dush–Bugun): ${fmtMoney(w.current)} / ${fmtMoney(weeklyTarget)} so'm (${fmtPct(pctOf(w.current, weeklyTarget))}%) ${mark(w.current, weeklyTarget)}`);
+  lines.push(`📊 *Bu oy* (${m.day}/${m.daysInMonth} kun): ${fmtMoney(m.current)} / ${fmtMoney(m.target)} so'm (${fmtPct(m.pct)}%)`);
+  lines.push(`   Shu sur'atda oy oxiriga: ~${fmtMoney(m.projected)} so'm`);
+  if (m.projected >= m.target) lines.push('   ✅ Shu sur\'atda oylik maqsadga yetasiz — davom eting!');
+  else lines.push(`   ⚠️ Yetishmayapti — qolgan ${m.daysLeft} kunda kuniga ~${fmtMoney(m.dailyNeed)} so'm kerak.`);
+  return lines.join('\n');
 }
 
 function formatMaqsadBlock(progress) {
@@ -2696,29 +2733,21 @@ async function moliyaCommandText() {
   return lines.join('\n');
 }
 
-// 18-D1: /maqsad buyrug'i matni — oylik aylanma maqsadi vs joriy holat. Hisob computeGoalProgress()da
-// (19-DD) — /maslahat va boshqa joylar bilan BIR XIL manba, ikki xil hisob mantig'i qaytarilmasin.
+// 18-D1/19-EE: /maqsad buyrug'i matni — kunlik + haftalik + oylik. Hisob formatGoalBreakdown()da
+// (barcha do'konlar yig'indisi, kalendar davrlar) — /maslahat va boshqa joylar bilan BIR XIL manba.
 async function maqsadCommandText() {
   const progress = await computeGoalProgress();
   if (!progress.hasGoal) {
-    return '🎯 *Maqsad qo\'yilmagan.*\n\nDashboard → Moliya bo\'limidan oylik aylanma maqsadingizni kiriting. Keyin bu yerda har kun qancha yaqinlashayotganingizni ko\'rasiz.';
+    return '🎯 *Maqsad qo\'yilmagan.*\n\nDashboard → Moliya bo\'limidan oylik aylanma maqsadingizni kiriting. Keyin bu yerda har kun/hafta/oy qancha yaqinlashayotganingizni ko\'rasiz.';
   }
-
-  const lines = [];
-  lines.push(`🎯 *Maqsad: ${fmtMoney(progress.target)} so'm/oy aylanma*`);
-  lines.push('');
-  if (!progress.hasData) {
-    lines.push('Joriy aylanma ma\'lumoti hali yetarli emas (snapshot to\'planmoqda).');
-  } else {
-    lines.push(`Bu oy ${progress.day} kunda: ${fmtMoney(progress.current)} so'm (${fmtPct(progress.pct)}%)`);
-    lines.push(`Shu sur'atda oy oxiriga: ~${fmtMoney(progress.projected)} so'm`);
-    lines.push('');
-    if (progress.projected >= progress.target) lines.push('✅ Shu sur\'atda maqsadga yetasiz — davom eting!');
-    else lines.push(`⚠️ Yetishmayapti. Maqsad uchun qolgan ${progress.daysLeft} kunda kuniga ~${fmtMoney(progress.dailyNeed)} so'm aylanma kerak.`);
-  }
-  lines.push('');
-  lines.push('/moliya — pul holati · /maslahat — AI murabbiy');
-  return lines.join('\n');
+  const breakdown = await formatGoalBreakdown();
+  return [
+    `🎯 *Maqsad: ${fmtMoney(progress.target)} so'm/oy aylanma*`,
+    '',
+    breakdown,
+    '',
+    '/moliya — pul holati · /maslahat — AI murabbiy'
+  ].join('\n');
 }
 
 async function generateReportText(shopId) {
@@ -3707,6 +3736,15 @@ async function runDailyReport() {
       await sendTelegramMessage(token, ADMIN_CHAT_ID, moneyMsg);
     }
   } catch (err) { console.error('[CRON] Moliya xabarida xato:', err); }
+
+  // 19-EE: kunlik/haftalik/oylik maqsad — barcha do'kon hisobotlaridan keyin BIR MARTA (yig'indi bo'lgani
+  // uchun har do'kon xabarida takrorlanmaydi — 19-DD saboqi). Maqsad qo'yilmagan bo'lsa jim o'tkaziladi.
+  try {
+    const breakdown = await formatGoalBreakdown();
+    if (breakdown) {
+      await sendTelegramMessage(token, ADMIN_CHAT_ID, `🎯 *Maqsad holati*\n\n${breakdown}\n\n/maqsad — batafsil`);
+    }
+  } catch (err) { console.error('[CRON] Maqsad xabarida xato:', err); }
 
   if (anyOk) setLastReportDate(todayTashkent()); // kamida bittasi ketgan bo'lsa ham "bugun bajarildi" deb belgilanadi (catch-up uchun)
   return { success: anyOk, chatIdUsed: ADMIN_CHAT_ID, shops: results };
