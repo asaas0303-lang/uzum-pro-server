@@ -3476,6 +3476,7 @@ function finId() { return 'f_' + Date.now() + '_' + Math.floor(Math.random() * 1
 
 let invoiceSyncInProgress = false; // 19-C: kunlik va 20-daqiqalik cron bir vaqtda ustma-ust tushmasin (bir xil invoice_state.json'ni o'qib-yozadi)
 const INVOICE_FLOOD_LIMIT = 20; // bitta run'da shundan ko'p xabar chiqsa — toshqin deb hisoblanadi (oxirgi himoya)
+const INVOICE_MAX_AGE_DAYS = 90; // shundan eski invoice'lar haqida XABAR YUBORILMAYDI (jimgina baseline qilinadi)
 async function runInvoiceSync() {
   if (invoiceSyncInProgress) {
     console.log('[INVOICE] Oldingi sinxron hali tugamagan — bu chaqiruv o\'tkazib yuborildi.');
@@ -3523,6 +3524,25 @@ async function runInvoiceSync() {
     console.log(`[INVOICE] Birinchi run — ${invoices.length} ta yuk xati bazaviy belgilandi (ayirish/xabar yo'q).`);
     return { ok: true, firstRun: true, baselined: invoices.length };
   }
+
+  // 19-GG: ESKI (> INVOICE_MAX_AGE_DAYS) invoice'lar haqida XABAR YUBORILMAYDI. Ular hali state faylida
+  // yo'q bo'lsa (masalan Uzum tarixi orqaga kengaytirilgan yoki state qisman) jimgina "ishlangan" deb
+  // belgilanadi — kelajakda qayta ishlanmasin. Zaxira mantig'iga tegmaydi: eski akt uchun ayirish/tiklash
+  // ma'nosiz. Bu FLOOD sanashidan OLDIN, chunki eski invoice'lar wouldNotify'ga hisoblanmasligi kerak.
+  let skippedOld = 0;
+  const maxAgeMs = INVOICE_MAX_AGE_DAYS * 86400000;
+  const now = Date.now();
+  for (const inv of invoices) {
+    const ms = invoiceEventMs(inv);
+    if (!ms || (now - ms) <= maxAgeMs) continue;
+    const status = inv.invoiceStatus && inv.invoiceStatus.value;
+    const alreadyKnown = deducted.has(inv.id) && (status !== 'ACCEPTED' || acceptedNotified.has(inv.id));
+    if (alreadyKnown) continue;
+    deducted.add(inv.id);
+    if (status === 'ACCEPTED') acceptedNotified.add(inv.id);
+    skippedOld++;
+  }
+  if (skippedOld) console.log(`[INVOICE-SYNC] ${skippedOld} ta eski invoice chetlab o'tildi (>${INVOICE_MAX_AGE_DAYS} kun) — xabar yuborilmadi, jimgina baseline qilindi.`);
 
   // TOSHQIN HIMOYASI (oxirgi chiziq): xabar chiqaradigan invoice sonini mutatsiyalardan OLDIN sanaymiz.
   // INVOICE_FLOOD_LIMIT'dan oshsa — bu g'ayrioddiy (boshqa noma'lum sabab). Hech narsani o'zgartirmasdan
@@ -5162,6 +5182,10 @@ loadApiCache();
 // T7 (req 6): startupda darhol bir marta kesh isitish — sozlamalar/kesh yuklangandan KEYIN, to'g'ri
 // do'konlar ro'yxati bilan. Fon rejimida (startupni bloklamaydi).
 if (process.env.UZUM_TOKEN) runPrewarm().catch(e => console.error('[PREWARM] startup isitish xato:', e));
+
+// 19-GG: startupda darhol invoice sync — mavjud state faylini yangi 90-kun filtri bilan qayta ishlab,
+// eski invoice'larni jimgina baseline qiladi. Cron 20 daq kutmasin. Fon rejimida (startupni bloklamaydi).
+if (process.env.UZUM_TOKEN) runInvoiceSync().catch(e => console.error('[INVOICE] startup sync xato:', e));
 
 // Catch-up — server to'liq ishga tushgach, fon rejimida (startupni bloklamaydi)
 runStartupCatchUp().catch(e => console.error('[CRON] Catch-up umumiy xato:', e));
